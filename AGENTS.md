@@ -30,7 +30,7 @@
 默认目录关系如下：
 
 ```text
-/Users/hawk_wu/Desktop/
+~/Desktop/
 ├── vllm/          # 上游 vLLM 源码，默认只读
 └── vllm_reader/   # 本项目，存放阅读成果
 ```
@@ -38,7 +38,7 @@
 默认源码目录为：
 
 ```bash
-VLLM_SOURCE_DIR=/Users/hawk_wu/Desktop/vllm
+VLLM_SOURCE_DIR=~/Desktop/vllm
 ```
 
 开始任务前必须确认真实路径和版本：
