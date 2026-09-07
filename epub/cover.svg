@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="2560" viewBox="0 0 1600 2560" role="img" aria-labelledby="title desc">
+  <title id="title">vLLM 源码教程封面</title>
+  <desc id="desc">以请求、调度、KV Cache 和 GPU 执行链路为主题的技术书封面。</desc>
+  <rect width="1600" height="2560" fill="#f8faf9"/>
+  <rect x="0" y="0" width="1600" height="56" fill="#2e8b57"/>
+  <rect x="126" y="250" width="16" height="850" fill="#2e8b57"/>
+  <text x="210" y="430" font-family="Arial, PingFang SC, sans-serif" font-size="132" font-weight="700" fill="#17202a">vLLM</text>
+  <text x="210" y="590" font-family="Arial, PingFang SC, sans-serif" font-size="108" font-weight="700" fill="#17202a">源码教程</text>
+  <text x="216" y="700" font-family="Arial, PingFang SC, sans-serif" font-size="42" fill="#566573">从 Transformer 推理到高吞吐服务系统</text>
+
+  <g transform="translate(210 950)" font-family="Arial, PingFang SC, sans-serif">
+    <rect x="0" y="0" width="280" height="120" rx="8" fill="#eaf2ee" stroke="#2e8b57" stroke-width="4"/>
+    <text x="140" y="74" text-anchor="middle" font-size="36" font-weight="700" fill="#17202a">Request</text>
+    <path d="M290 60 H390" stroke="#566573" stroke-width="8" marker-end="url(#arrow)"/>
+    <rect x="410" y="0" width="280" height="120" rx="8" fill="#eef3f8" stroke="#2471a3" stroke-width="4"/>
+    <text x="550" y="74" text-anchor="middle" font-size="36" font-weight="700" fill="#17202a">Scheduler</text>
+    <path d="M700 60 H800" stroke="#566573" stroke-width="8" marker-end="url(#arrow)"/>
+    <rect x="820" y="0" width="280" height="120" rx="8" fill="#f4ecf7" stroke="#8e44ad" stroke-width="4"/>
+    <text x="960" y="74" text-anchor="middle" font-size="36" font-weight="700" fill="#17202a">GPU</text>
+
+    <rect x="205" y="260" width="690" height="360" rx="8" fill="#ffffff" stroke="#7b7d7d" stroke-width="4"/>
+    <text x="550" y="330" text-anchor="middle" font-size="34" font-weight="700" fill="#17202a">Paged KV Cache</text>
+    <g stroke="#ffffff" stroke-width="6">
+      <rect x="270" y="390" width="120" height="90" fill="#2e8b57"/>
+      <rect x="395" y="390" width="120" height="90" fill="#2471a3"/>
+      <rect x="520" y="390" width="120" height="90" fill="#d35400"/>
+      <rect x="645" y="390" width="120" height="90" fill="#8e44ad"/>
+      <rect x="332" y="485" width="120" height="90" fill="#2471a3"/>
+      <rect x="457" y="485" width="120" height="90" fill="#2e8b57"/>
+      <rect x="582" y="485" width="120" height="90" fill="#8e44ad"/>
+    </g>
+  </g>
+
+  <text x="210" y="2070" font-family="Arial, PingFang SC, sans-serif" font-size="46" fill="#17202a">Engine · Continuous Batching · KV Cache</text>
+  <text x="210" y="2145" font-family="Arial, PingFang SC, sans-serif" font-size="46" fill="#17202a">PagedAttention · CUDA Graph · Multi GPU</text>
+  <line x1="210" y1="2235" x2="1390" y2="2235" stroke="#2e8b57" stroke-width="6"/>
+  <text x="210" y="2335" font-family="Arial, PingFang SC, sans-serif" font-size="34" fill="#566573">源码基线：5893426b · 2026-09-07</text>
+  <text x="210" y="2405" font-family="Arial, PingFang SC, sans-serif" font-size="30" fill="#566573">vLLM Reader Project</text>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#566573"/>
+    </marker>
+  </defs>
+</svg>

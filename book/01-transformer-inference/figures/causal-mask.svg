@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="470" viewBox="0 0 980 470" role="img" aria-labelledby="title desc">
+  <title id="title">长度为四的 causal mask 可见性矩阵</title>
+  <desc id="desc">每一行是 Query 位置，每一列是 Key 位置。下三角和对角线可见，上三角未来位置被屏蔽。</desc>
+  <rect width="980" height="470" fill="#ffffff"/>
+  <text x="490" y="36" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#17202a">Causal Mask：每个 Query 只能读取自己和过去</text>
+  <text x="490" y="66" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#566573">行是 Query，列是 Key；右上角代表未来 token</text>
+
+  <text x="418" y="102" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" font-weight="700" fill="#17202a">Key position</text>
+  <text x="122" y="270" text-anchor="middle" transform="rotate(-90 122 270)" font-family="Arial, sans-serif" font-size="15" font-weight="700" fill="#17202a">Query position</text>
+
+  <g font-family="Arial, sans-serif" font-size="15" text-anchor="middle" fill="#17202a">
+    <text x="270" y="126">K0</text><text x="370" y="126">K1</text><text x="470" y="126">K2</text><text x="570" y="126">K3</text>
+    <text x="190" y="190">Q0</text><text x="190" y="270">Q1</text><text x="190" y="350">Q2</text><text x="190" y="430">Q3</text>
+  </g>
+
+  <g stroke="#ffffff" stroke-width="4">
+    <rect x="220" y="145" width="100" height="80" fill="#2e8b57"/><rect x="320" y="145" width="100" height="80" fill="#d5d8dc"/><rect x="420" y="145" width="100" height="80" fill="#d5d8dc"/><rect x="520" y="145" width="100" height="80" fill="#d5d8dc"/>
+    <rect x="220" y="225" width="100" height="80" fill="#2e8b57"/><rect x="320" y="225" width="100" height="80" fill="#2e8b57"/><rect x="420" y="225" width="100" height="80" fill="#d5d8dc"/><rect x="520" y="225" width="100" height="80" fill="#d5d8dc"/>
+    <rect x="220" y="305" width="100" height="80" fill="#2e8b57"/><rect x="320" y="305" width="100" height="80" fill="#2e8b57"/><rect x="420" y="305" width="100" height="80" fill="#2e8b57"/><rect x="520" y="305" width="100" height="80" fill="#d5d8dc"/>
+    <rect x="220" y="385" width="100" height="80" fill="#2e8b57"/><rect x="320" y="385" width="100" height="80" fill="#2e8b57"/><rect x="420" y="385" width="100" height="80" fill="#2e8b57"/><rect x="520" y="385" width="100" height="80" fill="#2e8b57"/>
+  </g>
+
+  <g font-family="Arial, sans-serif" font-size="14" text-anchor="middle" font-weight="700">
+    <g fill="#ffffff">
+      <text x="270" y="190">可见</text><text x="270" y="270">可见</text><text x="370" y="270">可见</text>
+      <text x="270" y="350">可见</text><text x="370" y="350">可见</text><text x="470" y="350">可见</text>
+      <text x="270" y="430">可见</text><text x="370" y="430">可见</text><text x="470" y="430">可见</text><text x="570" y="430">可见</text>
+    </g>
+    <g fill="#626567">
+      <text x="370" y="190">屏蔽</text><text x="470" y="190">屏蔽</text><text x="570" y="190">屏蔽</text>
+      <text x="470" y="270">屏蔽</text><text x="570" y="270">屏蔽</text><text x="570" y="350">屏蔽</text>
+    </g>
+  </g>
+
+  <rect x="660" y="165" width="22" height="22" fill="#2e8b57"/><text x="692" y="181" font-family="Arial, sans-serif" font-size="14" fill="#17202a">参与 attention</text>
+  <rect x="660" y="205" width="22" height="22" fill="#d5d8dc"/><text x="692" y="221" font-family="Arial, sans-serif" font-size="14" fill="#17202a">未来位置被 mask</text>
+</svg>

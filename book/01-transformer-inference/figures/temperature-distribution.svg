@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="500" viewBox="0 0 1200 500" role="img" aria-labelledby="title desc">
+  <title id="title">Temperature 对相同 logits 概率分布的影响</title>
+  <desc id="desc">固定 logits 为 4、2、1、0。温度从 0.5 增加到 2.0 时，最高概率下降，分布变平。</desc>
+  <rect width="1200" height="500" fill="#ffffff"/>
+  <text x="600" y="34" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#17202a">固定 logits [4, 2, 1, 0]，只改变 Temperature</text>
+  <text x="600" y="62" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" fill="#566573">柱高为 softmax(logits / T)；T 越高，分布越平</text>
+
+  <g font-family="Arial, sans-serif">
+    <g transform="translate(40 95)">
+      <text x="135" y="0" text-anchor="middle" font-size="18" font-weight="700" fill="#17202a">T = 0.5</text>
+      <line x1="20" y1="310" x2="270" y2="310" stroke="#7b7d7d"/><line x1="20" y1="20" x2="20" y2="310" stroke="#7b7d7d"/>
+      <rect x="42" y="26" width="38" height="284" fill="#2471a3"/><rect x="98" y="305" width="38" height="5" fill="#d35400"/><rect x="154" y="309" width="38" height="1" fill="#239b56"/><rect x="210" y="309" width="38" height="1" fill="#8e44ad"/>
+      <g text-anchor="middle" font-size="12" fill="#17202a"><text x="61" y="22">97.93%</text><text x="117" y="300">1.79%</text><text x="173" y="300">0.24%</text><text x="229" y="300">0.03%</text><text x="61" y="332">A</text><text x="117" y="332">B</text><text x="173" y="332">C</text><text x="229" y="332">D</text></g>
+    </g>
+    <g transform="translate(455 95)">
+      <text x="135" y="0" text-anchor="middle" font-size="18" font-weight="700" fill="#17202a">T = 1.0</text>
+      <line x1="20" y1="310" x2="270" y2="310" stroke="#7b7d7d"/><line x1="20" y1="20" x2="20" y2="310" stroke="#7b7d7d"/>
+      <rect x="42" y="69" width="38" height="241" fill="#2471a3"/><rect x="98" y="277" width="38" height="33" fill="#d35400"/><rect x="154" y="298" width="38" height="12" fill="#239b56"/><rect x="210" y="306" width="38" height="4" fill="#8e44ad"/>
+      <g text-anchor="middle" font-size="12" fill="#17202a"><text x="61" y="62">83.10%</text><text x="117" y="270">11.25%</text><text x="173" y="291">4.14%</text><text x="229" y="299">1.52%</text><text x="61" y="332">A</text><text x="117" y="332">B</text><text x="173" y="332">C</text><text x="229" y="332">D</text></g>
+    </g>
+    <g transform="translate(870 95)">
+      <text x="135" y="0" text-anchor="middle" font-size="18" font-weight="700" fill="#17202a">T = 2.0</text>
+      <line x1="20" y1="310" x2="270" y2="310" stroke="#7b7d7d"/><line x1="20" y1="20" x2="20" y2="310" stroke="#7b7d7d"/>
+      <rect x="42" y="142" width="38" height="168" fill="#2471a3"/><rect x="98" y="248" width="38" height="62" fill="#d35400"/><rect x="154" y="273" width="38" height="37" fill="#239b56"/><rect x="210" y="287" width="38" height="23" fill="#8e44ad"/>
+      <g text-anchor="middle" font-size="12" fill="#17202a"><text x="61" y="135">57.93%</text><text x="117" y="241">21.31%</text><text x="173" y="266">12.93%</text><text x="229" y="280">7.84%</text><text x="61" y="332">A</text><text x="117" y="332">B</text><text x="173" y="332">C</text><text x="229" y="332">D</text></g>
+    </g>
+  </g>
+
+  <g transform="translate(360 455)" font-family="Arial, sans-serif" font-size="13" fill="#17202a">
+    <rect x="0" y="-14" width="16" height="16" fill="#2471a3"/><text x="24" y="0">A, logit 4</text>
+    <rect x="130" y="-14" width="16" height="16" fill="#d35400"/><text x="154" y="0">B, logit 2</text>
+    <rect x="260" y="-14" width="16" height="16" fill="#239b56"/><text x="284" y="0">C, logit 1</text>
+    <rect x="390" y="-14" width="16" height="16" fill="#8e44ad"/><text x="414" y="0">D, logit 0</text>
+  </g>
+</svg>

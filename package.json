@@ -1,0 +1,9 @@
+{
+  "name": "vllm-reader-book-tools",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local diagram rendering tools for the vLLM source guide",
+  "devDependencies": {
+    "@mermaid-js/mermaid-cli": "11.17.0"
+  }
+}

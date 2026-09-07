@@ -1,0 +1,74 @@
+body {
+  font-family: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  line-height: 1.7;
+  color: #17202a;
+}
+
+h1, h2, h3, h4 {
+  line-height: 1.3;
+  page-break-after: avoid;
+}
+
+h1 {
+  border-bottom: 2px solid #2e8b57;
+  padding-bottom: 0.35em;
+}
+
+h2 {
+  margin-top: 1.8em;
+  color: #1f4f3b;
+}
+
+blockquote {
+  margin: 1em 0;
+  padding: 0.5em 1em;
+  border-left: 4px solid #2e8b57;
+  background: #f4f7f5;
+}
+
+code {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.9em;
+}
+
+pre {
+  padding: 0.8em;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  background: #f2f3f4;
+  border: 1px solid #d5d8dc;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+  font-size: 0.9em;
+}
+
+th, td {
+  border: 1px solid #bfc5c9;
+  padding: 0.4em;
+  vertical-align: top;
+}
+
+th {
+  background: #eaf2ee;
+}
+
+img, svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 1em auto;
+}
+
+.diagram {
+  page-break-inside: avoid;
+}
+
+details {
+  margin: 0.8em 0;
+  padding: 0.5em;
+  border: 1px solid #d5d8dc;
+}

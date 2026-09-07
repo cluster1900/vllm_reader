@@ -1,0 +1,17 @@
+{
+  "theme": "base",
+  "securityLevel": "strict",
+  "fontFamily": "Arial, PingFang SC, Microsoft YaHei, sans-serif",
+  "themeVariables": {
+    "primaryColor": "#eaf2ee",
+    "primaryTextColor": "#17202a",
+    "primaryBorderColor": "#2e8b57",
+    "lineColor": "#566573",
+    "secondaryColor": "#eef3f8",
+    "tertiaryColor": "#f7f7f7"
+  },
+  "flowchart": {
+    "htmlLabels": false,
+    "curve": "linear"
+  }
+}

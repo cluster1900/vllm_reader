@@ -1,0 +1,9 @@
+title: "vLLM 源码教程"
+subtitle: "从 Transformer 推理到调度、KV Cache、PagedAttention 与多 GPU"
+author:
+  - "vLLM Reader Project"
+lang: zh-CN
+date: "2026-09-07"
+rights: "本书正文采用项目约定许可；上游 vLLM 源码归原项目贡献者所有。"
+description: "面向有 Python 开发经验读者的 vLLM V1 源码导读。"
+publisher: "vLLM Reader Project"
