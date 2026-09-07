@@ -10,7 +10,6 @@
 ## 当前基线
 
 - 上游仓库：`vllm-project/vllm`
-- 本地源码：`/Users/hawk_wu/Desktop/vllm`
 - 分支：`main`
 - Commit：`5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`
 - 基线日期：2026-09-07
