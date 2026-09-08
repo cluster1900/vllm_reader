@@ -126,6 +126,24 @@ V1 `InputProcessor`、`OutputProcessor` 和 `EngineCoreClient`。
 core 侧？它是在提交工作、推进工作，还是接收结果？这次调用是否跨线程、跨进程或跨
 设备？
 
+### 在线路径为什么把 EngineCore 放在独立进程？
+
+把 Scheduler 循环放进 `asyncio.create_task()`，并不会自动让其中的同步 CPU 工作
+让出事件循环。将前端请求处理与 EngineCore 主循环分开，可以让两侧独立推进；常见
+启用 GIL 的 CPython 部署也可减少解释器锁竞争。这是对源码分工的工程解释，不是
+未经测量就断言必有某个毫秒数的改善。离线还保留显式关闭多进程的 InprocClient。
+
+进程隔离也提供故障检测边界，但**不等于自动恢复服务**。当前
+`MPClient.start_engine_core_monitor` 发现 core 意外退出后标记 `engine_dead` 并清理，
+后续操作抛 `EngineDeadError`。API 可报告错误；已经开始的流式响应不能再把 HTTP
+状态改为 500。默认故障退出逻辑还会要求服务退出，没有在这里安全重建引擎的保证。
+
+[源码] `vllm/v1/engine/core_client.py` - `MPClient.start_engine_core_monitor`
+
+[源码] `vllm/entrypoints/serve/exception_handling/handlers/vllm_error.py` - `engine_error_handler`
+
+[源码] `vllm/entrypoints/launchers/launcher.py` - `terminate_if_errored`
+
 ## 3.2 配置对象怎样诞生
 
 用户看到的是大量 CLI 或 Python 参数，例如模型名、dtype、最大 batch token 数、TP/PP

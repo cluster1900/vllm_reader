@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Local diagram rendering tools for the vLLM source guide",
   "devDependencies": {
-    "@mermaid-js/mermaid-cli": "11.17.0"
+    "@mermaid-js/mermaid-cli": "11.17.0",
+    "mathjax-full": "3.2.2"
   }
 }

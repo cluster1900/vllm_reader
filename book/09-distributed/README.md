@@ -125,6 +125,27 @@ flowchart TD
 因此，“用了 8 张卡”不是完整实验条件。至少还要写明 `TP=多少、PP=多少、DP=多少、
 PCP/DCP=多少、互联是什么、请求分布是什么`。
 
+### 9.1.3 并行策略选择决策表
+
+这张表用于提出候选方案，不作性能排名。先确认模型与功能组合受支持，再用相同
+负载比较吞吐、延迟、显存与通信；具体约束在本章后续小节展开。
+
+| 策略 | 切分对象 | 主要通信 | 容量与适用边界 |
+|---|---|---|---|
+| TP | 层内参数与计算 | 依层实现进行规约或收集 | 常减少每卡权重；KV heads 过少时可能复制，延迟不保证降低 |
+| PP | 模型层段 | stage 间中间张量传输 | 每卡保留本段状态；在线与离线均可评估，需考虑气泡和负载平衡 |
+| DP | 请求 | 普通 dense 副本可较独立；跨 DP 的 EP 需要同步 | 每个逻辑副本可内部组合 TP/PP，不要求整个模型放入单卡 |
+| EP | MoE 专家 | dispatch/compute/combine 相关通信 | 非专家层仍有自己的布局；适用性取决于模型、后端和专家负载 |
+| PCP | prefill token/chunk | 收集与原序重排等 | 增加 worker 数；本版本 MRV2 有 MLA、PP、DP 等组合限制 |
+| DCP | attention context/KV | Query 准备、局部 attention 和 LSE 合并 | 复用已有 ranks，不新增设备；实际 KV 分片与收益需看配置 |
+
+例如高速互联可能有利于 TP，但“有 NVLink”不能推出 TP 必然更快；“长上下文”
+也不能推出任意 PCP/DCP 组合都能启用。
+
+[源码] `vllm/model_executor/models/llama.py` - `LlamaAttention.__init__` 的 KV head 复制分支
+
+[源码] `vllm/config/parallel.py` - `ParallelConfig` 的并行度及组合校验
+
 ---
 
 ## 9.2 rank、world size 与 process group
@@ -195,13 +216,13 @@ group 交换 tensor metadata，再在 device group 发送真正的 GPU tensor。
 
 固定版本 `5893426...` 的 `ParallelConfig.__post_init__` 使用：
 
-```math
-W_{engine}=TP\times PP\times PCP
-```
+$$
+W_{\mathrm{engine}}=\mathrm{TP}\times \mathrm{PP}\times \mathrm{PCP}
+$$
 
-```math
-W_{all\ DP}=TP\times PP\times PCP\times DP
-```
+$$
+W_{\text{all DP}}=\mathrm{TP}\times \mathrm{PP}\times \mathrm{PCP}\times \mathrm{DP}
+$$
 
 源码字段附近仍有把 `world_size` 简写成 “TPxPP” 的旧说明，但真实赋值已经包含 PCP。
 因此本书以执行代码为准：**PCP 会增加 worker process 数，DCP 不会。**
@@ -377,24 +398,24 @@ workers 可能属于同一个 EP group。只要某些 ranks 进入 all-to-all，
 
 对线性层 `Y = X A + b`，把权重沿输出维切成：
 
-```math
+$$
 A=[A_0,A_1,\ldots,A_{p-1}]
-```
+$$
 
 每个 TP rank 计算：
 
-```math
+$$
 Y_i=XA_i+b_i
-```
+$$
 
 先用 shape 建立坐标：`X:[T,Din]`、`A:[Din,Dout]`、`b:[Dout]`，
 `T` 为本轮 token 数，`Din/Dout` 为输入/输出宽度，`p` 为 TP rank 数。Column
 切分后 `A_i:[Din,Dout/p]`、`Y_i:[T,Dout/p]`。本地结果是最终输出的一组列。如果下一个算子也接受分片输出，可以继续保持分片；若
 调用者要求完整 hidden states，则执行 all-gather：
 
-```math
-Y=concat(Y_0,Y_1,\ldots,Y_{p-1})
-```
+$$
+Y=\operatorname{concat}(Y_0,Y_1,\ldots,Y_{p-1})
+$$
 
 ```mermaid
 flowchart LR
@@ -414,22 +435,24 @@ flowchart LR
 
 把权重沿输入维切分：
 
-```math
-A=\begin{bmatrix}A_0\\A_1\\\vdots\\A_{p-1}\end{bmatrix},
-\qquad X=[X_0,X_1,\ldots,X_{p-1}]
-```
+$$
+\begin{aligned}
+A &= \begin{bmatrix} A_0 \\ A_1 \\ \vdots \\ A_{p-1} \end{bmatrix},\\
+X &= [X_0,X_1,\ldots,X_{p-1}].
+\end{aligned}
+$$
 
 每个 rank 只能得到 partial output：
 
-```math
+$$
 P_i=X_iA_i
-```
+$$
 
 最终输出是所有 partial output 的和：
 
-```math
+$$
 Y=\sum_i P_i+b
-```
+$$
 
 这里 `X_i:[T,Din/p]`、`A_i:[Din/p,Dout]`，所以每个 `P_i` 都是 `[T,Dout]`，
 但只累加了部分输入维度，必须求和。例如 `X=[1,2]`、`A=[[3],[4]]`，两个 rank 分别
@@ -468,6 +491,19 @@ flowchart LR
 
 > **读图方法：** 这张图用于压缩“MLP 中为何常把两种布局配对”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
+**在基础 dense TP 路径中，Column → Row 可以避免中间收集。** 以无额外上下文
+并行、无 sequence parallel 特例的 Llama 路径为例，QKV 投影后可按本地 heads 做
+attention，`o_proj` 再合并局部贡献；MLP 的 gate/up 投影后可本地做门控，`down_proj`
+再合并贡献。这样中间结果不必先 all-gather、紧接着又切回分片。
+
+在这组条件下，两个默认 RowParallelLinear 端点各做一次 all-reduce。但不能推广为
+所有 Transformer 层“严格只有两次通信”：DCP、MoE、其他并行布局或优化会改变路径。
+也不能凭空假设优化前必有四次同等成本同步，进而声称通信时间一定减半。
+
+[源码] `vllm/model_executor/models/llama.py` - `LlamaAttention`、`LlamaMLP`
+
+[源码] `vllm/model_executor/layers/linear.py` - `RowParallelLinear.forward`
+
 ### 9.5.4 权重加载也必须理解 shard 语义
 
 checkpoint 往往保存完整或按其他格式切分的 tensor。TP layer 的 `weight_loader` 根据当前
@@ -483,11 +519,11 @@ TP rank 和 shard dimension 只装载本地片段。排查 shape 错误时，应
 
 粗略地，一层的时间可以写成：
 
-```math
-T_{layer}(p)\approx T_{compute}(1)/p+T_{collective}(p)+T_{imbalance}
-```
+$$
+T_{\mathrm{layer}}(p)\approx \frac{T_{\mathrm{compute}}(1)}{p}+T_{\mathrm{collective}}(p)+T_{\mathrm{imbalance}}
+$$
 
-小 batch decode 的矩阵乘较小，`T_compute/p` 的收益有限，而每层 collective 的固定启动
+小 batch decode 的矩阵乘较小，$T_{\mathrm{compute}}/p$ 的收益有限，而每层 collective 的固定启动
 延迟仍存在。PCIe、跨 NUMA 或跨节点 TP 会进一步放大通信成本。所以“TP=2 比单卡慢”
 完全可能是合理结果，不表示 TP 实现错误。
 
@@ -654,15 +690,15 @@ flowchart LR
 
 固定源码版本中，`DPLBAsyncMPClient` 的选择逻辑可近似写成：
 
-```math
-score_i=max(C\cdot I_i,\ W_i+R_i)
-```
+$$
+\mathrm{score}^{\mathrm{base}}_i=\max(CI_i,\;W_i+R_i)
+$$
 
 若存在 waiting requests，还会加入高 KV 使用率惩罚：
 
-```math
-score_i\mathrel{+}=6W_i\cdot max(0,U_i-0.5)
-```
+$$
+\mathrm{score}_i=\mathrm{score}^{\mathrm{base}}_i+6W_i\max(0,U_i-0.5)
+$$
 
 其中 `C` 是 client 数，`I` 是本 client 观察到的 in-flight 数，`W/R/U` 分别是 engine
 报告的 waiting、running 和 KV usage。选择最小 score，并用轮转起点缓解平局偏置。
@@ -788,9 +824,9 @@ sequenceDiagram
 
 设 rank `i` 收到的 routed tokens 为 `n_i`，一次专家层的关键路径近似由：
 
-```math
-T_{EP}\approx T_{dispatch}+max_i\ T_{expert}(n_i)+T_{combine}
-```
+$$
+T_{\mathrm{EP}}\approx T_{\mathrm{dispatch}}+\max_i T_{\mathrm{expert}}(n_i)+T_{\mathrm{combine}}
+$$
 
 决定。平均 token 数很均匀并不足够，某个 batch 内 router 热点就会让其他 ranks 等待。
 因此应记录每 rank/expert token histogram，而不只看总 tokens/s。
@@ -871,11 +907,12 @@ Decode tokens 不按相同方式分片，而是复制到 PCP ranks；执行结�
 
 DCP 使用已有 ranks 分摊 decode attention 的 context。一个简化 owner 公式是：
 
-```math
-owner(position)=\left\lfloor position/interleave\right\rfloor\bmod DCP
-```
+$$
+\operatorname{owner}(p)=\left\lfloor\frac{p}{I}\right\rfloor\bmod\mathrm{DCP}
+$$
 
-`interleave` 允许连续若干位置先归同一 rank，再轮转到下一个 rank。
+式中 $p$ 是全局 token 位置，$I$ 是 `interleave` 对应的连续 token 数。它允许
+连续若干位置先归同一 rank，再轮转到下一个 rank。
 
 ```mermaid
 flowchart TB
@@ -893,21 +930,21 @@ flowchart TB
 ### 9.9.5 partial attention 为什么不能求平均
 
 先算一个例子：两个 shard 的未归一化概率总量分别为 1 和 3，局部输出分别为 10 和
-20。全局应为 `1/4*10 + 3/4*20 = 17.5`，不是平均值 15。下面的对数公式只是
+20。全局应为 $\frac14\times10+\frac34\times20=17.5$，不是平均值 15。下面的对数公式只是
 用不容易溢出的方式保存这两个总量。
 
 每个 DCP rank 只看一部分 keys/values。对同一个 Query/head，设其局部 softmax
 分母的自然对数为标量 `L_i`，局部输出为长度 `[D_v]` 的向量 `O_i`。全局归一化量是：
 
-```math
+$$
 L=\log\sum_i e^{L_i}
-```
+$$
 
 最终输出是：
 
-```math
+$$
 O=\sum_i e^{L_i-L}O_i
-```
+$$
 
 直接计算 `(O_0+O_1)/2` 隐含假设两个 shard 的 softmax denominator 相同，通常不成立。
 当前 DCP 接口用 LSE 保存归一化信息；仅有局部归一化输出而没有 LSE 或等价的
@@ -1197,12 +1234,12 @@ sequenceDiagram
 
 一个简化通信时间模型是：
 
-```math
-T_{comm}\approx n_{phase}\alpha+\frac{bytes}{bandwidth}
-```
+$$
+T_{\mathrm{comm}}\approx n_{\mathrm{phase}}\alpha+\frac{B_{\mathrm{payload}}}{\beta}
+$$
 
-`n_phase` 是通信阶段数，`alpha` 是每阶段固定延迟（秒），`bytes` 是实际传输字节量，
-`bandwidth` 必须用 byte/s，结果才是秒。若资料给的是 bit/s，要先除以 8。小 tensor 高频 collective 常被 `alpha` 主导，大 tensor 则更受
+式中 $n_{\mathrm{phase}}$ 是通信阶段数，$\alpha$ 是每阶段固定延迟（秒），
+$B_{\mathrm{payload}}$ 是传输字节量，$\beta$ 是有效带宽（byte/s），结果为秒。若资料给的是 bit/s，要先除以 8。小 tensor 高频 collective 常被 $\alpha$ 主导，大 tensor 则更受
 带宽影响。该模型不能替代 NCCL profile，但能帮助判断：合并通信、降低频次和减少字节中
 哪一种更可能有效。
 
@@ -1210,13 +1247,13 @@ T_{comm}\approx n_{phase}\alpha+\frac{bytes}{bandwidth}
 
 若单卡吞吐为 `Q_1`，使用 `p` 卡的吞吐为 `Q_p`：
 
-```math
-speedup=Q_p/Q_1
-```
+$$
+\mathrm{speedup}=\frac{Q_p}{Q_1}
+$$
 
-```math
-efficiency=\frac{Q_p}{pQ_1}
-```
+$$
+\mathrm{efficiency}=\frac{Q_p}{pQ_1}
+$$
 
 效率低不一定是通信问题，也可能来自：
 

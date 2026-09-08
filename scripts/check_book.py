@@ -9,6 +9,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    from .math_support import check_math
+except ImportError:
+    from math_support import check_math
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CHAPTERS = (
@@ -309,6 +314,7 @@ def main() -> int:
         chapter_texts[chapter] = text
         check_markdown(path.relative_to(ROOT), text, errors)
         check_pedagogy(path.relative_to(ROOT), text, errors)
+        errors.extend(f"{path.relative_to(ROOT)}: {error}" for error in check_math(text))
         try:
             metadata = parse_frontmatter(path.relative_to(ROOT), text)
         except ValueError as exc:
@@ -339,6 +345,8 @@ def main() -> int:
         text = path.read_text(encoding="utf-8")
         check_markdown(path.relative_to(ROOT), text, errors)
         check_local_links(path, text, errors)
+        if path == ROOT / "glossary" / "terms.md":
+            errors.extend(f"glossary/terms.md: {error}" for error in check_math(text))
 
     anchor_count, explicit_reference_count = check_source_map(
         chapter_metadata, chapter_texts, errors

@@ -39,7 +39,7 @@
 
 ## 构建 EPUB
 
-项目使用 Mermaid CLI 将章节中的 Mermaid 图渲染为 SVG，再由 Pandoc 生成 EPUB3：
+项目将 Mermaid 图和 LaTeX 公式渲染为自包含 SVG，再由 Pandoc 生成 EPUB3：
 
 ```bash
 pnpm install
@@ -47,12 +47,18 @@ python3 scripts/build_epub.py
 ```
 
 默认产物为 `dist/vllm-source-guide.epub`。构建结束时会自动运行
-`scripts/check_epub.py`，检查 EPUB 容器、目录、正文、图片和内部链接是否完整。
+`scripts/check_epub.py`，检查 EPUB 容器、目录、正文、图片和内部链接，并逐项核对公式与 Markdown 是否一致。
 
 全书还使用 `scripts/enrich_pedagogy.py` 维护教学提示。每章都包含针对目标读者的阅读
 方法，每张 Mermaid 图后都有读图说明；`scripts/check_book.py` 会检查这些内容没有遗漏。
 
 目标总篇幅约 560 页。页数是控制内容比例的估算，不是完成标准。
+
+## 公式显示
+
+行内公式使用 `$...$`，块公式使用独立行 `$$`，需要支持数学扩展的 Markdown 预览器。
+EPUB 已嵌入排版完成的 SVG 公式，不依赖 MathML 或在线脚本。
+详细规则见 [公式写作与构建约定](meta/math-format.md)。
 
 ## 推荐阅读路线
 

@@ -229,21 +229,21 @@ flowchart TB
 
 先忽略 context parallelism。对请求内位置 `p` 和 kernel block size `B`：
 
-```math
+$$
 i = \left\lfloor \frac{p}{B} \right\rfloor
-```
+$$
 
-```math
+$$
 o = p \bmod B
-```
+$$
 
-```math
-b = \operatorname{block\_table}[request, i]
-```
+$$
+b = \mathtt{block\_table}[\mathrm{request},i]
+$$
 
-```math
-slot = b \times B + o
-```
+$$
+\mathrm{slot} = bB+o
+$$
 
 其中：
 
@@ -308,15 +308,15 @@ manager block 2 -> kernel blocks 4,5
 
 一般地，若 `A` 是 allocation block size，`K` 是 kernel block size：
 
-```math
+$$
 r = \frac{A}{K}
-```
+$$
 
 manager block ID `m` 展开为：
 
-```math
+$$
 m \times r, m \times r + 1, \ldots, m \times r + r - 1
-```
+$$
 
 ```mermaid
 flowchart LR
@@ -445,6 +445,16 @@ flowchart LR
 - block table 是每请求一行，供 attention 按整个逻辑序列读取；
 - slot mapping 是每个本轮 token 一个扁平 slot，供 KV update 做 scatter write。
 
+**读写地址的直觉：投递快件与按目录查书。** 对某个 cache group，slot mapping
+可以看作本轮 token 的投递地址表；block table 则是读取历史时使用的目录。
+
+- **写入**：扁平的是 token 这一维；K/V 本身还包含 head 与向量维度，不是只有
+  一个数的一维数组。第 i 行 K/V 按 `slot_mapping[i]` 写入对应物理槽。
+- **读取**：整个 batch 的 block table 通常是二维的，一个请求使用其中一行。
+  kernel 按该行寻找所需 K/V；它可边读 tile 边计算，不必先重建完整连续 K/V 数组。
+
+[源码] `vllm/v1/attention/backends/flash_attn.py` - `FlashAttentionImpl.do_kv_cache_update`、`forward`
+
 ```mermaid
 flowchart TB
     POS["scheduled positions"] --> FORMULA["position plus block table"]
@@ -516,15 +526,15 @@ query_start_loc = [0, 3, 4, 6]
 
 于是请求 `r` 的 query 区间是：
 
-```math
+$$
 [q_r, q_{r+1})
-```
+$$
 
 query length 是：
 
-```math
+$$
 L^Q_r = q_{r+1} - q_r
-```
+$$
 
 ```mermaid
 flowchart LR
@@ -540,9 +550,9 @@ flowchart LR
 
 `seq_lens[r]` 是本轮执行后请求可见的总序列长度。已计算 context 长度可以在设备上得到：
 
-```math
-L^{context}_r = L^{seq}_r - L^Q_r
-```
+$$
+L^{\mathrm{context}}_r = L^{\mathrm{seq}}_r - L^{Q}_r
+$$
 
 例如：
 
@@ -1121,23 +1131,23 @@ backend 的 cache layout、metadata 和 kernel 调用是否消费 block table。
 
 对一个 query 向量 `q` 和逻辑顺序 K/V：
 
-```math
+$$
 s_j = \frac{q \cdot k_j}{\sqrt{d}}
-```
+$$
 
-```math
+$$
 p_j = \frac{e^{s_j}}{\sum_t e^{s_t}}
-```
+$$
 
-```math
+$$
 o = \sum_j p_j v_j
-```
+$$
 
 分页实现改变的是取得 `k_j`、`v_j` 的方式：
 
-```math
-(k_j, v_j) = KV[block\_table[\lfloor j/B \rfloor], j \bmod B]
-```
+$$
+(k_j,v_j)=\mathrm{KV}\bigl[\mathtt{block\_table}[\lfloor j/B\rfloor],\;j\bmod B\bigr]
+$$
 
 只要地址翻译保持逻辑次序、mask 和数值精度相同，分页与连续布局的参考输出应一致。
 
@@ -1217,21 +1227,21 @@ final K/V pointer
 输出的简单平均。为了不保存完整分数矩阵，kernel 只保留能继续累计的摘要。
 
 长 KV 往往按 tile/partition 处理。tile 是本轮处理的一小片 K/V。对一个 Query，
-`s_j` 为第 `j` 个候选的无单位分数；稳定 softmax 通常维护局部最大值 `m`、归一化分母 `l` 和
+`s_j` 为第 `j` 个候选的无单位分数；稳定 softmax 通常维护局部最大值 $m$、归一化分母 $\ell$ 和
 加权输出状态。新 tile 到来时旧状态需要按新的最大值重标定：
 
-```math
-m' = \max(m, m_{tile})
-```
+$$
+m' = \max(m, m_{\mathrm{tile}})
+$$
 
-```math
-l' = e^{m-m'}l + \sum_{j \in tile} e^{s_j-m'}
-```
+$$
+\ell' = e^{m-m'}\ell + \sum_{j\in\mathrm{tile}}e^{s_j-m'}
+$$
 
-`m_tile` 是新片段的最大分数；`m`、`l`、`m_tile` 都是标量。`l` 保存的是
-`sum(exp(score-m))`，换用更大的最大值 `m′` 后，要把旧分母乘 `exp(m-m′)`，
+`m_tile` 是新片段的最大分数；变量 $m$、$\ell$、$m_{\mathrm{tile}}$ 都是标量。分母 $\ell$ 保存的是
+$\sum_j \exp(s_j-m)$，换用更大的最大值 `m′` 后，要把旧分母乘 `exp(m-m′)`，
 才能和新片段相加。加权输出摘要是长度为 Value 维度的向量，也必须使用相同缩放。
-LSE 指 `log(sum(exp(score)))`，可由 `m + log(l)` 得到。DCP 或 split-K 最终合并的正是这类 `(output, LSE)` 状态，而不是
+LSE 指 `log(sum(exp(score)))`，可由 $m+\log\ell$ 得到。DCP 或 split-K 最终合并的正是这类 `(output, LSE)` 状态，而不是
 直接平均各分区输出。
 
 ```mermaid

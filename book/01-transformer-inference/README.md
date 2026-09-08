@@ -199,9 +199,9 @@ logits:       [vocab_size]
 每个 logit 对应一个候选 token。logit 越大，候选通常越有可能被选择，但 logit 本身
 可以为负，也不要求总和为 1。概率需要经过 softmax：
 
-```math
+$$
 p_i = \frac{e^{z_i}}{\sum_j e^{z_j}}
-```
+$$
 
 这里的 `z` 是形状 `[V]` 的分数向量，`V` 是词表大小；`z_i` 是候选 `i` 的分数，
 `e` 是自然指数的底数，分母把所有候选的指数分数相加。`p_i` 是无单位概率，所有
@@ -255,9 +255,9 @@ vLLM 的 RMSNorm 接口能够把 residual 融合进调用，因此源码中的�
 
 当前 `LlamaMLP` 使用 gate/up 两个投影与 SiLU 门控，概念上可写成：
 
-```math
-MLP(x) = W_{down}(SiLU(W_{gate}x) \odot W_{up}x)
-```
+$$
+\operatorname{MLP}(x) = W_{\mathrm{down}}\bigl(\operatorname{SiLU}(W_{\mathrm{gate}}x) \odot W_{\mathrm{up}}x\bigr)
+$$
 
 `x` 是一个 token 的列向量，shape 为 `[D]`；`D` 是 hidden size。设 MLP 中间宽度为
 `I`，则 `W_gate`、`W_up` 的 shape 为 `[I,D]`，`W_down` 为 `[D,I]`。两个投影先把
@@ -309,9 +309,9 @@ flowchart LR
 
 对每个 token 的 hidden state 做三个线性投影：
 
-```math
+$$
 Q = XW_Q, \quad K = XW_K, \quad V = XW_V
-```
+$$
 
 可以把它们理解为：
 
@@ -321,49 +321,73 @@ Q = XW_Q, \quad K = XW_K, \quad V = XW_V
 
 单个 head 的 attention 为：
 
-```math
-Attention(Q,K,V) = softmax(\frac{QK^T}{\sqrt{D_h}} + M)V
-```
+$$
+\begin{aligned}
+&\operatorname{Attention}(Q,K,V)\\
+&\qquad=\operatorname{softmax}\!\left(\frac{QK^{\mathsf{T}}}{\sqrt{D_h}}+M\right)V.
+\end{aligned}
+$$
 
 先取单 head、无 batch 的例子：若本轮有 `Nq` 个 Query、可读取 `Nk` 个历史及当前
 位置，则 `Q:[Nq,D_h]`、`K:[Nk,D_h]`、`V:[Nk,D_v]`。上标 `T` 表示转置，
 所以 `QK^T` 是 `[Nq,Nk]` 的相关性表；softmax 对每一行归一化，乘 `V` 后得到
 `[Nq,D_v]`。`D_h`、`D_v` 分别是每个 Key/Query 和 Value 向量的长度。`M` 与分数表
-同形状，允许位置填 0，屏蔽位置填负无穷；这些分数和权重没有时间或字节单位。除以 `sqrt(D_h)` 是为了避免点积随维度增大
-而过度放大，导致 softmax 过于尖锐。
+同形状，允许位置填 0，屏蔽位置填负无穷；这些分数和权重没有时间或字节单位。
+
+**为什么除以 $\sqrt{D_h}$？** 先看一个简化假设：$q,k$ 的所有分量相互独立，
+均值为 0、方差为 1。点积 $q\cdot k=\sum_i q_i k_i$ 的均值为 0、方差为 $D_h$；
+除以 $\sqrt{D_h}$ 后，方差变回 1。这解释了缩放怎样抵消维度增长带来的分数尺度变化。
+例如 $D_h=128$ 时，未缩放分数的标准差约为 11.3；这不是实际模型分数范围的承诺。
+
+缩放可缓解 softmax 过度集中，但不保证注意力始终平缓，也不保证训练梯度一定通畅。
+真实模型的 Q/K 来自学习到的投影，并不必然符合上述独立、单位方差假设。
+原论文以训练中的小梯度说明动机；本书推理路径沿用模型定义的缩放，不执行反向传播。
+[原始论文](https://arxiv.org/html/1706.03762v7#S3.SS2.SSS1)给出了这一假设与推导。
+
+还应区分**分数缩放**与**指数运算的数值稳定性**。稳定 softmax 会先减去最大分数，
+例如 `[1000,999]` 先变为 `[0,-1]`，再求指数；不能声称只靠除以维度平方根就防止溢出。
+本章教学函数也采用减最大值的方法。
+
+[源码] `vllm/model_executor/models/llama.py` - `LlamaAttention.__init__` 中的 `scaling`
+
 
 ### 一个可以手算的 Attention
 
 假设当前位置是序列中的第 3 个 token，因此它能看到三个 Key。为了能手算，把 head
 size 缩小为 2：
 
-```text
-Q  = [1.0, 0.5]
-K0 = [1.0, 0.0]    V0 = [1.0, 0.0]
-K1 = [0.0, 1.0]    V1 = [0.0, 2.0]
-K2 = [1.0, 1.0]    V2 = [2.0, 1.0]
-```
+$$
+\begin{aligned}
+Q &= \begin{bmatrix}1.0 & 0.5\end{bmatrix},\\
+K &= \begin{bmatrix}1.0&0.0\\0.0&1.0\\1.0&1.0\end{bmatrix},\\
+V &= \begin{bmatrix}1.0&0.0\\0.0&2.0\\2.0&1.0\end{bmatrix}.
+\end{aligned}
+$$
+
+$K$、$V$ 的三行分别对应位置 0、1、2，记作 $K_0,K_1,K_2$ 与 $V_0,V_1,V_2$。
 
 第一步，计算缩放点积：
 
-| Key | 原始点积 `Q·K` | 除以 `sqrt(2)` 后的 score |
+| Key | 原始点积 $Q\cdot K$ | 除以 $\sqrt{2}$ 后的 score |
 |---|---:|---:|
 | K0 | 1.0 | 0.7071 |
 | K1 | 0.5 | 0.3536 |
 | K2 | 1.5 | 1.0607 |
 
-第二步，对 scores 做 softmax：
+第二步，对 scores 做 softmax，得到权重向量 $a$：
 
-```text
-attention weights = [0.3199, 0.2246, 0.4555]
-```
+$$
+a\approx[0.3199,\;0.2246,\;0.4555].
+$$
 
 第三步，用权重聚合 Value：
 
-```math
-output = 0.3199V_0 + 0.2246V_1 + 0.4555V_2
-       = [1.2309, 0.9047]
-```
+$$
+\begin{aligned}
+\mathrm{output} &\approx 0.3199V_0 + 0.2246V_1 + 0.4555V_2 \\
+&\approx [1.2309,\;0.9047].
+\end{aligned}
+$$
 
 这组数字可以通过 `examples/ch01_numerical_walkthrough.py` 复现。这里最容易混淆的
 一点是：**Query/Key 决定权重，Value 决定被混合的内容。** Key 本身不会直接按权重
@@ -392,8 +416,8 @@ flowchart LR
 | Value | `[B,S,Hkv,Dh]` | `[T,Hkv,Dv]` |
 | Output | `[B,S,Hq,Dv]` | `[T,Hq*Dv]` |
 
-普通 Multi-Head Attention 中 `Hq = Hkv`。Grouped-Query Attention（GQA）让多组
-query heads 共享较少的 KV heads，即 `Hkv < Hq`。这样可以显著减少 KV Cache，
+普通 Multi-Head Attention 中 $H_q=H_{\mathrm{kv}}$。Grouped-Query Attention（GQA）让多组
+query heads 共享较少的 KV heads，即 $H_{\mathrm{kv}}<H_q$。这样可以显著减少 KV Cache，
 也是容量公式必须使用 `num_key_value_heads` 而不是盲目使用
 `num_attention_heads` 的原因。
 
@@ -433,7 +457,7 @@ causal attention 可见关系如下：
 softmax 后概率近似为 0。并行计算所有位置不等于允许看到未来。
 
 从矩阵还能直接看出计算量增长：第 0 行读取 1 个 Key，第 1 行读取 2 个，依次到第
-`S-1` 行读取 `S` 个，总数为 `1+2+...+S=S(S+1)/2`。这就是 causal prefill 中
+`S-1` 行读取 `S` 个，总数为 $1+2+\cdots+S=\frac{S(S+1)}{2}$。这就是 causal prefill 中
 attention score 数量呈二次增长的来源。
 
 ### 只有 token 含义还不够
@@ -444,11 +468,18 @@ Value 上。
 
 对向量中的一对维度 `(x_0, x_1)`，RoPE 可直观理解为按位置旋转：
 
-```math
-\begin{bmatrix}x'_0\\x'_1\end{bmatrix} =
-\begin{bmatrix}\cos\theta & -\sin\theta\\\sin\theta & \cos\theta\end{bmatrix}
-\begin{bmatrix}x_0\\x_1\end{bmatrix}
-```
+$$
+\begin{bmatrix}
+x'_0 \\ x'_1
+\end{bmatrix} =
+\begin{bmatrix}
+\cos\theta & -\sin\theta \\
+\sin\theta & \cos\theta
+\end{bmatrix}
+\begin{bmatrix}
+x_0 \\ x_1
+\end{bmatrix}
+$$
 
 不同维度对使用不同频率，`theta` 随 position 变化。旋转后的 Q/K 点积包含相对位置
 关系。当前 Llama 路径中，`qkv_proj` 和 split 之后立即执行
@@ -460,11 +491,12 @@ Value 上。
 
 ### Greedy 与随机采样
 
-最简单的方法是 greedy：选择最大 logit 的 token。
+最简单的方法是 greedy：选择最大 logit 的 token。$z_i$ 是候选 $i$ 的分数，
+$i_{\mathrm{next}}$ 是选中的 token ID。
 
-```math
-token = argmax(logits)
-```
+$$
+i_{\mathrm{next}} = \operatorname*{arg\,max}_{i} z_i
+$$
 
 给定完全相同的 logits 和并列值处理规则，它总会选择同一项；但不同硬件或 batch
 引起的浮点误差仍可能改变非常接近的分数，所以 `temperature=0` 不是跨环境逐字复现
@@ -474,9 +506,9 @@ token = argmax(logits)
 
 Temperature 在 softmax 前缩放 logits：
 
-```math
-p_i(T) = softmax(z_i / T)
-```
+$$
+p_i(T) = \frac{\exp(z_i/T)}{\sum_j \exp(z_j/T)}, \qquad T>0
+$$
 
 这里的 `T` 是无单位温度参数，与前面表示 token 数的 `T` 含义不同；本公式只适用于
 `T > 0`，输入和输出都是长度为词表大小的向量。
@@ -628,6 +660,20 @@ sequenceDiagram
 同一请求的 decoder layers 依赖上一层输出，不能同时独立计算。第 09 章的流水线并行
 是让不同批次占据不同层段，不会消除这个依赖。
 
+从硬件视角，可以先比较两种常见趋势。**算术强度**指每搬运一个字节数据所做的
+浮点运算量，单位为 FLOPs/byte；它帮助判断计算量与数据搬运量的相对关系。
+
+- **较长 prefill 常更偏计算受限**：许多 token 一起做矩阵乘法，同一权重可被多个
+  token 复用。但短 chunk、特定 attention、通信或 CPU 准备仍可能成为瓶颈。
+- **小 batch decode 常更偏带宽或启动开销受限**：每请求本轮通常只有一个新 token，
+  相对数据搬运量，计算量较小。不过多个请求合批后依然可以做矩阵乘法，并非整个
+  GPU batch 永远只有一个向量。大 batch、量化、MoE、TP/DCP 和上下文长度都会改变瓶颈。
+
+权重与 KV 按层和 tile 读取，不会把几十 GB 数据同时完整搬入片上 SRAM。滑动窗口、
+稀疏注意力等路径也不一定读取全部历史。这里是分析直觉，不能替代指定配置的 profile。
+
+[源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.prepare_inputs`
+
 [源码] `vllm/model_executor/models/llama.py` - `LlamaModel.forward` 的逐层循环
 
 ### 用三个请求理解扁平 Token Batch
@@ -725,10 +771,24 @@ flowchart TB
 历史 Values。因此 KV Cache 消除了重复投影和历史层计算，却没有让 decode 成为常数
 时间；单个新 token 的 attention 工作仍随上下文长度增长。
 
+### 为什么普通自回归推理缓存 K/V，而不长期缓存历史 Q？
+
+Attention 同时使用 Q、K、V，为什么缓存通常只保留后两者？可以把 Q 想成当前要查询
+的问题，K/V 想成可供未来查询的历史记录。这个类比限定在本章的普通因果注意力路径。
+
+第 $t$ 个位置的 $q_t$ 用来计算该位置的 attention 输出；下一位置改用新的
+$q_{t+1}$，不需要读取历史 $q_t$。相反，历史 $k_t,v_t$ 会在未来允许关注位置 $t$
+的查询中继续使用，因此值得跨 step 保存。Q 在当前计算内可能被多次使用或暂存，
+“不长期缓存历史 Q”不表示它只能读取一次，也不限制调试或其他算法保存中间结果。
+
+[源码] `vllm/model_executor/models/llama.py` - `LlamaAttention.forward`
+
+[源码] `vllm/model_executor/layers/attention/attention.py` - `Attention.forward`、`unified_kv_cache_update`
+
 ### 计算量直觉
 
 只数 causal attention 中的 QK 点积：长度 `S` 的完整序列约需要
-`S(S+1)/2` 次。带缓存的一个 decode token 只新增约 `S` 次点积。
+$\frac{S(S+1)}{2}$ 次。带缓存的一个 decode token 只新增约 `S` 次点积。
 
 本章最小实验使用 `P=128` 的 prompt 生成 `G=32` 个 token，得到：
 
@@ -742,11 +802,12 @@ flowchart TB
 
 ### KV Cache 容量公式
 
-更一般地，一个 token 的基础 KV 字节数可估算为：
+令 $B_{\mathrm{token}}$ 表示每 token 的 KV 字节数，$B_{\mathrm{dtype}}$ 表示每个
+数值元素占用的字节数。基础 KV 容量可估算为：
 
-```math
-bytes/token = L \times (H_kD_k + H_vD_v) \times bytes(dtype)
-```
+$$
+B_{\mathrm{token}} = L(H_kD_k + H_vD_v)B_{\mathrm{dtype}}
+$$
 
 - `L`：attention layers 数量。
 - `H_k,D_k`：Key 的 head 数和 head size。
@@ -754,35 +815,42 @@ bytes/token = L \times (H_kD_k + H_vD_v) \times bytes(dtype)
 
 普通 Llama 类 attention 中 Key/Value 通常拥有相同的 head 数和 head size，于是简化为：
 
-```math
-bytes/token = 2 \times L \times H_{kv} \times D_h \times bytes(dtype)
-```
+$$
+B_{\mathrm{token}} = 2LH_{\mathrm{kv}}D_h B_{\mathrm{dtype}}
+$$
 
 当前通用 `Attention` 接口已经允许 `head_size_v` 与 `head_size` 不同，因此更一般的
 公式不是纯理论洁癖；阅读 MLA 或其他变体时不能继续机械套用前面的 `2×` 简式。
 
 例：32 层、32 个 KV heads、head size 128、FP16/BF16（2 bytes）：
 
-```text
-2 * 32 * 32 * 128 * 2 = 524288 bytes/token = 512 KiB/token
-2048 tokens ≈ 1 GiB
-```
+$$
+\begin{aligned}
+B_{\mathrm{token}} &= 2\times32\times32\times128\times2\;\frac{\mathrm{byte}}{\mathrm{token}}\\
+&= 512\,\frac{\mathrm{KiB}}{\mathrm{token}},\\
+B_{2048} &= (2048\,\mathrm{token})\,B_{\mathrm{token}} = 1\,\mathrm{GiB}.
+\end{aligned}
+$$
 
 若同样模型采用 8 个 KV heads 的 GQA：
 
-```text
-2 * 32 * 8 * 128 * 2 = 131072 bytes/token = 128 KiB/token
-2048 tokens ≈ 256 MiB
-```
+$$
+\begin{aligned}
+B_{\mathrm{token}} &= 2\times32\times8\times128\times2\;\frac{\mathrm{byte}}{\mathrm{token}}\\
+&= 128\,\frac{\mathrm{KiB}}{\mathrm{token}},\\
+B_{2048} &= (2048\,\mathrm{token})\,B_{\mathrm{token}} = 256\,\mathrm{MiB}.
+\end{aligned}
+$$
 
-把同一公式扩展到并发请求：
+令 $S_r$ 为请求 $r$ 缓存的 token 数，$B_{\mathrm{total}}$ 为总字节数。把公式
+扩展到并发请求：
 
-```math
-total\ bytes \approx bytes/token \times \sum_r cached\_tokens_r
-```
+$$
+B_{\mathrm{total}} \approx B_{\mathrm{token}} \sum_r S_r
+$$
 
 例如 8 个请求平均各缓存 2,048 token，在前述 8 KV heads 配置下，仅基础 K/V 数值就
-约为 `8 × 256 MiB = 2 GiB`。如果请求继续生成，缓存还会逐 token 增长。
+约为 $8\times256\,\mathrm{MiB}=2\,\mathrm{GiB}$。如果请求继续生成，缓存还会逐 token 增长。
 
 ```mermaid
 flowchart LR
@@ -1316,7 +1384,7 @@ vLLM 的核心任务，是在多个不同长度请求之间高效安排这些 to
    Cache 理论容量怎样变化？为什么 Query heads 不一定同步减少？
 3. 为什么有 KV Cache 后，新 token 仍需要经过所有 decoder layers？
 4. 在 vLLM 中看到 hidden state 形状 `[T,D]` 时，如何找到每个请求的 sequence 边界？
-5. 为什么 `temperature=0` 应走 greedy 分支，而不是直接套用 `logits/T`？
+5. 为什么 `temperature=0` 应走 greedy 分支，而不是直接套用 $z_i/T$？
 
 ## 源码追踪题
 
@@ -1343,7 +1411,7 @@ vLLM 的核心任务，是在多个不同长度请求之间高效安排这些 to
 <summary>2. 从 32 个 KV heads 改为 8 个，KV 容量怎样变化？</summary>
 
 在层数、head size、dtype 和 token 数不变，且 Key/Value 形状相同的简化条件下，容量
-与 KV head 数成正比，因此降为原来的 `8/32=1/4`。Query heads 可以继续保持 32，
+与 KV head 数成正比，因此降为原来的 $8/32=1/4$。Query heads 可以继续保持 32，
 由每组多个 Query heads 共享一个 KV head，这就是 GQA。
 </details>
 

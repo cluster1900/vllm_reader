@@ -4,11 +4,20 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+import json
 import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+try:
+    from .math_support import (check_math, formula_counts, math_nodes,
+                               normalized_tex, read_document, render_document_math)
+except ImportError:
+    from math_support import (check_math, formula_counts, math_nodes,
+                              normalized_tex, read_document, render_document_math)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +34,6 @@ CHAPTERS = (
     "10-experiments",
 )
 MERMAID_RE = re.compile(r"```mermaid\s*\n(.*?)\n```", re.DOTALL)
-MATH_RE = re.compile(r"```math\s*\n(.*?)\n```", re.DOTALL)
 IMAGE_RE = re.compile(r"!\[([^\]\n]*)\]\(([^)\n]+)\)")
 LINK_RE = re.compile(r"(?<!!)\[([^\]\n]+)\]\(([^)\n]+)\)")
 
@@ -82,9 +90,12 @@ def render_mermaid(
 
 
 def normalize_display_math(text: str) -> str:
-    """Turn documentation-friendly math fences into Pandoc display math."""
+    """Require native Markdown math; never hide invalid source behind conversion."""
 
-    return MATH_RE.sub(lambda match: f"$$\n{match.group(1).strip()}\n$$", text)
+    errors = check_math(text)
+    if errors:
+        raise ValueError("Invalid Markdown math: " + "; ".join(errors))
+    return text
 
 
 def copy_images(text: str, source_path: Path, chapter_name: str, media_dir: Path) -> str:
@@ -184,12 +195,24 @@ def build(output: Path, keep_stage: bool) -> None:
     )
     staged_markdown.append(glossary)
 
+    document = read_document(staged_markdown)
+    expected_math = formula_counts([path.read_text() for path in staged_markdown])
+    parsed_math = Counter(
+        (node["c"][0]["t"] == "DisplayMath", normalized_tex(node["c"][1]))
+        for node in math_nodes(document)
+    )
+    if parsed_math != expected_math:
+        raise ValueError("Pandoc math nodes do not match the Markdown formulas")
+    formulas = render_document_math(document, stage)
+    print(f"Rendered {len(formulas)} math occurrences as self-contained SVG.")
+    document_path = stage / "book.json"
+    document_path.write_text(json.dumps(document, ensure_ascii=False))
+
     output.parent.mkdir(parents=True, exist_ok=True)
     command = [
         str(pandoc),
-        "--from=gfm+raw_html+tex_math_dollars+attributes",
+        "--from=json",
         "--to=epub3",
-        "--mathml",
         "--toc",
         "--toc-depth=2",
         "--split-level=1",
@@ -203,7 +226,7 @@ def build(output: Path, keep_stage: bool) -> None:
         str(stage),
         "--output",
         str(output),
-        *(str(path) for path in staged_markdown),
+        str(document_path),
     ]
     run(command)
     run([sys.executable, str(ROOT / "scripts" / "check_epub.py"), str(output)])

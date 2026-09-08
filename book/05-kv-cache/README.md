@@ -127,6 +127,26 @@ flowchart TD
 
 > **读图方法：** 这张图用于压缩“KV Cache 为什么成为容量瓶颈”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
+### 为什么请求结束后，`nvidia-smi` 显存占用仍然很高？
+
+显存没有随请求结束下降，**单凭这一现象不能判定泄漏，也不能排除泄漏**。常见原因
+是 vLLM 已建立可复用的 KV 池，请求释放的是池内 block 的持有关系，物理池仍保留。
+
+自动容量路径先用 `设备总显存 × gpu_memory_utilization` 确定预算，再扣非 KV
+占用和实际应用的 graph 预留；并不是把所有剩余显存都给 KV。显式设置
+`kv_cache_memory_bytes` 时又走手工容量路径。池化减少反复申请物理内存的需求，
+但运行时还有张量写入、拷贝、元数据更新等操作，不能概括为“系统只改 CPU 标志位”。
+
+正常请求 free 不会释放整个 KV backing allocation；只有引用降到零、且没有额外
+保留条件的 block 才能重新分配。排查泄漏需进一步观察相同负载重复运行后占用是否
+持续增长、请求和 block 引用是否释放，而不是只看一个高水位数值。
+
+[源码] `vllm/v1/worker/utils.py` - `request_memory`
+
+[源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`
+
+[源码] `vllm/v1/core/block_pool.py` - `BlockPool.free_blocks`
+
 ### 5.1.1 权重显存与 KV 显存的差异
 
 > **本节先看：** 下面先用表格整理“权重显存与 KV 显存的差异”。先横向比较每一列解决的问题和适用边界，再把具体名称映射到源码。
@@ -146,7 +166,7 @@ KV Cache 的动态性正是分页管理存在的原因。
 TP rank 上每个 token 的 KV 字节数可写为：
 
 $$
-B_{token}=2\times L\times H_{kv,local}\times D_{head}\times B_{dtype}
+B_{\mathrm{token}}=2\times L\times H_{\mathrm{kv,local}}\times D_{\mathrm{head}}\times B_{\mathrm{dtype}}
 $$
 
 其中：
@@ -160,11 +180,11 @@ $$
 一个含 `S` 个 token、block size 为 `T` 的请求近似占用：
 
 $$
-B_{sequence}=S\times B_{token}
+B_{\mathrm{sequence}}=S\times B_{\mathrm{token}}
 $$
 
 $$
-B_{block}=T\times B_{token}
+B_{\mathrm{block}}=T\times B_{\mathrm{token}}
 $$
 
 ```mermaid
@@ -196,23 +216,24 @@ flowchart LR
 
 每 token：
 
-```text
-2 * 32 * 8 * 128 * 2
-= 131072 bytes
-= 128 KiB
-```
+$$
+\begin{aligned}
+B_{\mathrm{token}} &= 2\times32\times8\times128\times2\;\frac{\mathrm{byte}}{\mathrm{token}}\\
+&=131072\,\frac{\mathrm{byte}}{\mathrm{token}}=128\,\frac{\mathrm{KiB}}{\mathrm{token}}.
+\end{aligned}
+$$
 
 每 block：
 
-```text
-128 KiB/token * 16 tokens = 2 MiB
-```
+$$
+B_{\mathrm{block}}=(16\,\mathrm{token})\times128\,\frac{\mathrm{KiB}}{\mathrm{token}}=2\,\mathrm{MiB}.
+$$
 
 8192-token 序列：
 
-```text
-128 KiB/token * 8192 tokens = 1 GiB
-```
+$$
+B_{\mathrm{sequence}}=(8192\,\mathrm{token})\times128\,\frac{\mathrm{KiB}}{\mathrm{token}}=1\,\mathrm{GiB}.
+$$
 
 随书函数可复算这个结果：
 
@@ -230,13 +251,13 @@ assert block_bytes(per_token, 16) == 2 * 1024 * 1024
 assert per_token * 8192 == 1024**3
 ```
 
-### 5.2.2 TP 不能总按 `1 / TP` 生搬硬套
+### 5.2.2 TP 不能总按 $1/\mathrm{TP}$ 生搬硬套
 
 当 KV heads 能均匀分到 TP ranks 时，教学公式可令：
 
-```text
-H_kv,local = H_kv / TP
-```
+$$
+H_{\mathrm{kv,local}}=\frac{H_{\mathrm{kv}}}{\mathrm{TP}}.
+$$
 
 但真实 backend 可能在 KV heads 少于 TP 数时复制 head；DCP/PCP 还会改变 token 或上下文
 维度上的分片。量化 KV 可能加入 scale 或 zero-point，某些布局还会 padding。因此正确做法
@@ -314,7 +335,7 @@ token 可以连续，但对应物理 block ID 不必连续。
 它没有消除所有浪费。最后一个未填满 block 仍有内部碎片：
 
 $$
-W_{tail}=\left(T-(S\bmod T)\right)\bmod T
+W_{\mathrm{tail}}=\left(T-(S\bmod T)\right)\bmod T
 $$
 
 block 越小，尾部浪费通常越少，但 block table 更长、元数据更多，kernel 支持和对齐约束也
@@ -564,8 +585,8 @@ sequenceDiagram
 
 ### 5.6.4 `num_blocks` 与有效并发
 
-粗略并发不能只算 `num_blocks / ceil(max_len / block_size)`，因为每个请求可能同时占用多个
-group。源码按每个 group 最大内存折算为页数后求和，再用 pool 的 `num_blocks` 相除。
+粗略并发不能只用“总块数除以单请求按最大长度所需的块数”，因为每个请求可能同时
+占用多个 group。源码按每个 group 最大内存折算为页数后求和，再用 pool 的 `num_blocks` 相除。
 
 另外，prefix sharing、Sliding Window 回收和真实长度分布会使运行时并发高于或低于一个
 “所有请求都达到 max length”的静态估算。这个数字是容量边界，不是吞吐承诺。
@@ -642,6 +663,29 @@ flowchart LR
 
 这是“可查找重复内容”而非“写入时物理去重”。后来的请求命中时可选择其中一个 block
 共享，但已经分配的请求不会因此改写历史 block table。
+
+### 哈希链直觉：把历史上下文纳入前缀指纹
+
+两个块的局部 token 相同，不代表其 K/V 相同，因为前面的上下文也参与计算。因此，
+每个块的 hash 要包含父 hash。这个依赖关系可以类比 Git 对父提交的引用，但结构和
+用途并不完全相同，也不意味着哈希绝无碰撞。
+
+当前源码的核心关系是：
+
+```text
+block_hash[i] = hash(parent_hash, tokens_in_block, extra_keys)
+```
+
+`extra_keys` 可包含 LoRA、多模态、cache salt 和 prompt embedding 信息，不能从实际
+缓存键中删去。block 的粒度由配置决定，token 也不等于单词。
+
+单次 hash map 查询通常按平均 O(1) 理解；遍历一个有 B 个 hash blocks 的前缀需要
+多次查询，常规逐块查找可达 O(B)，生成 hash 也有成本。命中还要满足连续前缀、
+cache group 和边界要求，并维护引用；不是看到任意 hash 存在就直接跳过计算。
+
+[源码] `vllm/v1/core/kv_cache_utils.py` - `get_request_block_hasher`、`hash_block_tokens`、`generate_block_hash_extra_keys`
+
+[源码] `vllm/v1/core/kv_cache_manager.py` - `KVCacheManager.get_computed_blocks`
 
 ## 5.9 null block：空洞也要有合法 ID
 
@@ -847,7 +891,7 @@ cache。这里 finalized 指 **token 内容已确认**，不是 GPU 已经执行
 其 K/V 也不同。vLLM 为每个 hash block 建立链式 hash：
 
 $$
-H_i=hash(H_{i-1}, tokens_i, extra\_keys_i)
+H_i=\operatorname{hash}\bigl(H_{i-1},\;\mathrm{tokens}_i,\;\mathrm{extra\_keys}_i\bigr)
 $$
 
 `extra_keys` 可纳入 multimodal 内容、LoRA、cache salt 等会改变计算语义的信息。

@@ -160,6 +160,41 @@ KV Cache、attention、sampling 以及必要的 collective。
 - 模型 `torch.nn.Module`
 - attention backend 和 CUDA/Triton kernel
 
+### 生活化类比：现代餐厅运作系统
+
+初学者在第一次面对 `Renderer`、`InputProcessor`、`EngineCoreClient`、`EngineCore`、`Scheduler`、`Worker`、`ModelRunner`、`OutputProcessor` 等十几个类时，极易陷入“类名迷宫”。为了建立稳固的第一直觉，可以把 vLLM 想象成一家高度工业化的现代中餐厅：
+
+| 餐厅角色与运作流程 | vLLM 对应组件 | 在系统中所处的责任面 |
+|---|---|---|
+| **顾客点单与菜品清单** | 用户 HTTP API / OpenAI 格式输入 | 外部输入 |
+| **前厅接待与点菜员** | `Renderer` & `InputProcessor` | **协议面**：把顾客口语化的点单转换成后厨能认的标准工单（`EngineCoreRequest`），并校验规格与忌口 |
+| **前厅对讲机 / 传菜铃** | `EngineCoreClient`（IPC 通信） | **协议与控制面边界**：在多进程路径传递工单；同步/异步等待方式取决于 client 类型 |
+| **后厨调度总管 / 领班** | `EngineCore` & `Scheduler` | **控制面**：根据请求进度、token 预算与 KV 容量，在每一个出菜节拍决定本轮计算哪些请求（`SchedulerOutput`） |
+| **调料库管员** | `KVCacheManager` | **控制面**：管理公用酱料与已腌制好的半成品（KV Block），告诉总管还能不能接新菜、哪些桌可以复用老汤（Prefix Cache） |
+| **各灶台大厨工位** | `Executor` & `Worker` | **数据面**：管理特定的一台或多台燃气灶（GPU），负责提前把锅烧热、准备设备执行环境 |
+| **炒锅与装盘托盘** | `GPUModelRunner` | **数据面**：把总管派来的单子倒进锅里，装配成火候所需的数据结构（Tensor），驱动锅内翻炒（Model Forward） |
+| **出菜检验打包装盒员** | `OutputProcessor` | **协议面返回端**：从后厨接过刚出锅的菜，核对是否上齐，把 token 逐个转换回人类可读的文字，流式端给顾客（SSE 响应） |
+
+类比说明职责，不代表真实对象一一对应进程：Model Runner 负责组织计算，模型与 GPU
+算子负责数值运算；OutputProcessor 生成用户层输出，SSE 格式由 API 层包装。
+
+### 软件工程基础：进程、线程与协程边界
+
+在深入具体类之前，软件工程类学生必须牢固区分三类并发抽象，因为它们在 vLLM 中承担着完全不同的职责：
+
+- **进程**：拥有独立的虚拟地址空间；多个进程仍可映射同一共享内存。常见启用 GIL
+  的 CPython 部署中，各进程的解释器锁独立，能减少前后端争用；资源竞争和故障传播
+  仍可能跨进程发生，不能保证后端崩溃对服务没有影响。
+- **线程**：共享所在进程的地址空间，但有自己的执行栈。启用 GIL 的 CPython 中，
+  同一解释器通常不能让多个线程同时执行 Python 字节码；释放 GIL 的扩展与阻塞 IO
+  可以重叠。不能把这个限制推广到所有 Python 实现或 free-threaded 构建。
+- **异步协程/task**：在事件循环内协作推进，等待尚未就绪的操作时可让出执行机会。
+  切换 task 不需要每次都切换 OS 线程，但事件循环仍有调度成本；并非遇到任意
+  `await` 都一定让出执行。直接在协程中执行长时间同步计算仍会阻塞该事件循环。
+
+[Python 官方说明](https://docs.python.org/3/howto/free-threading-python.html)区分了启用
+GIL 与 free-threaded 构建；本书常见部署的 GIL 解释需要带上这个前提。
+
 ```mermaid
 flowchart TB
     subgraph P[协议面 CPU]

@@ -122,9 +122,12 @@ flowchart TD
 先构造完全串行、不重叠的教学模型。以下所有 `T` 都是耗时，单位统一为毫秒，
 下标分别代表调度、准备、主机到设备拷贝、前向、采样、设备到主机拷贝和结算：
 
-```math
-T_{step}=T_{sched}+T_{prepare}+T_{H2D}+T_{forward}+T_{sample}+T_{D2H}+T_{update}
-```
+$$
+\begin{aligned}
+T_{\mathrm{step}}={}&T_{\mathrm{sched}}+T_{\mathrm{prepare}}+T_{\mathrm{H2D}}\\
+&+T_{\mathrm{forward}}+T_{\mathrm{sample}}+T_{\mathrm{D2H}}+T_{\mathrm{update}}.
+\end{aligned}
+$$
 
 只有阶段互不重叠时才能直接相加；实际 trace 中不能把重叠区间重复计入墙钟耗时。
 异步执行的目标不是把右侧每一项都变为零，而是在依赖允许时让它们重叠。
@@ -145,6 +148,26 @@ flowchart TB
 
 **设计含义：**CUDA Graph 对短小、重复、shape 可覆盖的 decode batch 往往更有吸引力；但这不是
 “decode 一定更快”的无条件结论。实际收益仍取决于模型、硬件、batch、attention backend 和命中率。
+
+### 生活化类比：预先定义的连招宏
+
+CUDA Graph 可以类比预先定义的一组操作及依赖：CPU 不必每轮重新逐项安排其中的
+GPU 工作，而是启动已经准备好的可执行图。它记录的是操作和地址关系，不是缓存
+上一轮的计算答案。真实输入内容仍要更新，GPU 每次仍需重新计算。
+
+当 kernel 很短、CPU 提交速度跟不上时，减少逐次提交可能缩短 GPU 空隙。但 eager
+提交本来就可以与 GPU 执行重叠；不是每启动一个 kernel 都等它完成，也没有适用于
+所有机器的固定微秒数。应使用本机 trace 判断是否受 launch 开销限制。
+[NVIDIA 的示例](https://developer.nvidia.com/blog/cuda-graphs/)也区分逐次同步、
+重叠提交与 graph replay，数字只适用于文中的测量条件。
+
+类比的边界是 **只有被捕获且条件匹配的区域才可重放**。请求形状、地址、backend
+与功能组合变化时，vLLM 会选择相应 descriptor 或回退。FULL forward、分段 PIECEWISE、
+图外输入准备与采样不能合起来称为“整个 step 只有一次启动”。
+
+[源码] `vllm/v1/cudagraph_dispatcher.py` - `CudagraphDispatcher.dispatch`
+
+[源码] `vllm/compilation/cuda_graph.py` - `CUDAGraphWrapper.__call__`
 
 ### 8.1.3 延迟、吞吐和冷启动是三张账
 
@@ -253,9 +276,9 @@ pipeline 而拥有并发 batch 队列；`AsyncScheduler` 进一步改变 request
 
 若 CPU prepare 为 2 ms，GPU execute 为 5 ms，4 个同步 step 需要：
 
-```math
+$$
 4\times(2+5)=28\text{ ms}
-```
+$$
 
 若 CPU 能准备下一步并与上一轮 GPU 重叠，则教学模型得到 22 ms：
 
@@ -335,9 +358,9 @@ flowchart LR
 
 用于本节缓存记账的保守边界为：
 
-```math
-N_{confirmed}=N_{computed}-N_{placeholders}
-```
+$$
+N_{\mathrm{confirmed}}=N_{\mathrm{computed}}-N_{\mathrm{placeholders}}
+$$
 
 所有 `N` 都以 token 计数。这个差值是源码用于限制缓存/释放的边界，不能当作 GPU
 完成事件。例如最后一段 prefill 刚提交时，computed 已增加，GPU 可能还没算完；
@@ -348,9 +371,9 @@ N_{confirmed}=N_{computed}-N_{placeholders}
 
 对于非 prefill chunk，请求本轮预计产生：
 
-```math
-N_{new\ placeholders}=N_{sampled\ per\ step}+N_{scheduled\ spec}
-```
+$$
+N_{\mathrm{new\ placeholders}}=N_{\mathrm{sampled\ per\ step}}+N_{\mathrm{scheduled\ spec}}
+$$
 
 随后：
 
@@ -1546,11 +1569,11 @@ FULL graph 绑定 KV pointer，profiling 只捕获最大的少数 descriptor，�
 
 ### 8.17.2 graph memory 与 KV cache 是竞争关系
 
-> **本节先看：** 下面的代码或调用链只保留“graph memory 与 KV cache 是竞争关系”的主干。阅读时依次寻找输入、状态变化和输出，暂时忽略辅助分支。
+> **本节先看：** 下面用公式表达关系。先确认每个量的含义和单位，再沿等号或运算符检查推导。
 
-```math
-M_{available\ KV}\approx M_{requested}-M_{nonKV}-M_{graph\ reserve}
-```
+$$
+M_{\mathrm{available\ KV}}\approx M_{\mathrm{requested}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph\ reserve}}
+$$
 
 捕获更多 graph 可能减少 launch/padding，却压缩 KV block 数，进而降低并发容量或增加抢占。优化不能
 只看单 step latency。

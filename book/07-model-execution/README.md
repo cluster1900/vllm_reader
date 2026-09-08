@@ -139,6 +139,27 @@ flowchart TB
 **设计含义：**所有 rank 没收到 step 是 Executor/RPC 问题；device 选错是 Worker 问题；position 或
 block table 错是 Runner 问题；层数值错是 Model/backend 问题；token 分布错才进入 Sampler。
 
+### 执行栈所有权与职责矩阵
+
+先区分 Python 对象所在的进程与数值运算发生的设备。以下采用 GPU 文本生成路径，
+Model 和 Sampler 对象由 Worker 侧 CPU 代码持有，具体 tensor 运算才提交给 GPU。
+
+| 组件 | 对象所在进程 | 主要持有状态 | 输入与输出 | 职责 |
+|---|---|---|---|---|
+| Executor | EngineCore 所在进程 | Worker 句柄、通信与结果收集状态 | SchedulerOutput → Future、None 或模型输出，视方法/模式而定 | 派发执行与采样 |
+| Worker | 由 executor 决定；uni 可与 core 同进程 | 设备环境、Runner | 执行指令 → 同步/异步输出或阶段结果 | 设备初始化、加载与执行入口 |
+| Model Runner | Worker 所在进程 | 模型、采样器、请求状态、输入缓冲区 | SchedulerOutput → 中间张量、待采样状态或 ModelRunnerOutput | 准备输入、调用模型并组织采样，不只生成 input_ids |
+| Model | Worker 所在进程；tensor 计算在设备上 | 权重和层对象 | 模型输入 → hidden states；LM head 另算 logits | 模型数值计算 |
+| Sampler | Worker 所在进程；主要采样运算在设备上 | 采样参数和请求状态 | 未归一化 logits → token IDs、可选 logprobs 等 | 约束、过滤与选择 token |
+
+Logits 是分数，不是概率分布；单卡也不必然对应 uni executor，进程归属仍要看配置。
+
+[源码] `vllm/v1/worker/gpu_worker.py` - `Worker.init_device`
+
+[源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.execute_model`、`sample_tokens`
+
+[源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.forward`
+
 ## 7.2 两个“V1”不是同一个版本维度
 
 当前主线叫 **vLLM V1 Engine**，其内部同时存在两套 GPU Model Runner：
@@ -464,9 +485,9 @@ offload 会改变 I/O 和搬运方式；可靠结论是**最终本地参数由�
 
 用户未显式指定 `kv_cache_memory_bytes` 时，Worker profile 非 KV 峰值并计算：
 
-```math
-M_{KV}=M_{requested}-M_{nonKV}-M_{graph,applied}
-```
+$$
+M_{\mathrm{KV}}=M_{\mathrm{requested}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph,applied}}
+$$
 
 - 所有 `M` 的单位都是 byte（换成 GiB 时所有项一起换）；
 - `M_requested = total_memory * gpu_memory_utilization`，不是 free memory 乘利用率；
@@ -814,9 +835,9 @@ flowchart TD
 
 随机路径常把 logits 除以温度：
 
-```math
+$$
 p_i=\frac{\exp(z_i/T)}{\sum_j\exp(z_j/T)}
-```
+$$
 
 本式只适用于 `T>0`，`z`、`p` 的 shape 都是 `[vocab_size]`，概率无单位；`T=0`
 走 greedy 语义，不做除零。MRV1 全 greedy 时提前返回，混合 batch 才按行合并结果。

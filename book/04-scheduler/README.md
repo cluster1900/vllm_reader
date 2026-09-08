@@ -133,6 +133,13 @@ D 在第 8 轮仍运行；中间省略的轮次没有画出。
 
 把序列 padding 到相同长度只能让 tensor 形状合法，不能消除上述生命周期问题。
 
+### 生活化直觉：观光大巴 vs 动态电梯
+
+如果觉得批处理模式抽象，可以用日常交通工具建立直观对比：
+
+- **静态批处理（Static Batching / 观光大巴模式）**：假设本例一次接待固定的一批 50 名游客。如果车上有 1 位游客要去很远的山顶（生成 2000 个 token 的长请求），而另外 49 位游客只是在门口拍照（生成 5 个 token 的短请求），那 49 位结束后留下的名额，也不能在这一批结束前用于接待后来者；整批要等最后一位完成，才能接下一批人。空座极度浪费，后来者只能在景区门口排长队（队头阻塞）。
+- **动态批处理（Continuous Batching / 动态电梯模式）**：电梯在每一层楼（每个 step）停靠时，门一打开，只要有乘客到了目的地（请求 finished），立刻走出电梯释放空间；如果电梯还有承重与名额余量（token 预算与 sequence slot），门外等候的新乘客（waiting 队列）立刻步入电梯并与里面的老乘客一起继续运行。这能减少固定批次留下的空槽，但不保证满载：还可能没有新请求，或受 KV、token 预算、通信和 CPU 准备限制。
+
 ## 4.2 Continuous Batching 的本质
 
 Continuous Batching 更准确的中文是“连续重组批次”：每个 engine step 都允许批次成员
@@ -295,23 +302,25 @@ stateDiagram-v2
 Scheduler 源码在 `schedule()` 开头明确说明：调度器内部没有必须二选一的全局
 “prefill phase”或“decode phase”。每个请求只有当前目标和已计算进度。
 
-```math
-N_{target}
-= N_{prompt} + N_{accepted\ output} + N_{spec}
-```
+$$
+N_{\mathrm{target}}
+= N_{\mathrm{prompt}} + N_{\mathrm{accepted\ output}} + N_{\mathrm{spec}}
+$$
 
 忽略异步 placeholder 时，本轮需要追赶的差额为：
 
-```math
-N_{new} = N_{target} - N_{computed}
-```
+$$
+N_{\mathrm{new}} = N_{\mathrm{target}} - N_{\mathrm{computed}}
+$$
 
 源码中的 running 路径还会加入 `num_output_placeholders`：
 
-```math
-N_{new}
-= N_{tokens\ with\ spec} + N_{placeholders} - N_{computed}
-```
+$$
+\begin{aligned}
+N_{\mathrm{new}}={}&N_{\mathrm{tokens\ with\ spec}}+N_{\mathrm{placeholders}}\\
+&-N_{\mathrm{computed}}.
+\end{aligned}
+$$
 
 ```mermaid
 flowchart LR
@@ -411,11 +420,12 @@ flowchart TB
 
 ### 4.6.1 `max_num_scheduled_tokens`
 
-这是 Scheduler 一轮最多发出的实际 token 工作量：
+令 $C_{\mathrm{step}}$ 表示 `max_num_scheduled_tokens` 的值，即 Scheduler 一轮
+最多发出的 token 工作量：
 
-```math
-\sum_r N_{scheduled}(r) \le max\_num\_scheduled\_tokens
-```
+$$
+\sum_r N_{\mathrm{scheduled}}(r)\le C_{\mathrm{step}}
+$$
 
 若配置为 `None`，Scheduler 初始化时回退到 `max_num_batched_tokens`。
 
@@ -586,12 +596,27 @@ waiting 顺序；只有后续 KV 压力触发 victim 选择时，低优先级 ru
 长 prompt 的 prefill 通常计算密集，而 decode 请求每轮工作量较小。如果一个 8K prompt
 独占整轮甚至多轮，已经在输出的请求会出现明显 inter-token latency 抖动。
 
-Chunked prefill 把长差额裁成预算允许的片段：
+**直觉：让长任务分段让路。** 假设同一执行路径既有短 decode 请求，也有一个很长
+的 prompt。如果一次处理整个 prompt，该次执行可能拉长已有请求下一次采样的等待。
+Chunked prefill 让长 prompt 分多轮推进，可与 decode 共享预算。例如本轮允许长请求
+计算 512 个 token，剩余部分留到后续轮次；512 是教学配置，不是推荐默认值。
 
-```math
-N_{chunk}
-= \min(N_{remaining},\ token\ budget,\ input\ budget,\ threshold,\ other\ caps)
-```
+分块能缓解干扰，但不会保证所有用户始终流畅：每个 chunk 仍有计算成本，实际间隔
+取决于 batch、设备、KV 与调度条件，前端也可能仍在发送已缓冲的结果。
+
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule` 的预算裁剪与 waiting 准入
+
+
+Chunked prefill 把长差额裁成预算允许的片段。下式的 $B_{\mathrm{token}}$、
+$B_{\mathrm{input}}$ 表示两种剩余 token 预算（不是字节数），$C_{\mathrm{threshold}}$
+和 $C_{\mathrm{other}}$ 表示阈值与其他上限；所有项以 token 为单位：
+
+$$
+\begin{aligned}
+N_{\mathrm{chunk}} = \min\bigl(&N_{\mathrm{remaining}},\; B_{\mathrm{token}},\; B_{\mathrm{input}},\\
+&C_{\mathrm{threshold}},\; C_{\mathrm{other}}\bigr).
+\end{aligned}
+$$
 
 ```mermaid
 flowchart LR
@@ -623,7 +648,7 @@ flowchart LR
 | R2 | 224 | 剩余 budget 为 1024 - 400 - 400 |
 
 第二轮仍是 `400, 400, 224`。第三轮 R0、R1 已进入普通 decode，各获得 1；R2 获得
-`800 - 224 - 224 = 352` 个剩余 prefill token。
+$800-224-224=352$ 个剩余 prefill token。
 
 ```mermaid
 flowchart TB
@@ -853,15 +878,15 @@ KV 继续增长并不足时，Scheduler 才选择较差 running victim。
 Waiting 请求第一次调度时，Scheduler 先询问本地 prefix cache。若命中 `H_local` 个
 token，又从 connector 获得 `H_external` 个有效 token，则起始进度近似为：
 
-```math
-N_{computed}=H_{local}+H_{external}
-```
+$$
+N_{\mathrm{computed}}=H_{\mathrm{local}}+H_{\mathrm{external}}
+$$
 
 剩余工作变成：
 
-```math
-N_{new}=N_{tokens}-N_{computed}
-```
+$$
+N_{\mathrm{new}}=N_{\mathrm{tokens}}-N_{\mathrm{computed}}
+$$
 
 ```mermaid
 flowchart TD

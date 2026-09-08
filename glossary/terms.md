@@ -88,7 +88,7 @@
 | NCCL / Gloo | 常用于 GPU / CPU 的分布式通信库；一侧可用不证明另一侧可用。 |
 | MoE / expert / router | 专家混合模型 / 专家子网络 / 为 token 选择专家及权重的组件。 |
 | PCP / DCP | Prefill / Decode Context Parallel；PCP 增加 worker 维度，DCP 复用已有 ranks，合法组合须查配置。 |
-| LSE | Log-Sum-Exp，`log(sum(exp(scores)))`；保留局部 softmax 的归一化总量，供跨分块或 rank 合并。 |
+| LSE | Log-Sum-Exp，$\log\sum_j\exp(s_j)$；保留局部 softmax 的归一化总量，供跨分块或 rank 合并。 |
 | SLO / goodput | 预先规定的服务目标 / 每秒同时满足所配置目标的成功请求数。 |
 | TPOT / E2EL | 首事件后平均每输出 token 时间 / 从发送到适配器规定末事件的端到端延迟。 |
 | Percentile / p99 | 对样本排序后的百分位；p99 不是最大值，计算需明确插值方法与样本量。 |
@@ -96,3 +96,8 @@
 | RPS / TPS | 每秒请求数 / 每秒 token 数；TPS 必须指明输入、输出或两者总和。 |
 | Benchmark / profiler | 测量性能的实验 / 解释执行时间和资源消耗的诊断工具。 |
 | Pareto frontier | 没有被其他方案同时在所有目标上压过的候选集合，不自动选出唯一最佳项。 |
+| Arithmetic intensity | 算术强度，每搬运一字节数据对应的浮点运算量；prefill/decode 的瓶颈还取决于 batch、模型、设备和实现。 |
+| Static memory pool | 启动时按预算预分配、运行时复用的内存池；KV 池不等于全部可用显存，请求 free 通常只释放池内引用。 |
+| Capture / replay | 记录操作及依赖 / 重放可执行图；只作用于已捕获且满足条件的区域，不等于整个 step 只需一次提交。 |
+| Column / row parallel | 沿线性层输出维 / 输入维切分；基础 dense TP 中可配对避免中间 gather，实际通信依配置与实现而定。 |
+| Little’s Law | $L=\lambda W$：在适用条件和一致观察边界下，平均系统请求数=有效到达率×平均停留时间；不单独预测 p99 或过载发散曲线。 |

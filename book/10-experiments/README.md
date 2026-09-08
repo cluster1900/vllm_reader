@@ -84,7 +84,7 @@ benchmark 测性能，profiler 解释耗时所在。先保留原始样本，再�
 
 **第一遍走法：** 读 10.1–10.4、10.7、10.10、10.18，运行 10.23，再做综合案例；
 多种 profiler 与扫参工具可第二遍选读。**停下来算：** 发送后 0.3 秒收到首 token，
-共 5 token，末 token 在 0.5 秒，TPOT=`(0.5-0.3)/4=0.05` 秒；客户端发前排队另计。
+共 5 token，末 token 在 0.5 秒，TPOT=$\frac{0.5-0.3}{4}=0.05$ 秒；客户端发前排队另计。
 
 ## 10.1 先定义“谁觉得快”
 
@@ -149,27 +149,47 @@ sequenceDiagram
 先采用每个内容事件对应一个 token 的教学模型。所有 `t` 来自同一客户端时钟，
 以下时间差统一用秒；`N` 是输出 token 数，不是响应消息条数。由此定义：
 
-```math
-client\_queue=t_{send}-t_{arrival}
-```
+$$
+T_{\mathrm{client\ queue}}=t_{\mathrm{send}}-t_{\mathrm{arrival}}
+$$
 
-```math
-TTFT=t_{first}-t_{send}
-```
+$$
+\mathrm{TTFT}=t_{\mathrm{first}}-t_{\mathrm{send}}
+$$
 
-```math
-ITL_j=t_j-t_{j-1}
-```
+$$
+\mathrm{ITL}_j=t_j-t_{j-1}
+$$
 
-```math
-E2EL=t_{last}-t_{send}
-```
+$$
+\mathrm{E2EL}=t_{\mathrm{last}}-t_{\mathrm{send}}
+$$
 
 若输出 token 数为 `N>1`：
 
-```math
-TPOT=\frac{E2EL-TTFT}{N-1}
-```
+$$
+\mathrm{TPOT}=\frac{\mathrm{E2EL}-\mathrm{TTFT}}{N-1},\qquad N>1
+$$
+
+### 生活化直觉：聊天体验与测量指标怎样对应
+
+用户体感可以帮助理解指标，但网页上的一个汉字不等于模型 token，也不等于一条
+SSE 事件。下表沿用本章 `bench serve` 的客户端计时起点，并与“点击发送”的 UI
+体验区分；阈值由业务 SLO 决定，没有通用的阅读速度换算标准。
+
+| 指标 | 体验上的近似对应 | 本章测量口径 | 需要注意 |
+|---|---|---|---|
+| TTFT | 等待首次响应 | HTTP 发送到首个被适配器计入的流式事件 | 不含发送前 semaphore 排队；也未必等于首个可见汉字 |
+| TPOT | 首次响应后的平均生成速度 | $\frac{\mathrm{E2EL}-\mathrm{TTFT}}{N-1}$，`N>1` | 单位为秒/token，不能按汉字数计算 |
+| ITL | 流式更新是否有长间隔 | 相邻被计入的流式事件间隔 | 事件可能含多个 token，不是逐字时间 |
+| E2EL | 等待整个回复结束 | HTTP 发送到适配器规定的末计时点 | 相同口径且 `N>1` 时为 $\mathrm{TTFT}+(N-1)\mathrm{TPOT}$ |
+
+例如生成 5 个 token，TTFT=0.3 秒、TPOT=0.05 秒，则 E2EL=0.5 秒；若用户在发送
+之前已经等待 0.2 秒，UI 的总体验还需单独计入这段等待。
+
+[源码] `vllm/benchmarks/serve.py` - `calculate_metrics`
+
+[源码] `vllm/benchmarks/lib/endpoint_request_func.py` - completion/chat 请求适配器
 
 ### 10.2.2 ITL 与 TPOT 不是同一个统计量
 
@@ -220,28 +240,30 @@ token 数，缺失时可能重新 tokenize 文本；ITL 列表则来自流式事
 设 benchmark duration 为 `T` 秒、成功请求数为 `R`、成功请求的输入和输出 token 总数
 分别为 `I`、`O`。请求吞吐单位是 request/s，token 吞吐单位是 token/s：
 
-```math
-request\ throughput=R/T
-```
+$$
+\text{request throughput}=\frac{R}{T}
+$$
 
-```math
-output\ throughput=O/T
-```
+$$
+\text{output throughput}=\frac{O}{T}
+$$
 
-```math
-total\ token\ throughput=(I+O)/T
-```
+$$
+\text{total token throughput}=\frac{I+O}{T}
+$$
 
 输入很长、输出很短时，total tokens/s 可能很高，却不能说明 decode 很快。报告 tokens/s
 时必须写清是 input、output 还是 total。
 
 ### 10.3.2 goodput 把 SLO 加入分子
 
-若一个请求必须同时满足 `TTFT<=S_ttft`、`TPOT<=S_tpot`、`E2EL<=S_e2el`：
+若一个请求必须同时满足 $\mathrm{TTFT}\le S_{\mathrm{ttft}}$、
+$\mathrm{TPOT}\le S_{\mathrm{tpot}}$、$\mathrm{E2EL}\le S_{\mathrm{e2el}}$，
+令 $R_{\mathrm{SLO}}$ 为达标的成功请求数，$G$ 为 goodput（request/s）：
 
-```math
-goodput=\frac{\#\ requests\ satisfying\ all\ configured\ SLOs}{T}
-```
+$$
+G=\frac{R_{\mathrm{SLO}}}{T}
+$$
 
 当前 `bench serve` 的 goodput 对已配置门槛采用 AND 关系，只计成功请求。CLI 的
 `--goodput` 阈值用毫秒，计算时转为秒；未配置门槛时结果字段为 0，不能解释为
@@ -428,11 +450,12 @@ flowchart LR
 ### 10.7.3 到达过程
 
 当 request rate 有限时，默认 `burstiness=1` 使用 Poisson arrival，也就是指数分布间隔。
-更一般地从 Gamma 分布采样：
+更一般地从 Gamma 分布采样。令 $\Delta t$ 为间隔（秒），$\lambda$ 为
+`rate` 对应的到达率（request/s），$b$ 为 burstiness：
 
-```math
-interval\sim Gamma(shape=b,\ scale=1/(rate\cdot b))
-```
+$$
+\Delta t\sim\operatorname{Gamma}\!\left(\text{shape}=b,\;\text{scale}=\frac{1}{\lambda b}\right)
+$$
 
 - `b<1` 更 bursty；
 - `b=1` 是 Poisson process；
@@ -640,21 +663,21 @@ flowchart LR
 `vllm/v1/metrics/stats.py` 中的 request timestamps 使用两类 clock：frontend arrival 是
 wall-clock，EngineCore events 是 monotonic。`IterationStats` 最终形成：
 
-```math
-queued=first\ scheduled-first\ queued
-```
+$$
+T_{\mathrm{queue}}=t_{\mathrm{scheduled,first}}-t_{\mathrm{queued,first}}
+$$
 
-```math
-prefill=first\ token-first\ scheduled
-```
+$$
+T_{\mathrm{prefill}}=t_{\mathrm{token,first}}-t_{\mathrm{scheduled,first}}
+$$
 
-```math
-decode=last\ token-first\ token
-```
+$$
+T_{\mathrm{decode}}=t_{\mathrm{token,last}}-t_{\mathrm{token,first}}
+$$
 
-```math
-inference=last\ token-first\ scheduled
-```
+$$
+T_{\mathrm{inference}}=t_{\mathrm{token,last}}-t_{\mathrm{scheduled,first}}
+$$
 
 preemption 发生在 prefill 或 decode 时，其等待会包含在对应区间内。`scheduled_ts` 只记录
 第一次 scheduled，避免抢占后重排覆盖起点。
@@ -780,6 +803,21 @@ xychart-beta
 
 曲线转折处表示 throughput 开始趋平，而 queue 与 p99 快速上升。生产容量通常应留在转折点
 左侧，而不是选择峰值 throughput 对应的过载点。
+
+**排队论直觉：Little’s Law 是平均量之间的关系。** 在相应长期平均存在、观察边界
+一致等条件下，$L=\lambda W$：`L` 是系统中平均请求数，`λ` 是有效到达率（request/s），
+`W` 是请求在系统中的平均停留时间（秒，包含等待与服务）。若只讨论排队部分，
+应使用对应的 $L_q=\lambda W_q$，不能把系统在途数与纯排队等待时间混用。
+
+例如平均有 20 个请求在系统中，每秒处理 10 个请求，则平均停留时间为 2 秒。
+这条关系本身不提供 p99，也不能单独推出延迟按 $\frac{1}{1-\rho}$ 发散。后者需要特定
+队列模型及到达/服务过程假设；vLLM 的动态批处理、变长请求和并行执行不自动符合。
+[MIT 对 Little’s Law 的说明](https://web.mit.edu/urban_or_book/www/book/chapter4/4.4.html)
+强调了平均人数、有效到达率和停留时间的对应关系。
+
+工程上应测量负载增加时的排队和尾延迟曲线，而不是预言某两个负载点一定相差
+5–10 倍。提高到达率可能造成过载，优化服务能力则可能同时改善吞吐与延迟；两者
+不能都概括为“追求吞吐必然牺牲延迟”。
 
 ### 10.13.3 用 goodput 找可服务容量
 
@@ -1031,9 +1069,9 @@ Cache 或 GPU attention 性能。
 先假设其他阶段耗时不变、阶段串行且工作量固定。`f` 是该 kernel 占原耗时的比例
 （0 到 1），`s` 是其加速倍数，两者无单位，Amdahl 加速上限为：
 
-```math
-S_{total}\leq\frac{1}{(1-f)+f/s}
-```
+$$
+S_{\mathrm{total}}\leq\frac{1}{(1-f)+f/s}
+$$
 
 一个占 5% 的 kernel 即使快 2 倍，端到端理论收益也只有约 2.6%。如果报告端到端提升 20%，
 说明还改变了别的机制或测量条件，应继续调查。
@@ -1079,11 +1117,12 @@ p99 TTFT；限制每 step prefill tokens 后，短请求 p99 TTFT 应下降，�
 
 ### 10.18.4 第四步：只改一个因素并重复
 
-记录 treatment 唯一差异，交替运行，多次重复。计算：
+记录 treatment 唯一差异，交替运行，多次重复。令 $x_{\mathrm{treatment}}$、
+$x_{\mathrm{baseline}}$ 为相同单位的测量值，百分比变化为：
 
-```math
-change\%=\left(\frac{treatment}{baseline}-1\right)\times100
-```
+$$
+\Delta_{\%}=\left(\frac{x_{\mathrm{treatment}}}{x_{\mathrm{baseline}}}-1\right)\times100\%
+$$
 
 对于 latency，负 change 是改善；对于 throughput，正 change 是改善。报告中必须明确方向。
 
@@ -1209,15 +1248,18 @@ max concurrency。结果汇总后可绘图。
 
 ### 10.20.3 每用户与每 GPU 效率
 
-当前 Pareto 工具可计算：
+令 $Q_{\mathrm{out}}$ 为输出吞吐（token/s），$N_{\mathrm{users}}$ 为用户数，
+$N_{\mathrm{GPU}}$ 为 GPU 数。每用户与每 GPU 的生成速率分别为：
 
-```math
-tokens/(s\cdot user)=output\ throughput/user\ count
-```
+$$
+Q_{\mathrm{user}}=\frac{Q_{\mathrm{out}}}{N_{\mathrm{users}}}
+$$
 
-```math
-tokens/(s\cdot GPU)=output\ throughput/GPU\ count
-```
+$$
+Q_{\mathrm{GPU}}=\frac{Q_{\mathrm{out}}}{N_{\mathrm{GPU}}}
+$$
+
+$Q_{\mathrm{user}}$ 的单位为 token/(s·user)，$Q_{\mathrm{GPU}}$ 为 token/(s·GPU)。
 
 **工具行为与物理含义需要分开。** `_infer_user_count` 优先使用指定字段，否则用
 `request_rate`，最后才回退到 peak concurrency。但 request/s 不是用户数：

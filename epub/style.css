@@ -67,6 +67,21 @@ img, svg {
   page-break-inside: avoid;
 }
 
+/* Math is pre-rendered with glyph outlines, without reader font/JS dependencies. */
+img.math-inline {
+  display: inline;
+  max-width: none;
+  margin: 0 0.08em;
+}
+
+img.math-display {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 1em auto;
+  page-break-inside: avoid;
+}
+
 details {
   margin: 0.8em 0;
   padding: 0.5em;
