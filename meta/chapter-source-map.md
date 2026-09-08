@@ -10,15 +10,15 @@
 
 | 章 | 教学责任 | 当前源码主锚点 | 明确边界 |
 |---|---|---|---|
-| 01 | 建立自回归推理、prefill/decode、KV 与 sampling 基础 | `llama.py`、`attention.py`、`sampling_params.py`、MRV1/MRV2 sampler | 只建立模型计算直觉，不解释服务调度 |
-| 02 | 给出离线/在线请求的端到端地图 | `entrypoints/llm.py`、offline utils、Renderer、OpenAI chat serving、`AsyncLLM`、core client、输入/输出处理器 | ZMQ 多进程是在线主线；单 rank `UniProcExecutor` 的 Worker 位于 EngineCore 进程，不能把逻辑 Worker 一律画成额外进程 |
+| 01 | 建立自回归推理、prefill/decode、KV 与 sampling 基础 | `vllm/model_executor/models/llama.py`、`vllm/model_executor/layers/attention/attention.py`、`vllm/sampling_params.py`、MRV1/MRV2 sampler | 只建立模型计算直觉，不解释服务调度 |
+| 02 | 给出离线/在线请求的端到端地图 | `vllm/entrypoints/llm.py`、offline utils、Renderer、OpenAI chat serving、`AsyncLLM`、core client、输入/输出处理器 | ZMQ 多进程是在线主线；单 rank `UniProcExecutor` 的 Worker 位于 EngineCore 进程，不能把逻辑 Worker 一律画成额外进程 |
 | 03 | 解释 Engine 门面、client、EngineCore 生命周期和 IPC | `LLMEngine`、`EngineCoreClient`、`EngineCore`、`EngineCoreProc`、`EngineCoreActor` | 不展开 Scheduler 算法和 GPU tensor 构造 |
 | 04 | 解释 token 级调度与 Continuous Batching | `Scheduler`、`SchedulerOutput`、`RequestQueue`、`Request` | 负责“算谁、算多少”，不负责 kernel 如何计算 |
 | 05 | 解释 KV 规格、启动容量和 block 生命周期 | `KVCacheSpec`、`get_kv_cache_configs`、`Worker.determine_available_memory`、`KVCacheManager`、`BlockPool`、coordinator、single-type managers | 常规命中以完整 block 为主；当前混合 KV 路径还支持条件化 partial-tail 命中和 CoW；不展开 kernel 寻址 |
 | 06 | 解释 block table、slot mapping、ragged metadata 到 attention backend/kernel 的寻址与执行契约 | `Attention` 与 unified ops、backend interface/registry/selector、CUDA platform、MRV1/MRV2 block table、FlashAttention、特定 `PagedAttention` helper | 历史 PagedAttention kernel 与当前实际 backend 必须分开；FlashAttention 等实现也可直接消费分页 KV |
 | 07 | 解释 SchedulerOutput 如何成为 GPU forward 和采样结果 | UniProc/Multiproc Executor、WorkerWrapper/GPU Worker、model registry/loader、MRV1/MRV2 runner、sampler 与 outputs | unique reply 不等于单 rank 执行；V1 Engine 与 MRV1/MRV2 是两个维度；MRV2 是受条件约束的默认路径 |
 | 08 | 解释异步调度、compile 和 CUDA Graph 的开销优化 | `AsyncScheduler`、EngineCore batch queue、compile decorator/backend/ranges/cache、MRV1 dispatcher/wrapper、MRV2 graph manager | batch queue 与 async scheduler 分开；配置模式与 runtime mode 分开；`torch.compile` 与 CUDA Graph 分层讲；MRV2 manager 不是旧 wrapper 的别名 |
-| 09 | 解释 TP/PP/DP/EP/PCP/DCP 拓扑、group、ownership 和通信恢复语义 | `ParallelConfig`、`parallel_state.py`、TP linear、PP model path、DP client/coordinator、MoE runner、PCP manager、DCP ops、MP/Ray executors | 当前 worker `world_size=TP×PP×PCP`，DCP 不扩进程；EP 展平 DP×PCP×TP；Ray V1/V2 由 factory 选择 |
+| 09 | 解释 TP/PP/DP/EP/PCP/DCP 拓扑、group、ownership 和通信恢复语义 | `ParallelConfig`、`vllm/distributed/parallel_state.py`、TP linear、PP model path、DP client/coordinator、MoE runner、PCP manager、DCP ops、MP/Ray executors | 当前 worker `world_size=TP×PP×PCP`，DCP 不扩进程；EP 展平 DP×PCP×TP；Ray V1/V2 由 factory 选择 |
 | 10 | 建立可复现的 benchmark、metrics、profiling、归因与回归方法 | latency/throughput/serve benchmark、endpoint timestamps、datasets、sweep/Pareto、V1 metrics、ProfilerConfig、组件微基准 | 客户端与内部计时边界分开；性能结论必须绑定 workload、噪声、配置和正确性验证 |
 
 ## 审计修正
@@ -77,3 +77,12 @@ python3 scripts/check_book.py
 
 校验脚本会检查上游 HEAD、十章 frontmatter、映射文件中的源码路径和关键符号。它能
 发现结构漂移，但无法证明章节中的控制流解释和性能结论正确；这些仍需测试和实验。
+
+
+## 本轮复核补充
+
+- 02：`vllm/entrypoints/offline_utils.py` 的 `_add_request` 与 `_run_engine` 共同解释提交顺序。
+- 03：`vllm/v1/engine/core.py` 的 `_pause_complete`、`has_work`、`_reset_caches` 解释暂停、通信和保留 KV 的不同边界。
+- 07/08：`vllm/v1/worker/gpu/buffer_utils.py` 的 `UvaBuffer`、`UvaBufferPool.copy_to_uva` 与 `StagedWriteTensor` 区分映射访问和 H2D 拷贝。
+
+- 08：将泛称 `test_profile_cudagraph_memory` 替换为实际测试 `test_profile_cudagraph_memory_samples_and_extrapolates` 与 `test_profile_cudagraph_memory_frees_throwaway_pool`，位于 `tests/v1/worker/test_gpu_model_runner_v2_cudagraph_profiling.py`。定义引用由 AST 按完整名称检查，不再仅匹配前缀。

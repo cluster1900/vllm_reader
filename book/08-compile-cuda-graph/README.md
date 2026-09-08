@@ -1953,3 +1953,21 @@ flowchart TB
 
 本机当前无可用 vLLM NVIDIA CUDA runtime，因此本章标记为 `draft`：源码、图解和 CPU 契约测试已完成，
 真实 GPU capture/replay、显存和 profiler 数据仍需按实验协议在目标硬件上复核。
+
+## 第一遍自检
+
+先用自己的话回答下面三个问题，再展开线索。前面的源码追踪题和设计题留作第二遍
+阅读；不需要第一次就掌握所有硬件与功能分支。
+
+1. 关闭 torch.compile 是否足以证明某一步没有 CUDA Graph replay？
+2. 新建一个 shape 相同的 tensor 后，能否直接复用原来捕获的图？
+3. 看到 non_block=True 和 Future，就能断言两轮 GPU 计算已经并行了吗？
+
+<details>
+<summary>答题线索</summary>
+
+1. 不能。编译模式和 CUDA Graph 是不同配置维度，还需检查最终 runtime graph mode 与实际 dispatch。
+2. 不能只比较 shape。捕获的地址、缓冲区生命周期及其他 descriptor 条件也要满足，常见做法是向持久输入缓冲区写入新内容。
+3. 不能。Future 可能已经完成，调用方也可能立即等待；重叠还要看数据依赖、stream、队列与实际时间线。
+
+</details>

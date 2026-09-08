@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import ast
+from functools import lru_cache
 import re
 import subprocess
 import sys
@@ -52,6 +54,27 @@ SOURCE_PATH_RE = re.compile(
     r"`((?:vllm|tests|docs|benchmarks|examples)/[^`\s:]+?\."
     r"(?:py|md|cu|cuh|cpp|h|yaml|yml|json))(?:[:]{1,2}[^`]*)?`"
 )
+
+
+@lru_cache(maxsize=256)
+def python_definitions(source: str) -> set[tuple[str, str]]:
+    definitions = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ClassDef):
+            definitions.add(("class", node.name))
+        elif isinstance(node, ast.AsyncFunctionDef):
+            definitions.add(("async def", node.name))
+            definitions.add(("def", node.name))
+        elif isinstance(node, ast.FunctionDef):
+            definitions.add(("def", node.name))
+    return definitions
+
+
+def source_symbol_exists(source: str, symbol: str, *, python: bool) -> bool:
+    definition = re.fullmatch(r"(class|def|async def) ([A-Za-z_]\w*)", symbol)
+    if python and definition:
+        return definition.groups() in python_definitions(source)
+    return symbol in source
 
 
 def parse_frontmatter(path: Path, text: str) -> dict[str, str]:
@@ -133,7 +156,7 @@ def check_pedagogy(path: Path, text: str, errors: list[str]) -> None:
 
 def check_local_links(path: Path, text: str, errors: list[str]) -> None:
     for target in re.findall(r"\[[^]]+\]\(([^)]+)\)", text):
-        if target.startswith(("http://", "https://", "#")):
+        if target.startswith(("http://", "https://", "mailto:", "#")):
             continue
         clean_target = target.split("#", 1)[0]
         resolved = (path.parent / clean_target).resolve()
@@ -285,7 +308,7 @@ def check_source_map(
             for symbol in symbols:
                 if not isinstance(symbol, str) or not symbol:
                     errors.append(f"source map: {relative_path} has an invalid symbol")
-                elif symbol not in source_text:
+                elif not source_symbol_exists(source_text, symbol, python=source_file.suffix == ".py"):
                     errors.append(
                         f"source map: {relative_path} no longer contains {symbol!r}"
                     )

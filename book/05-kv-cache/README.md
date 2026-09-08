@@ -927,6 +927,18 @@ flowchart LR
 
 > **读图方法：** 阅读“查找最长连续前缀”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
 
+**命中查询也受请求参数控制。** 未显式设置 `skip_reading_prefix_cache` 时，
+`SamplingParams` 会在 `prompt_logprobs` 非 None 时默认跳过读取 prefix cache，
+包括 `prompt_logprobs=0`。所以两个请求即使 token 和 hash 相同，也不一定执行相同的
+查找路径。显式设置该字段会覆盖默认行为；不能由此保证被跳过位置的 prompt
+logprobs 完整返回。这里控制的是读取复用，不等于停止为当前计算维护 KV。
+
+[源码] `vllm/sampling_params.py` - `SamplingParams.__post_init__`
+
+[源码] `vllm/v1/request.py` - `Request.get_skip_reading_prefix_cache`
+
+[源码] `vllm/v1/core/kv_cache_manager.py` - `prefix_cache_lookup_enabled`、`get_computed_blocks`
+
 ### 5.12.2 为什么全 prompt 命中仍重算最后 token
 
 `get_computed_blocks()` 把最大命中长度设为：
@@ -1128,7 +1140,7 @@ sequenceDiagram
 
 ### 5.15.4 当前测试覆盖的复杂边界
 
-上游 `test_partial_prefix_cache_hits.py` 覆盖了：
+上游 `tests/v1/core/prefix_cache/test_partial_prefix_cache_hits.py` 覆盖了：
 
 - Full Attention + Mamba 的对齐；
 - owner 继续写 partial tail；
@@ -1579,3 +1591,21 @@ KV Cache 管理的核心不是“保存一个 tensor”，而是维护动态服�
 本章正文、图示、教学模型和 CPU 测试已经完成，`content_complete=true`。当前机器没有可用
 的 vLLM NVIDIA GPU runtime，无法核对真实显存 profiling、GPU copy 和 attention 执行，
 因此 `runtime_verified=false`，状态保持 `draft`。
+
+## 第一遍自检
+
+先用自己的话回答下面三个问题，再展开线索。前面的源码追踪题和设计题留作第二遍
+阅读；不需要第一次就掌握所有硬件与功能分支。
+
+1. 在普通单组 Full Attention、无共享和预留的教学条件下，每块容纳 4 token，9 token 需要几块？尾块空几个位置？
+2. 一块缓存被两个请求共同引用，一个请求结束后能立即覆写它吗？最后一个请求结束后 hash 又会怎样？
+3. 请求已经结束，GPU 进程显存却没有明显下降，如何判断是池复用还是泄漏？
+
+<details>
+<summary>答题线索</summary>
+
+1. 需要 3 块，共 12 个位置，尾部有 3 个空位。真实配置还要考虑 cache group、lookahead 与类型约束。
+2. 一个请求结束只把引用从 2 降到 1，另一个还在使用。引用归零后可进入空闲队列，但缓存 hash 可继续保留，直到淘汰。
+3. 先看请求引用和 KV usage 是否回落，以及相同负载重复运行后是否持续增长；预分配池保留本身不能证明或排除泄漏。
+
+</details>

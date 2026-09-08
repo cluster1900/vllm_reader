@@ -762,11 +762,23 @@ deferred batch 放回 queue。正确性依赖优先于最大化重叠。
 
 Pause 是 Scheduler 状态，不等于进程退出。
 
-| mode | 已在途请求 | 新请求 | pause 完成条件 |
+| mode | 已在途请求 | 新请求 | Core 侧完成边界 |
 |---|---|---|---|
-| `abort` | 立即标记 abort | 入队但不调度 | abort 输出发送、设备 idle |
+| `abort` | 标记 abort，结束输出入队 | 入队但不调度 | Core 没有剩余工作，再同步设备 |
 | `wait` | 已 running 请求允许继续完成 | waiting 请求不准入，包括暂停前已排队者 | running 与在途 batch 排空 |
-| `keep` | 冻结并保留 | 入队但不调度 | 在途 batch/输出排空 |
+| `keep` | 保留请求；KV 是否保留还看 `clear_cache` | 入队但不调度 | 在途工作结算后同步设备 |
+
+表中按普通非 DP 的 `EngineCoreProc` 路径解释。`_pause_complete()` 判断
+`not has_work()`，`has_work()` 检查调度器、batch queue 和 engines_running；它没有直接
+检查输出队列为空。RPC 回应还要经过输出线程，不能把 Core 的 Future 完成当作所有
+客户端都已消费完终止消息。DP 另有跨 rank 的暂停协调。
+
+`clear_cache=True` 时，`_finish_pause` 调用的 `_reset_caches` 默认会重置 running
+请求：它们可能被抢占、释放 KV 并归零计算进度。要暂停后保留原 KV 继续计算，应明确
+讨论 `keep` 配合 `clear_cache=False`；单看 `keep` 不能推断缓存一定保留。
+
+[源码] `vllm/v1/engine/core.py` - `EngineCoreProc._pause_complete`、`has_work`、
+`EngineCore._finish_pause`、`_reset_caches`、`DPEngineCoreProc._pause_complete`
 
 基础 `EngineCore.pause_scheduler()` 不支持 in-process 的 `wait`；`EngineCoreProc` 覆盖该
 方法，可返回 Future，在 engine idle callback 中同步设备并清 cache。
@@ -1213,7 +1225,8 @@ aborts queue 让取消在 GPU 返回后、Scheduler update 前生效；input que
 <summary>10. wait 与 keep</summary>
 
 两者暂停 waiting 准入；wait 允许已有 running 请求 drain，暂停前尚在 waiting 的请求
-也会等待 resume。keep 冻结 running 请求，只排空已提交的工作。
+也会等待 resume。keep 暂停后续调度，已提交工作仍需结算；若还指定清缓存，
+running 请求会被重置，不能再假定它们持有原 KV。
 </details>
 
 <details>

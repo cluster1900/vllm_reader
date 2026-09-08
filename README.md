@@ -1,5 +1,7 @@
 # vLLM 源码教程（图文）
 
+作者：Hawk Wu · 联系邮箱：[hawk.wu525@gmail.com](mailto:hawk.wu525@gmail.com)
+
 面向初中级程序员和软件工程类学生，具备 Python 基础即可，不要求具备大模型系统背景，系统讲解 vLLM V1 的
 核心架构、源码调用链和性能优化机制。
 
@@ -15,7 +17,7 @@
 - 基线日期：2026-09-07
 - 文档状态：第 01 至 10 章正文、图解、教学代码和实验模板均已完成
 - 本轮全书复核：2026-09-08；修正源码语义、图示和教学示例，增加分层路线与小练习。
-- [逐章检查与修复记录](meta/full-book-review-2026-09-08.md)：问题、证据、验证结果及未运行范围。
+- [首次逐章检查记录](meta/full-book-review-2026-09-08.md)与[再次复核记录](meta/final-source-review-2026-09-08.md)：问题、证据、验证结果及未运行范围。
 
 正式章节必须绑定自己的源码 commit。上游更新后，不得假设旧结论仍然有效。
 
@@ -46,13 +48,18 @@ pnpm install
 python3 scripts/build_epub.py
 ```
 
+封面使用 `epub/cover-imagegen.png`，由 imagegen 生成并作为 EPUB3 封面图片嵌入。
 默认产物为 `dist/vllm-source-guide.epub`。构建结束时会自动运行
-`scripts/check_epub.py`，检查 EPUB 容器、目录、正文、图片和内部链接，并逐项核对公式与 Markdown 是否一致。
+`scripts/check_epub.py`，检查 EPUB 容器、封面、目录和链接，并与 Markdown 逐项比对正文、表格、代码、图示与公式。
 
 全书还使用 `scripts/enrich_pedagogy.py` 维护教学提示。每章都包含针对目标读者的阅读
 方法，每张 Mermaid 图后都有读图说明；`scripts/check_book.py` 会检查这些内容没有遗漏。
 
 目标总篇幅约 560 页。页数是控制内容比例的估算，不是完成标准。
+
+EPUB 的正文来源为 [阅读指南](book/reading-guide.md)、10 个章节和术语表。
+阅读指南不再硬编码在构建脚本中；仓库链接保留原文字，指向固定提交的 GitHub 页面，
+书内链接则指向对应章节。校验器检查顺序与内容，不能只靠段落数或字数判断一致。
 
 ## 公式显示
 
@@ -85,5 +92,5 @@ python3 scripts/check_book.py
 ```
 
 该命令检查十章文件、frontmatter、内部链接、Markdown 代码围栏，以及
-`meta/chapter-source-map.json` 中的源码路径、关键符号和上游 commit。它不替代对
+`meta/chapter-source-map.json` 中的源码路径、关键符号和上游 commit；函数与类引用通过 AST 核对完整定义。它不替代对
 控制流、边界条件和实验结果的人工复核。

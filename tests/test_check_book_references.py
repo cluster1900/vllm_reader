@@ -62,5 +62,21 @@ class ExplicitReferenceCheckTest(unittest.TestCase):
             )
 
 
+class ExactDefinitionTests(unittest.TestCase):
+    def test_prefix_and_comment_cannot_impersonate_a_definition(self):
+        from scripts.check_book import source_symbol_exists
+        source = "# def expected\ndef expected_suffix():\n    pass\n"
+        self.assertFalse(source_symbol_exists(source, "def expected", python=True))
+        self.assertTrue(source_symbol_exists(source, "def expected_suffix", python=True))
+
+    def test_async_and_class_definitions_are_distinguished(self):
+        from scripts.check_book import source_symbol_exists
+        source = "async def work():\n    pass\nclass Worker:\n    pass\n"
+        self.assertTrue(source_symbol_exists(source, "def work", python=True))
+        self.assertTrue(source_symbol_exists(source, "async def work", python=True))
+        self.assertTrue(source_symbol_exists(source, "class Worker", python=True))
+        self.assertFalse(source_symbol_exists(source, "class work", python=True))
+
+
 if __name__ == "__main__":
     unittest.main()

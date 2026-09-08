@@ -191,6 +191,14 @@ SSE 事件。下表沿用本章 `bench serve` 的客户端计时起点，并与�
 
 [源码] `vllm/benchmarks/lib/endpoint_request_func.py` - completion/chat 请求适配器
 
+**计时点的精确含义。** 本章将 `t_send` 简称为发送起点，但源码实际在
+`session.post(...)` 调用之前记录 `perf_counter()`，不是网卡发出首字节的时刻。
+因此请求函数内后续的连接等待、编码、网络与响应处理可能计入 TTFT/E2EL；客户端
+信号量等待则单列。读取日志时应追到计时语句，不能只依据字段名判断边界。
+
+[源码] `vllm/benchmarks/lib/endpoint_request_func.py` - `async_request_openai_completions`、
+`async_request_openai_chat_completions`
+
 ### 10.2.2 ITL 与 TPOT 不是同一个统计量
 
 > **本节先看：** 下面先给出“ITL 与 TPOT 不是同一个统计量”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
@@ -204,7 +212,7 @@ SSE 事件。下表沿用本章 `bench serve` 的客户端计时起点，并与�
 
 ### 10.2.3 chunk 不一定严格等于 token
 
-`endpoint_request_func.py` 在流式响应中按收到的有效消息记录时间；某些 serving backend
+`vllm/benchmarks/lib/endpoint_request_func.py` 在流式响应中按收到的有效消息记录时间；某些 serving backend
 可能在一个 chunk 中携带多个 tokens。当前 benchmark 会优先使用 usage 中的 completion
 token 数，缺失时可能重新 tokenize 文本；ITL 列表则来自流式事件间隔。
 
@@ -311,7 +319,7 @@ flowchart TB
 | 层级 | 代表工具 | 能回答 | 不能单独回答 |
 |---|---|---|---|
 | Kernel | attention/GEMM/collective benchmarks | 某 shape 下 kernel 时间 | 端到端吞吐是否上升 |
-| Component | `benchmark_block_pool.py` 等 | 单个管理组件成本 | GPU 是否成为瓶颈 |
+| Component | `benchmarks/benchmark_block_pool.py` 等 | 单个管理组件成本 | GPU 是否成为瓶颈 |
 | Fixed batch | `vllm bench latency` | 固定 batch 完成时间 | 到达率与排队下的尾延迟 |
 | Offline | `vllm bench throughput` | 一组已知请求的总处理能力 | HTTP、网络、真实到达过程 |
 | Online | `vllm bench serve` | 服务端到端吞吐、TTFT/ITL/E2EL | 单个 kernel 的精确归因 |
@@ -430,7 +438,7 @@ ready check 和 warmup 不进入正式 duration，但会改变 cache、compile �
 - `request_rate` 决定 load generator 产生请求的速度。
 - `max_concurrency` 是客户端连接/任务信号量上限。
 - 请求先到达 load generator，再可能等待 semaphore；这一段记录为 `client_queue_time`。
-- `RequestFuncOutput.start_time` 保留实际 HTTP 发送时间，TTFT/E2EL 不包含客户端 semaphore
+- `RequestFuncOutput.start_time` 记录进入请求函数、调用 `session.post` 前的时间，TTFT/E2EL 不包含客户端 semaphore
   等待；整个 benchmark duration 则包含所有到达与完成过程。
 
 ```mermaid
@@ -685,6 +693,12 @@ preemption 发生在 prefill 或 decode 时，其等待会包含在对应区间�
 这些差值的起止点需来自同一时钟；不要用 wall-clock 的 arrival time 去减 monotonic
 的 scheduled 时间。按同一请求计算完整区间后再汇总，不能用 E2EL p99 减去各阶段
 p99 推导网络延迟，因为几个 p99 可能来自不同请求。
+
+这些内部 token 时间也不是 CUDA kernel 的完成时间。`IterationStats` 使用传入的
+EngineCore 输出时间戳记录 first/last token，前端 TTFT 又使用当前输出处理迭代的时间。
+要测 GPU 内核，应另用 CUDA events 或 profiler；不能把内部请求指标当作设备计时。
+
+[源码] `vllm/v1/metrics/stats.py` - `IterationStats.update_from_output`、`update_from_finished_request`
 
 ### 10.11.2 Prometheus 关键指标
 
@@ -1041,7 +1055,7 @@ flowchart LR
 
 > **本节先看：** 本节要回答：**Component 与 kernel benchmark 的正确用法**。下面的小节会逐层拆开概念、运行过程和源码落点；第一次阅读先抓对象之间的关系，第二次再记类名、字段和分支。
 
-### 10.17.1 `benchmark_block_pool.py`
+### 10.17.1 `benchmarks/benchmark_block_pool.py`
 
 该微基准反复调用 `BlockPool.get_new_blocks` 和 `free_blocks`，每组前执行 GC，报告平均/最大
 微秒。它能回答 Python block allocator 在指定 pool/allocate size 下的成本，不能说明完整 KV
@@ -1049,7 +1063,7 @@ Cache 或 GPU attention 性能。
 
 ### 10.17.2 prefix cache benchmark
 
-`benchmark_prefix_caching.py` 可构造固定 prompt 或 ShareGPT prompts，并重复、排序或打乱。它
+`benchmarks/benchmark_prefix_caching.py` 可构造固定 prompt 或 ShareGPT prompts，并重复、排序或打乱。它
 适合建立有/无 cache 的对照，但使用 `time.time` 包围整个 `llm.generate`，没有 TTFT/ITL
 拆分。若要解释交互体验，应结合 serve benchmark 与 cache metrics。
 
@@ -1535,7 +1549,7 @@ throughput、goodput、p99 TTFT/TPOT、client queue、server queue。
 12. `vllm/v1/metrics/perf.py`：FLOPS/bytes 解析模型与 MFU。
 13. `vllm/config/profiler.py`、`vllm/v1/worker/gpu_worker.py`：profiler 配置与 Worker 控制。
 14. `docs/contributing/profiling.md`：PyTorch、Proton、Nsight Systems 工作流。
-15. `benchmarks/benchmark_block_pool.py`、`benchmark_prefix_caching.py` 和
+15. `benchmarks/benchmark_block_pool.py`、`benchmarks/benchmark_prefix_caching.py` 和
     `benchmarks/attention_benchmarks/`：组件与 kernel 层实例。
 16. `tests/benchmarks/`：CLI、dataset adapter、sweep 和参数稳定性测试。
 
@@ -1543,3 +1557,21 @@ throughput、goodput、p99 TTFT/TPOT、client queue、server queue。
 `5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`。当前机器没有可用的 NVIDIA GPU vLLM
 运行环境，因此 profiler、NCCL 与真实服务性能数据仍标记为 `runtime_verified: false`。
 本章给出的数值曲线均为教学示意，不能冒充实测结果。
+
+## 第一遍自检
+
+先用自己的话回答下面三个问题，再展开线索。前面的源码追踪题和设计题留作第二遍
+阅读；不需要第一次就掌握所有硬件与功能分支。
+
+1. 请求在发送前等了 0.2 秒，计时起点后 0.3 秒见首 token，共 5 token，末事件在 0.5 秒：TTFT、TPOT 和额外客户端等待各是多少？
+2. 改动后 output tokens/s 上升，但输出明显变短且 timeout 增多，可以宣称性能优化成功吗？
+3. profile 显示 kernel 很快，为什么用户仍可能等很久？下一步应查看哪些边界？
+
+<details>
+<summary>答题线索</summary>
+
+1. TTFT 为 0.3 秒，TPOT 为 0.05 秒/token，发送前等待 0.2 秒单独记录；这里是假设每事件一 token 的教学例子。
+2. 不能。工作量与成功样本分布已改变；应固定请求和停止条件，同时报告失败率、长度、正确性与尾延迟。
+3. 还可能有客户端或服务端排队、输入准备、RPC、D2H、输出处理和网络等待。按同一请求的时间戳定位，不能把 kernel 时间当作端到端时间。
+
+</details>

@@ -180,7 +180,7 @@ flowchart TD
 
 > **读图方法：** 这是“两个V1不是同一个版本维度”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
-所以“用了 V1 Engine，因此一定使用 `gpu_model_runner.py`”是错误的。GPU Worker 根据
+所以“用了 V1 Engine，因此一定使用 `vllm/v1/worker/gpu_model_runner.py`”是错误的。GPU Worker 根据
 `VllmConfig.use_v2_model_runner` 选择 MRV1 或 MRV2。两者实现同一上层协议，但内部状态布局、
 输入准备、采样和 CUDA Graph 管理不同。
 
@@ -414,7 +414,7 @@ flowchart LR
 ### 7.6.2 Runner 在什么时候选择
 
 Worker 缓存 `vllm_config.use_v2_model_runner`。workspace 初始化后，true 导入
-`gpu/model_runner.py`，false 导入 `gpu_model_runner.py`。Runner 构造只建立配置和缓冲区结构，随后
+`vllm/v1/worker/gpu/model_runner.py`，false 导入 `vllm/v1/worker/gpu_model_runner.py`。Runner 构造只建立配置和缓冲区结构，随后
 `Worker.load_model()` 才在权重 allocator context 中调用 Runner 的 `load_model()`。
 
 ```mermaid
@@ -624,20 +624,33 @@ flowchart TB
 
 ### 7.12.1 StagedWriteTensor 与 async-first
 
-MRV2 对 block table 等大状态保留 GPU base，CPU 只记录 ragged diffs，打包后 non-blocking H2D，再由
-一个 kernel 应用。对于必须复制的 CPU 状态，则使用本轮独立 pinned copy，避免 CPU 修改持久 state
-时与 GPU 异步读取同一 buffer 竞争。
+先区分两种搬运：数据可以复制到 GPU，也可以由 GPU 通过已映射的主机地址访问。
+UVA（统一虚拟寻址）帮助设备访问映射后的地址，不表示主机 RAM 自动变成 GPU 显存。
+
+当前 block table 默认保存 GPU base。`StagedWriteTensor.apply_write` 把索引、起点和
+累计长度放入轮转的 UVA 缓冲区，把实际写入内容通过 H2D 复制，再由 kernel 应用。
+因此不能把所有元数据都画成一次 H2D。轮转池复用多份 pinned 主机缓冲区，也不等于
+每个 step 都重新分配一块内存。类本身还允许 `uva_instead_of_gpu=True`，此时名为
+`gpu` 的成员实际是主机内存的设备视图，字段名不决定物理驻留位置。
+
+[源码] `vllm/v1/worker/gpu/buffer_utils.py` - `UvaBuffer`、`UvaBufferPool.copy_to_uva`、
+`StagedWriteTensor.__init__`、`apply_write`
+
+[源码] `vllm/v1/worker/gpu/block_table.py` - `BlockTables.__init__`
 
 ```mermaid
-flowchart LR
+flowchart TD
     BASE["GPU base"] --> APPLY["apply-write kernel"]
-    DIFF["CPU diffs"] --> PACK["packed buffers"]
+    DIFF["CPU staged writes"] --> PACK["write contents"]
     PACK --> COPY["non-blocking H2D"]
     COPY --> APPLY
+    DIFF --> INDEX["indices / starts / lengths"]
+    INDEX --> UVA["rotating UVA buffers"]
+    UVA -->|GPU reads mapped metadata| APPLY
     APPLY --> NEW["updated GPU state"]
 ```
 
-> **读图方法：** 阅读“StagedWriteTensor 与 async-first”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
+> **读图方法：** 阅读“StagedWriteTensor 与 async-first”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
 **边界：**设计文档明确保留 feature-complete 与开放设计警告。运行事实仍需看当前配置与源码选择。
 
@@ -842,7 +855,7 @@ $$
 本式只适用于 `T>0`，`z`、`p` 的 shape 都是 `[vocab_size]`，概率无单位；`T=0`
 走 greedy 语义，不做除零。MRV1 全 greedy 时提前返回，混合 batch 才按行合并结果。
 
-Top-k 保留固定数量最高分 token；top-p 保留累计概率达到 p 的最小集合。即使 temperature 为零，
+Top-k 按分数边界筛选，边界并列处理依实现；top-p 按累计概率阈值筛选。即使 temperature 为零，
 grammar、allowed tokens、bad words、bias 和 penalties 也可能先改变 argmax。
 
 ## 7.19 Grammar mask 的汇合点
@@ -977,7 +990,7 @@ graph manager；MRV1 仍覆盖部分 V2 尚不支持组合。共存是能力迁�
 
 | 维度 | MRV1 | MRV2 |
 |---|---|---|
-| 文件组织 | 大型 `gpu_model_runner.py` | `gpu/` 下模块化 |
+| 文件组织 | 大型 `vllm/v1/worker/gpu_model_runner.py` | `gpu/` 下模块化 |
 | persistent batch | state 与输入布局耦合 | permanent row + per-step gather |
 | async | 后续适配 | async-first |
 | metadata | 持久输入与 CPU bookkeeping 较多 | 更多 GPU-native preparation |
@@ -1210,7 +1223,7 @@ flowchart TD
 
 - `vllm/v1/worker/gpu_model_runner.py`：MRV1 execute/sample。
 - `vllm/v1/worker/gpu/model_runner.py`：MRV2 execute/sample 与 `ExecuteModelState`。
-- `vllm/v1/worker/gpu/input_batch.py`、`gpu/states.py`：MRV2 inputs/state。
+- `vllm/v1/worker/gpu/input_batch.py`、`vllm/v1/worker/gpu/states.py`：MRV2 inputs/state。
 - `vllm/v1/sample/sampler.py`：MRV1 Sampler。
 - `vllm/v1/worker/gpu/sample/sampler.py`：MRV2 Sampler。
 - `vllm/v1/outputs.py`：`ModelRunnerOutput`、`AsyncModelRunnerOutput`。
@@ -1260,3 +1273,21 @@ D2H 分开测量。
 `content_complete=true`。当前机器没有可用的 vLLM NVIDIA GPU runtime，未执行真实模型加载、
 NCCL/PP、CUDA memory profiling、MRV1/MRV2 differential inference 和异步 D2H trace，因此
 `runtime_verified=false`，状态保持 `draft`。
+
+## 第一遍自检
+
+先用自己的话回答下面三个问题，再展开线索。前面的源码追踪题和设计题留作第二遍
+阅读；不需要第一次就掌握所有硬件与功能分支。
+
+1. execute_model 返回 None，下一步应怎样判断是正常两阶段执行还是错误？
+2. 某个 TP rank 不回传结果，能否让它跳过 forward？
+3. 请求 B 长期保存在状态行 3，本轮排在 batch 第 0 行，Runner 应如何取得它的数据？
+
+<details>
+<summary>答题线索</summary>
+
+1. 先按接口调用 sample_tokens，检查待采样状态与执行异常；None 本身可以是正常阶段结果，不能单凭它认定 GPU 失败。
+2. 不能。回复选择与计算参与是两回事；该 rank 仍可能必须参与模型分片计算和 collective。
+3. 通过本轮索引映射把 batch 行 0 映射到状态行 3，再收集输入与块表；不能直接把持久表的第 0 行当作 B。
+
+</details>

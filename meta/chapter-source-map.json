@@ -16,7 +16,7 @@
     ],
     "02-vllm-architecture": [
       {"path": "vllm/entrypoints/llm.py", "symbols": ["class LLM", "def generate"]},
-      {"path": "vllm/entrypoints/offline_utils.py", "symbols": ["class OfflineInferenceMixin", "def _run_completion", "def _run_engine"]},
+      {"path": "vllm/entrypoints/offline_utils.py", "symbols": ["class OfflineInferenceMixin", "def _run_completion", "def _run_engine", "def _add_request"]},
       {"path": "vllm/entrypoints/openai/chat_completion/serving.py", "symbols": ["class OpenAIServingChat", "def create_chat_completion"]},
       {"path": "vllm/renderers/base.py", "symbols": ["class BaseRenderer", "def render_cmpl", "def render_chat"]},
       {"path": "vllm/renderers/online_renderer.py", "symbols": ["class OnlineRenderer", "async def render_chat"]},
@@ -37,7 +37,7 @@
       {"path": "vllm/v1/engine/llm_engine.py", "symbols": ["class LLMEngine", "def from_engine_args", "def step"]},
       {"path": "vllm/v1/engine/async_llm.py", "symbols": ["class AsyncLLM", "async def generate", "def _run_output_handler"]},
       {"path": "vllm/v1/engine/core_client.py", "symbols": ["class EngineCoreClient", "def make_client", "class InprocClient", "class SyncMPClient", "class AsyncMPClient", "def start_engine_core_monitor"]},
-      {"path": "vllm/v1/engine/core.py", "symbols": ["class EngineCore", "def _initialize_kv_caches", "def step", "def step_with_batch_queue", "def _process_aborts_queue", "class EngineCoreProc", "def run_busy_loop", "def process_input_sockets", "def process_output_sockets", "def pause_scheduler", "class EngineCoreActorMixin", "class EngineCoreActor"]},
+      {"path": "vllm/v1/engine/core.py", "symbols": ["class EngineCore", "def _initialize_kv_caches", "def step", "def step_with_batch_queue", "def _process_aborts_queue", "class EngineCoreProc", "def run_busy_loop", "def process_input_sockets", "def process_output_sockets", "def pause_scheduler", "def _pause_complete", "def has_work", "def _reset_caches", "class EngineCoreActorMixin", "class EngineCoreActor"]},
       {"path": "vllm/v1/engine/__init__.py", "symbols": ["class EngineCoreReadyResponse", "class EngineCoreRequest", "class EngineCoreOutputs", "class EngineCoreRequestType"]},
       {"path": "tests/v1/engine/test_engine_core.py", "symbols": ["def test_pause_synchronizes_device_before_cache_reset", "step_with_batch_queue"]},
       {"path": "tests/v1/engine/test_abort_final_step.py", "symbols": ["async def test_abort_during_final_step"]},
@@ -94,7 +94,7 @@
       {"path": "vllm/v1/worker/gpu/model_runner.py", "symbols": ["class GPUModelRunner", "class ExecuteModelState", "def execute_model", "def sample_tokens"]},
       {"path": "vllm/v1/worker/gpu/input_batch.py", "symbols": ["class InputBatch"]},
       {"path": "vllm/v1/worker/gpu/states.py", "symbols": ["class RequestState", "def apply_staged_writes"]},
-      {"path": "vllm/v1/worker/gpu/buffer_utils.py", "symbols": ["class StagedWriteTensor"]},
+      {"path": "vllm/v1/worker/gpu/buffer_utils.py", "symbols": ["class StagedWriteTensor", "class UvaBuffer", "class UvaBufferPool", "def copy_to_uva"]},
       {"path": "vllm/model_executor/model_loader/__init__.py", "symbols": ["def get_model_loader", "def get_model", "def register_model_loader"]},
       {"path": "vllm/model_executor/model_loader/utils.py", "symbols": ["def initialize_model", "def get_model_architecture", "def process_weights_after_loading"]},
       {"path": "vllm/model_executor/model_loader/default_loader.py", "symbols": ["class DefaultModelLoader", "def get_all_weights", "def load_weights"]},
@@ -116,7 +116,7 @@
       {"path": "vllm/v1/core/sched/async_scheduler.py", "symbols": ["class AsyncScheduler", "def _update_after_schedule", "def _update_request_with_output", "num_output_placeholders"]},
       {"path": "vllm/v1/engine/core.py", "symbols": ["def step", "def step_with_batch_queue", "batch_queue_size"]},
       {"path": "vllm/v1/worker/gpu/async_utils.py", "symbols": ["class StepTimingCollector", "class AsyncOutput", "def async_copy_to_np"]},
-      {"path": "vllm/v1/worker/gpu/buffer_utils.py", "symbols": ["class StagedWriteTensor"]},
+      {"path": "vllm/v1/worker/gpu/buffer_utils.py", "symbols": ["class StagedWriteTensor", "class UvaBuffer", "class UvaBufferPool", "def copy_to_uva"]},
       {"path": "vllm/v1/worker/gpu/states.py", "symbols": ["def apply_staged_writes"]},
       {"path": "vllm/compilation/decorators.py", "symbols": ["def support_torch_compile", "def _support_torch_compile", "traced_files"]},
       {"path": "vllm/compilation/wrapper.py", "symbols": ["class TorchCompileWithNoGuardsWrapper", "guard_filter_fn"]},
@@ -134,7 +134,7 @@
       {"path": "tests/v1/core/test_async_scheduler.py", "symbols": ["def test_kv_pressure_preemption_with_inflight_output"]},
       {"path": "tests/v1/core/test_scheduler.py", "symbols": ["def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders", "def test_free_encoder_inputs_respects_unconfirmed_placeholders"]},
       {"path": "tests/v1/cudagraph/test_cudagraph_dispatch.py", "symbols": ["class TestCudagraphDispatcher", "def test_dispatcher"]},
-      {"path": "tests/v1/worker/test_gpu_model_runner_v2_cudagraph_profiling.py", "symbols": ["def test_profile_cudagraph_memory"]}
+      {"path": "tests/v1/worker/test_gpu_model_runner_v2_cudagraph_profiling.py", "symbols": ["def test_profile_cudagraph_memory_samples_and_extrapolates", "def test_profile_cudagraph_memory_frees_throwaway_pool"]}
     ],
     "09-distributed": [
       {"path": "vllm/config/parallel.py", "symbols": ["class ParallelConfig", "def world_size_across_dp", "def local_world_size", "def use_sequence_parallel_moe", "def __post_init__"]},

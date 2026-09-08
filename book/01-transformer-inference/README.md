@@ -129,8 +129,8 @@ Transformer 结构，kernel 通常只实现其中一个局部算子。
 
 ## 如何阅读本章
 
-你可以把这一章当作“使用过 LLM 之后的原理补课”。我们默认你知道 prompt、token、
-temperature 和上下文长度这些产品概念，但不要求你学过深度学习课程。第一次阅读只需
+你可以把这一章当作推理原理的入门课。即使只用过聊天产品，不熟悉 prompt、token、
+temperature 或上下文长度，也可以从术语表与 1.1 节开始，不要求学过深度学习课程。第一次阅读只需
 回答三个问题：数据长什么样、一次 forward 做什么、为什么生成必须重复 forward。
 
 遇到向量和矩阵公式时，先看 shape，不要先做代数推导。例如 `[T, D] -> [T, V]`
@@ -535,7 +535,7 @@ Temperature 不会改变 logit 的大小顺序，所以单纯改变 temperature 
 
 > **本节先看：** 下面先给出“Top-k 与 Top-p”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
 
-- **Top-k：** 只保留 logit 最大的 `k` 个候选。
+- **Top-k：** 按最大的 `k` 个分数设定筛选边界；没有边界并列时可理解为保留 `k` 个候选。
 - **Top-p：** 按概率从高到低保留，直到累计概率达到 `p`。
 
 仍使用 `T=1` 的概率：
@@ -557,19 +557,33 @@ Top-k 与 top-p 最终都通过 mask 排除候选，并对保留项重新归一�
 不能把“先截断并归一化，再用新概率计算另一个阈值”的教学捷径当成所有实现的精确
 语义；应查看固定 revision 的 `apply_top_k_top_p` 及其等价性测试。
 
+边界并列时要看实现。当前 PyTorch 参考路径屏蔽的是“严格小于第 k 大分数”的项；
+例如 logits 为 `[4,2,2]`、k=2，两个分数为 2 的候选都可能保留，不能据此断言
+一定只剩两个 token。随书模型按排序后截取候选，是教学简化；其他 backend 的并列
+处理需分别核对，不能只凭 top-k 名称推断。
+
+[源码] `vllm/v1/sample/ops/topk_topp_sampler.py` - `apply_top_k_top_p_pytorch`、`apply_top_k_only`
+
 ### Penalty、Bias 与约束
 
 生产请求通常不只有 temperature、top-k 和 top-p：
 
 | 参数或约束 | 作用对象 | 直觉 |
 |---|---|---|
-| presence penalty | 是否出现过 | 出现过一次就调整，鼓励或抑制重复主题 |
-| frequency penalty | 出现次数 | 出现越多，调整越多 |
+| presence penalty | 是否在已生成输出中出现过 | 出现过一次就调整，鼓励或抑制重复主题 |
+| frequency penalty | 在已生成输出中的出现次数 | 出现越多，调整越多 |
 | repetition penalty | prompt 与输出中的已有 token | 按 logit 符号和倍率改变重复倾向 |
 | logit bias | 指定 token IDs | 人工提高或降低候选分数 |
 | allowed token IDs | 候选集合 | 只允许白名单 token |
 | bad words | token 序列 | 防止生成能够完成禁用序列的最后 token |
 | structured output mask | 语法允许集合 | 只保留当前语法状态允许的 token |
+
+presence/frequency 的计数范围是输出；repetition 还会考虑 prompt。一个 token
+只在输入中出现、尚未生成时，不能据此给它加 presence/frequency penalty。
+
+[源码] `vllm/model_executor/layers/utils.py` - `apply_penalties`
+
+[源码] `vllm/v1/worker/gpu/sample/penalties.py` - `_penalties_kernel`
 
 这些操作不是纯粹的“语言模型概率”。它们在模型给出 logits 后改变可选集合或分数，
 因此同一模型、同一上下文可以因请求参数不同而输出不同 token。

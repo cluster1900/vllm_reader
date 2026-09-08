@@ -854,7 +854,7 @@ $$
 | 是否增加 worker world size | 是 | 否，复用已有 ranks |
 | 主要 ownership | prefill token chunks | KV token/context shards |
 | 结果恢复 | hidden gather 与原序重排 | partial attention 的 LSE 加权合并 |
-| 当前主要实现入口 | `PCPManager` | `attention/ops/dcp.py`、`cp_utils.py` |
+| 当前主要实现入口 | `PCPManager` | `vllm/v1/attention/ops/dcp.py`、`vllm/v1/worker/cp_utils.py` |
 
 ### 9.9.2 PCP 的 DualChunkSwap
 
@@ -996,7 +996,7 @@ flowchart TD
 
 > **读图方法：** 这是“factory 的选择”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
-不要只因为代码库里存在 `ray_executor_v2.py` 就认定运行时一定使用它；最终选择要看 factory
+不要只因为代码库里存在 `vllm/v1/executor/ray_executor_v2.py` 就认定运行时一定使用它；最终选择要看 factory
 和配置。
 
 ### 9.10.2 UniProc
@@ -1587,7 +1587,7 @@ communication contract 重新建立理解。
 6. `vllm/model_executor/models/llama.py`：PP first/last stage 模型路径。
 7. `vllm/v1/worker/gpu_worker.py`：分布式初始化、PP send/recv 和执行。
 8. `vllm/v1/engine/core_client.py`：DP clients 与内部负载均衡。
-9. `vllm/v1/engine/coordinator.py`、`core.py`：DP coordinator 与 DP EngineCore processes。
+9. `vllm/v1/engine/coordinator.py`、`vllm/v1/engine/core.py`：DP coordinator 与 DP EngineCore processes。
 10. `vllm/v1/worker/dp_utils.py`：跨 DP batch 协调。
 11. `vllm/v1/executor/`：UniProc、Multiproc、Ray、Ray V2、external launcher。
 12. `vllm/model_executor/layers/fused_moe/`：expert map、runner、modular kernel 和 all-to-all。
@@ -1599,3 +1599,21 @@ communication contract 重新建立理解。
 `5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`。当前环境没有可用的 NVIDIA 多 GPU vLLM
 运行条件，因此真实 NCCL/Ray 多机实验仍标记为 `runtime_verified: false`，不能把静态源码
 核对和 CPU 教学测试表述成真实 GPU 验证。
+
+## 第一遍自检
+
+先用自己的话回答下面三个问题，再展开线索。前面的源码追踪题和设计题留作第二遍
+阅读；不需要第一次就掌握所有硬件与功能分支。
+
+1. TP=2、PP=2、DP=2、PCP=1 时有多少 Worker？启用合法的 DCP=2 是否把这个数量翻倍？
+2. Row Parallel 两个 rank 对同一个输出分别贡献 3 和 8，应相加还是拼接？为什么？
+3. 两个 attention shard 的未归一化总量为 1 和 3、局部输出为 10 和 20，怎样合并？
+
+<details>
+<summary>答题线索</summary>
+
+1. 共有 8 个 Worker；DCP 复用已有 ranks，不再增加 Worker。API、EngineCore 等其他进程要另算。
+2. 应相加为 11，因为它们分别累加了部分输入维度，是同一输出的部分和；拼接会改变输出 shape 和含义。
+3. 按四分之一与四分之三加权，结果为 17.5；平均值 15 不正确。LSE 是保存归一化信息并稳定合并的一种方式。
+
+</details>

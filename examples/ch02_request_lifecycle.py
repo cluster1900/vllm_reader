@@ -139,6 +139,8 @@ class EngineCore:
     """One-token-per-request scheduler plus deterministic model runner."""
 
     def __init__(self, response_plan: tuple[int, ...]) -> None:
+        if not response_plan:
+            raise ValueError("response_plan must contain at least one token")
         self.response_plan = response_plan
         self.requests: dict[str, CoreRequestState] = {}
         self.abort_outputs: deque[EngineCoreOutput] = deque()
@@ -146,7 +148,10 @@ class EngineCore:
     def add_request(self, request: EngineCoreRequest) -> None:
         self.requests[request.request_id] = CoreRequestState(
             request=request,
-            planned_token_ids=self.response_plan[: request.max_tokens],
+            planned_token_ids=tuple(
+                self.response_plan[i % len(self.response_plan)]
+                for i in range(request.max_tokens)
+            ),
         )
 
     def abort(self, request_id: str) -> None:
@@ -220,7 +225,7 @@ class EngineCore:
         return pending_aborts + self.update_from_output(model_output)
 
     def has_unfinished_requests(self) -> bool:
-        return any(
+        return bool(self.abort_outputs) or any(
             state.status in {RequestStatus.WAITING, RequestStatus.RUNNING}
             for state in self.requests.values()
         )
@@ -276,20 +281,25 @@ class LifecycleDemo:
         )
         self.core = EngineCore(response)
         self.output_processor = OutputProcessor(self.tokenizer)
+        self._submission_order: dict[str, int] = {}
 
     def submit(self, request_id: str, prompt: str, max_tokens: int) -> str:
         engine_input = self.renderer.render(prompt)
         request = self.input_processor.process(request_id, engine_input, max_tokens)
         # Register frontend state before the request crosses the core boundary.
         self.output_processor.add_request(request)
+        self._submission_order[request.request_id] = len(self._submission_order)
         self.core.add_request(request)
         return request.request_id
 
     def run_offline(self) -> list[RequestOutput]:
-        results = []
+        results: dict[int, RequestOutput] = {}
         while self.core.has_unfinished_requests():
-            results.extend(self.output_processor.process(self.core.step(), stream=False))
-        return sorted(results, key=lambda output: output.request_id)
+            for core_output in self.core.step():
+                completed = self.output_processor.process([core_output], stream=False)
+                if completed:
+                    results[self._submission_order[core_output.request_id]] = completed[0]
+        return [results[index] for index in sorted(results)]
 
     def tick_online(self) -> list[RequestOutput]:
         queues = [state.queue for state in self.output_processor.states.values()]

@@ -21,7 +21,7 @@
 | Prefill | 处理尚未计算的 prompt token 并建立 KV；可分成多个 chunk，命中前缀可跳过相应部分。 |
 | Decode | 利用已有 KV Cache 逐步生成后续 token 的计算阶段。 |
 | KV Cache | 保存 attention 历史 Key/Value，避免每步重复计算历史 token。 |
-| Block | vLLM 管理一组固定数量 token 的 KV 存储单元，不等于 CUDA thread block。 |
+| Block | 普通 attention 中用于管理固定数量 token KV 的单元；状态模型可能不同，不等于 CUDA thread block。 |
 | Block table | 将一个请求的逻辑 token block 映射到物理 KV block ID 的表。 |
 | PagedAttention | 让 attention 通过 block table 访问非连续 KV Cache 的设计。 |
 | Prefix caching | 复用不同请求间相同前缀对应的已计算 KV blocks。 |
@@ -31,7 +31,7 @@
 | Scheduler | 根据请求状态、token budget 和缓存容量决定当前 step 执行内容的组件。 |
 | EngineCore | V1 中拥有 Scheduler、KV Cache 管理并协调模型执行的后端核心。 |
 | Executor | 将模型执行操作派发到一个或多个 Worker 的抽象层。 |
-| Worker | 管理一个 accelerator 进程、设备环境、模型加载和执行入口的组件。 |
+| Worker | 管理设备环境、模型加载和执行入口的组件；是否位于独立进程由 Executor 决定。 |
 | Model Runner | 准备模型输入、执行 forward、组织 sampling 和维护执行状态的组件。 |
 | MRV1 / MRV2 | vLLM V1 Engine 内部的两代 Model Runner；不要与 Engine V0/V1 混淆。 |
 | CUDA Graph | 捕获并重放一组 GPU 操作，以减少重复 kernel launch 的 CPU 开销。 |
@@ -41,8 +41,8 @@
 | Data Parallelism | 多个模型副本处理不同请求或 batch 的并行方式。 |
 | Expert Parallelism | 将 MoE 的不同 experts 分布到不同设备。 |
 | Collective | 多个 rank 共同参与的通信操作，例如 all-reduce、all-gather、all-to-all。 |
-| TTFT | Time To First Token，从规定起点到首输出事件的时间；bench serve 从 HTTP 发送计时，不含客户端信号量等待。 |
-| ITL | Inter-Token Latency，连续输出 token 之间的延迟。 |
+| TTFT | Time To First Token，从规定起点到首输出事件的时间；bench serve 从请求函数内 HTTP 调用前计时，不含客户端信号量等待。 |
+| ITL | Inter-Token Latency；实际 benchmark 常按相邻输出事件采样间隔，一事件可能包含多个 token。 |
 | Throughput | 单位时间内完成的请求数或处理的 token 数。 |
 | Goodput | 满足指定延迟服务目标的有效吞吐量。 |
 
@@ -101,3 +101,26 @@
 | Capture / replay | 记录操作及依赖 / 重放可执行图；只作用于已捕获且满足条件的区域，不等于整个 step 只需一次提交。 |
 | Column / row parallel | 沿线性层输出维 / 输入维切分；基础 dense TP 中可配对避免中间 gather，实际通信依配置与实现而定。 |
 | Little’s Law | $L=\lambda W$：在适用条件和一致观察边界下，平均系统请求数=有效到达率×平均停留时间；不单独预测 p99 或过载发散曲线。 |
+
+
+## 进阶分支中会遇到的术语
+
+这些术语用于定位可选分支。第一次阅读只需知道它们改变什么，不要求提前掌握内部算法。
+
+| 术语 | 工作定义 |
+|---|---|
+| LoRA | 低秩适配，通过较小的附加参数调整模型；请求可使用不同适配器，缓存语义也需要区分。 |
+| MLA | 多头潜在注意力，使用压缩的缓存表示；其容量和布局不能直接套用普通 K/V head 公式。 |
+| Mamba / SSM | 状态空间序列模型及相关模型家族，维护递推状态等；统一缓存管理接口不表示里面保存的都是普通 K/V 矩阵。 |
+| Speculative decoding | 推测解码：先提出草稿，再由目标模型验证，一轮可能接受多个 token，也可能拒绝并回退。 |
+| EAGLE | 一类推测解码草稿方案；本书主要说明它与 Runner、调度和缓存的连接。 |
+| Kernel / tile | 设备上的计算函数 / 分块处理的一小片数据；tile 不等于分配 KV 的物理 block。 |
+| Triton | 编写和编译 GPU kernel 的语言与工具；看到 Python 风格源码不表示算子在 CPU 上执行。 |
+| GEMM / GEMV | 矩阵乘矩阵 / 矩阵乘向量；批内多个 decode 请求仍可能组成矩阵乘法。 |
+| FP16 / BF16 / FP32 | 16/16/32 位浮点格式；FP16 与 BF16 的精度和数值范围分配不同，不能只看位数判断等价。 |
+| UVA | 统一虚拟寻址；本书的 UVA buffer 让 GPU 访问映射后的 pinned 主机内存，不等于把所有元数据复制进显存。 |
+| TMA | 部分 NVIDIA GPU 支持的张量内存搬运机制；是否使用要看设备与 kernel 路径。 |
+| DBO / microbatch | 双批次重叠 / 把批次拆为较小执行单元；能否重叠受依赖、缓冲区和后端条件约束。 |
+
+对应缓存规格与执行边界可从 `vllm/v1/kv_cache_interface.py`、
+`vllm/v1/worker/gpu/buffer_utils.py` 及第 05–09 章源码索引继续追踪。

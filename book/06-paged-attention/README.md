@@ -1101,7 +1101,7 @@ flowchart TD
 
 本章先建立单 rank 基本路径；第 09 章讨论跨 rank softmax 状态为什么不能直接平均。
 
-## 6.17 `ops/paged_attn.py` 在当前代码中的真实位置
+## 6.17 `vllm/v1/attention/ops/paged_attn.py` 在当前代码中的真实位置
 
 文件 `vllm/v1/attention/ops/paged_attn.py` 只有一个很薄的 `PagedAttention` helper，主要做两件事：
 
@@ -1122,7 +1122,7 @@ flowchart TD
     HELPER["ops PagedAttention class"] --> ROCM
 ```
 
-> **读图方法：** 阅读“`ops/paged_attn.py` 在当前代码中的真实位置”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
+> **读图方法：** 阅读“`vllm/v1/attention/ops/paged_attn.py` 在当前代码中的真实位置”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
 所以不能用“有没有调用 `class PagedAttention`”判断当前执行是否采用分页 KV。应检查所选
 backend 的 cache layout、metadata 和 kernel 调用是否消费 block table。
@@ -1655,10 +1655,28 @@ PagedAttention 的核心不是某个固定函数名，而是保持以下契约�
 8. `Attention` 层通过 forward context 和统一 custom op 隔离模型代码与 backend；
 9. backend 选择是平台候选排序与完整能力过滤，且可按 cache kind 覆盖；
 10. 当前 FlashAttention 路径先按 slot mapping 写缓存，再把 block table 传给 varlen attention；
-11. `ops/paged_attn.py` 是特定 helper，不是判断是否分页的唯一标准；
+11. `vllm/v1/attention/ops/paged_attn.py` 是特定 helper，不是判断是否分页的唯一标准；
 12. 分页改变地址，不应改变逻辑 attention 数学结果。
 
 本章正文、30 余幅源码流程/地址图、教学模型、实验说明和 13 个 CPU 测试已经完成，
 `content_complete=true`。当前机器没有可用的 vLLM NVIDIA GPU runtime，无法执行上游 CUDA
 block-table tests、真实 backend probe、kernel trace 和数值对照，因此
 `runtime_verified=false`，状态保持 `draft`。
+
+## 第一遍自检
+
+先用自己的话回答下面三个问题，再展开线索。前面的源码追踪题和设计题留作第二遍
+阅读；不需要第一次就掌握所有硬件与功能分支。
+
+1. 块大小为 4、块表为 `[2,5,3]`，逻辑位置 5 对应哪个物理 slot？为什么它还不是字节地址？
+2. 两个请求本轮分别算 1 和 3 个 token，query_start_loc 应是什么？交换请求顺序时还要同步哪些数据？
+3. slot mapping 中的 -1 与 block table 中的 0 能当作同一种“空值”吗？
+
+<details>
+<summary>答题线索</summary>
+
+1. 位置 5 在逻辑块 1，查到物理块 5，偏移为 1，因此 slot 为 21；字节寻址还需要布局、stride 和元素大小。
+2. 边界是 `[0,1,4]`。请求顺序、positions、sequence lengths、块表行和采样状态的映射都必须一致。
+3. -1 表示跳过该 token 的缓存写入；0 是保留 null block 的合法块 ID，仍用于占位或特定状态寻址。
+
+</details>

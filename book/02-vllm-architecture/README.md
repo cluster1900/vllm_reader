@@ -1144,13 +1144,33 @@ online stream:
   abort: [('', 'abort')]
 ```
 
-五个测试分别验证：
+八个测试覆盖以下边界：
 
-1. 离线结果按外部 request ID 排序并返回最终文本。
+1. 离线结果保持提交顺序，外部 ID 的字典顺序不决定返回顺序。
 2. 在线结果按 token delta 交付。
 3. core 使用内部 ID，用户仍看到外部 ID。
 4. 前端 state 在 core submission 前已经存在。
-5. prompt + output 超过模型长度时被拒绝。
+5. prompt + output 超过教学模型长度时被拒绝。
+6. 重复外部 ID 不会混淆两次提交的输出顺序。
+7. `max_tokens` 大于六个 token 的初始响应计划时，不会被意外提前截断。
+8. 最后一个请求取消后，仍交付 abort 输出并清理前端状态。
+
+教学响应计划会循环使用固定六个 token，直到达到请求上限；它只验证长度和状态推进，
+没有语言生成质量含义。提交顺序由内部 ID 对应的序号记录，而不是对用户 ID 做排序。
+
+[源码] `vllm/entrypoints/offline_utils.py` - `OfflineInferenceMixin._add_request`、`_run_engine`
+
+真实 `LLM.generate` 用递增数值 ID 记录输入顺序，最终按该数值排序；本项目教学程序
+允许自定义外部 ID，因此需要另记提交序号。两种实现的目标都是保持输入顺序。
+
+还有一处刻意简化：教学 `InputProcessor` 直接拒绝 prompt 加请求输出上限超过模型
+长度的组合；真实 `InputProcessor` 主要校验 prompt，并只在 `max_tokens` 未指定时
+补默认值，执行侧再通过长度停止条件限制生成。不要把教学异常当作所有在线/离线
+入口都会执行的同一校验。Core 也保留教学用终态记录，不模拟完整后台资源回收。
+
+[源码] `vllm/v1/engine/input_processor.py` - `InputProcessor._validate_prompt_len`、`process_inputs`
+
+[源码] `vllm/v1/core/sched/utils.py` - `check_stop`
 
 这个模拟器不能证明 vLLM 性能，也不能代替 GPU 集成测试。它的作用是让读者在进入
 复杂源码前，先看见对象所有权和状态转换。
@@ -1266,13 +1286,13 @@ stop 检查。
 |---|---|---|
 | API 入口 | schema、model、max_tokens 是否通过 | OpenAI serving |
 | Renderer | chat template 后 prompt/token 是否正确 | `renderers/` |
-| InputProcessor | 长度、token、params、internal ID | `input_processor.py` |
-| EngineCoreClient | ADD 是否发送、client 是否 alive | `core_client.py` |
-| Engine input thread | 是否 decode/preprocess 并入队 | `core.py::process_input_sockets` |
+| InputProcessor | 长度、token、params、internal ID | `vllm/v1/engine/input_processor.py` |
+| EngineCoreClient | ADD 是否发送、client 是否 alive | `vllm/v1/engine/core_client.py` |
+| Engine input thread | 是否 decode/preprocess 并入队 | `vllm/v1/engine/core.py::process_input_sockets` |
 | Scheduler | request 在 waiting/running/finished 哪一处 | 第 04 章 |
 | Executor | `SchedulerOutput` 是否被执行 | 第 07 章 |
 | Engine output thread | output 是否按 client index 发回 | `process_output_sockets` |
-| OutputProcessor | state 是否存在、是否被 stop/abort | `output_processor.py` |
+| OutputProcessor | state 是否存在、是否被 stop/abort | `vllm/v1/engine/output_processor.py` |
 | SSE formatter | 是否产生 JSON chunk 与 `[DONE]` | chat serving |
 
 一个实用规则是始终打印或记录同一个 internal request ID。外部 ID 可能映射到多个 child，
@@ -1284,7 +1304,7 @@ stop 检查。
 
 1. **源码静态核对**：从两个入口逐跳走到 EngineCore、执行层和输出层。
 2. **上游测试交叉验证**：检查 collector merge、abort、final-step abort 竞争等测试。
-3. **CPU 教学实验**：运行生命周期模拟器及 5 个单元测试。
+3. **CPU 教学实验**：运行生命周期模拟器及 8 个单元测试。
 
 当前机器没有安装可用的 PyTorch/CUDA/vLLM GPU runtime，因此未完成以下动态验证：
 
@@ -1507,7 +1527,7 @@ OutputProcessor 生成用户完成输出，并把内部 ID 放入 `reqs_to_abort
 - [x] 标出 asyncio、线程、ZMQ、进程和 GPU 边界。
 - [x] 修正单 GPU `UniProcExecutor` 下 Worker 并非独立进程的过度概括。
 - [x] 覆盖 stop string、client cancel、final-step abort 和 output handler error。
-- [x] 提供可运行生命周期模拟器和 5 个单元测试。
+- [x] 提供可运行生命周期模拟器和 8 个单元测试。
 - [ ] 在真实 NVIDIA GPU 上采集 online/offline 运行 trace。
 - [ ] 由独立审阅者复核后将状态改为 `verified`。
 

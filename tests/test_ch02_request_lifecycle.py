@@ -11,10 +11,33 @@ class RequestLifecycleTest(unittest.TestCase):
 
         outputs = demo.run_offline()
 
-        self.assertEqual([output.request_id for output in outputs], ["req-A", "req-B"])
-        self.assertEqual(outputs[0].text, "它让推理")
-        self.assertEqual(outputs[1].text, "它让")
+        self.assertEqual([output.request_id for output in outputs], ["req-B", "req-A"])
+        self.assertEqual(outputs[0].text, "它让")
+        self.assertEqual(outputs[1].text, "它让推理")
         self.assertTrue(all(output.finished for output in outputs))
+
+    def test_duplicate_external_ids_still_keep_submission_order(self):
+        demo = LifecycleDemo()
+        demo.submit("same", "介绍 vLLM", max_tokens=3)
+        demo.submit("same", "介绍 vLLM", max_tokens=1)
+        outputs = demo.run_offline()
+        self.assertEqual([len(output.token_ids) for output in outputs], [3, 1])
+
+    def test_output_limit_is_not_truncated_to_response_plan_length(self):
+        demo = LifecycleDemo()
+        demo.submit("longer", "介绍 vLLM", max_tokens=8)
+        output = demo.run_offline()[0]
+        self.assertEqual(len(output.token_ids), 8)
+        self.assertEqual(output.finish_reason, "length")
+
+    def test_final_abort_is_delivered_when_no_request_remains_running(self):
+        demo = LifecycleDemo()
+        internal = demo.submit("cancelled", "介绍 vLLM", max_tokens=2)
+        demo.core.abort(internal)
+        outputs = demo.run_offline()
+        self.assertEqual(len(outputs), 1)
+        self.assertEqual(outputs[0].finish_reason, "abort")
+        self.assertEqual(demo.output_processor.states, {})
 
     def test_online_returns_incremental_deltas(self):
         demo = LifecycleDemo()
