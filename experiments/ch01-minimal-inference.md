@@ -1,7 +1,12 @@
 # 第 01 章最小推理实验记录
 
+2026-09-08 全书复核补记：本地 CPU 重跑的版本、环境、命令与结果统一记录在
+[全书检查报告](../meta/full-book-review-2026-09-08.md)。下文历史输出保留原日期；GPU
+实验表格是待执行模板，空白不代表零值或测试通过。
+
 - Source commit: `5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`
-- Reader commit: unavailable，`vllm_reader` 当前不是 Git worktree
+- Reader commit: 原始 2026-09-07 记录未保存（当时记录为非 Git worktree）；
+  该历史状态无法由本轮复核追溯，不用于描述当前仓库。
 - Date: 2026-09-07
 - Hardware: Apple Silicon, `arm64`
 - OS: macOS 26.6.2, build 25G83

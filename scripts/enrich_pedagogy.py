@@ -60,7 +60,7 @@ Scheduler 可以先理解为一个受多种预算约束的工单调度员：请�
 token 预算、序列名额和 KV block。它不是预测模型，也不是简单地从队列头取固定数量的
 请求，而是在每个 step 重新分配稀缺资源。
 
-本章公式优先按“账本”来读。`num_computed_tokens` 是已经完成的工作，目标 token 数是
+本章公式优先按“账本”来读。`num_computed_tokens` 是已记账、可能仍在途的工作，目标 token 数是
 当前希望推进到的位置，两者之差就是待安排工作。先用几个整数手算，再看 chunked
 prefill、speculative decoding 和 async scheduling 如何复用同一套差额模型。
 
@@ -132,7 +132,7 @@ vLLM 如何把它们组合起来。
 必须通信，通信结果在哪里重新合并。
 
 rank 公式优先画坐标而不是死记乘法。把一个 worker 看成位于 DP、PP、PCP、TP 等轴上的
-一个坐标点，process group 就是在固定其他坐标后沿某一轴取出的一组点。DCP 复用 TP
+一个坐标点，process group 就是在固定其他坐标后沿某一轴取出的一组点。DCP 复用 TP 或 PCP 已有
 worker，因此不会像新轴一样增加进程数，这是本章尤其需要避免的误区。
 
 第一次阅读只掌握 TP、PP、DP；第二次加入 EP、PCP、DCP；第三次再看 executor、NCCL
@@ -321,12 +321,8 @@ def add_section_leads(text: str) -> str:
             continue
         kind = classify_first_line(lines[cursor])
         if lines[cursor].startswith("> **本节先看：**"):
-            following = cursor + 1
-            while following < len(lines) and not lines[following].strip():
-                following += 1
-            if following < len(lines):
-                refresh_kind = classify_first_line(lines[following]) or "other"
-                lines[cursor] = section_lead(lines[index], refresh_kind)
+            # Authored guidance may explain a source-specific caveat. Enrichment
+            # fills gaps; it must not overwrite reviewed prose with a template.
             continue
         if kind is None or lines[cursor].startswith(">"):
             continue
@@ -365,10 +361,6 @@ def add_diagram_guides(text: str) -> str:
                 output.extend(
                     ["", diagram_guide("\n".join(mermaid_lines), current_heading, diagram_index)]
                 )
-            else:
-                lines[lookahead] = diagram_guide(
-                    "\n".join(mermaid_lines), current_heading, diagram_index
-                )
         elif in_mermaid:
             mermaid_lines.append(line)
         cursor += 1
@@ -382,7 +374,7 @@ def add_frontmatter_fields(text: str) -> str:
     if marker not in text:
         raise ValueError("cannot locate runtime_verified frontmatter field")
     fields = (
-        'audience: "有 LLM 使用经验、代码开发基础和基础数学直觉的工程读者"\n'
+        'audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"\n'
         "pedagogy_reviewed_at: 2026-09-07\n"
     )
     return text.replace(marker, marker + fields, 1)

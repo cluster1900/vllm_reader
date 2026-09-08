@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-07
+verified_at: 2026-09-08
 content_complete: true
 runtime_verified: false
-audience: "有 LLM 使用经验、代码开发基础和基础数学直觉的工程读者"
-pedagogy_reviewed_at: 2026-09-07
+audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
+pedagogy_reviewed_at: 2026-09-08
 scope: "KV Cache 规格、显存初始化、block 生命周期、prefix caching 与基础 offload 边界"
 prerequisites:
   - 第01章
@@ -74,9 +74,20 @@ KV Cache 不是一个 Python 字典，也不只是一块 GPU tensor。阅读当�
 第三次再看多 cache group、KV connector 和平台差异。每一步都问“谁拥有这块内存”和
 “谁只持有编号”，这是避免混淆的关键。
 
+**先认清所有权。** 引用计数 ref count 记录一页被持有多少次；hash 是内容指纹；
+eviction 是删除可复用缓存项，free 是释放持有关系。CoW（写时复制）表示共享内容需要
+修改时先复制一份。LRU 是优先淘汰较久未使用的内容，本章队列只实现相应的近似策略。
+
+**第一遍走法：** 读 5.1–5.4、5.7–5.12、5.14，运行 5.19；多 group、partial-tail 和
+connector 第二遍再读。**停下来算：** 一页 ref=2，请求 A 结束后能给新请求覆写吗？
+不能，ref 只降到 1，请求 B 还在使用；即使降到 0，缓存键也可能保留到淘汰时。
+
 ## 5.1 KV Cache 为什么成为容量瓶颈
 
-模型权重在服务启动后基本固定，KV Cache 却随当前活跃 token 数增长。对 decoder-only
+模型权重在服务启动后基本固定，请求所占用的 KV block 数会随上下文增长。vLLM 通常
+在启动时预分配 GPU KV 缓存池，运行时改变的是池内 block 的归属与有效内容；不是
+每生成一个 token 就向 CUDA 新申请一段显存。因此请求结束、KV usage 降低后，
+`nvidia-smi` 看到的进程显存不一定下降。对 decoder-only
 Transformer 来说，每处理一个新 token，每个 self-attention layer 都会生成一份 K 和一份
 V，并在未来 token 的 attention 中继续被读取。
 
@@ -122,7 +133,7 @@ flowchart TD
 
 | 属性 | 模型权重 | KV Cache |
 |---|---|---|
-| 生命周期 | 通常贯穿服务进程 | 随请求进入、增长、完成而变化 |
+| 生命周期 | 通常贯穿服务进程 | 物理池通常长期存在；请求引用随进入、增长、完成变化 |
 | 主要决定因素 | 参数量、权重量化 | 活跃 token、缓存规格、dtype、并行方式 |
 | 是否共享 | 所有请求读取同一份 | 可通过相同 prefix 共享部分 block |
 | 管理难点 | 加载与分片 | 动态分配、回收、碎片、命中、淘汰 |
@@ -240,7 +251,7 @@ H_kv,local = H_kv / TP
 `AttentionSpec` 不直接写死“K 和 V 各一个 dense tensor”，而是抽象为：
 
 ```text
-page_size_bytes
+unpadded_page_size_bytes
 = num_heads
 * num_states
 * state_content_size_bytes
@@ -252,6 +263,11 @@ page_size_bytes
 state_content_size_bytes
 = (head_size + head_size_v) * dtype_size
 ```
+
+`page_size_bytes` 在设置 `page_size_padded` 时使用补齐后的大小，否则使用上述未补齐
+大小。`num_states` 是一页容纳的状态数，不能把它漏掉。
+
+[源码] `vllm/v1/kv_cache_interface.py` - `AttentionSpec.page_size_bytes`、`unpadded_page_size_bytes`
 
 `tokens_per_state` 允许一个 state 覆盖多个 token，或一个 token 对应多个 state；
 `page_size_padded` 允许 backend 对物理页做对齐。这个抽象使 MLA、稀疏状态和池化状态不必
@@ -466,7 +482,7 @@ flowchart TD
 
 ### 5.6.1 先确定“可给 KV 的字节数”
 
-`GPUWorker.determine_available_memory()` 的主路径是：
+`Worker.determine_available_memory()` 的主路径是：
 
 1. 记录初始显存快照和请求使用上限；
 2. 运行 dummy forward，profile 权重之外的非 KV 和瞬时峰值；
@@ -529,10 +545,12 @@ sequenceDiagram
     participant EC as EngineCore
     participant W as Workers
     participant U as kv_cache_utils
+    EC->>W: Executor.get_kv_cache_specs()
+    W-->>EC: per-layer specs
+    EC->>EC: resolve_kv_cache_layout
+    EC->>W: set_kv_cache_layout
     EC->>W: determine_available_memory()
     W-->>EC: bytes per worker
-    EC->>W: get_kv_cache_spec()
-    W-->>EC: per-layer specs
     EC->>U: get_kv_cache_configs(specs, bytes)
     U->>U: merge specs and build groups
     U->>U: check one-request capacity
@@ -582,7 +600,9 @@ flowchart TB
 | `BlockPool` | 统一 block 元数据、ref count、free queue、hash lookup |
 | Worker | 按 `KVCacheConfig` 建立真实 tensor，执行 copy 和 attention |
 
-这个分层解释了为什么 Scheduler 不应直接操作 `BlockPool`，也解释了为什么
+常规分配从 `KVCacheManager` 进入；但不能据此声称 Scheduler 从不直接操作 pool，
+例如 `Scheduler._drain_deferred_frees` 会在 fence 到期时调用 `block_pool.free_blocks`。
+这个分层主要解释了为什么
 `BlockPool` 不理解 sliding window 的语义：pool 只管理“页”，类型 manager 决定哪些逻辑
 位置应申请、保留或用 null block 替换。
 
@@ -794,11 +814,17 @@ Sliding Window 和 Chunked Local 不需要按整个序列长度永久保留所�
 
 | 机制 | 目的 | 何时使用 |
 |---|---|---|
-| watermark | 给 waiting/preempted 新准入留出缓冲，减少频繁抢占 | 已有 scheduled 请求时 |
+| watermark | 给 waiting/preempted 新准入留出缓冲，减少频繁抢占 | Scheduler 调用时 running 集合非空 |
 | reserved blocks | 为其他已经 in-flight 的序列保留必须容量 | 例如异步 KV load 准入 |
 
-watermark 只应用于 `WAITING` 或 `PREEMPTED` 请求，而且只有当前 step 已经调度了其他请求
-时才生效；不能把它描述成所有 allocation 都永久不可使用的固定保留区。
+watermark 只应用于 `WAITING` 或 `PREEMPTED`，且要求参数 `has_scheduled_reqs` 为真。
+虽然参数名和注释说“已调度”，实际 `Scheduler.schedule` 传入 `bool(self.running)`：
+running 非空但本轮全部跳过时也生效。这是调用点比名字更可靠的例子；它也不是所有
+allocation 都不可使用的固定保留区。
+
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`
+
+[源码] `vllm/v1/core/kv_cache_manager.py` - `KVCacheManager.allocate_slots`
 
 ### 5.11.5 只提交 finalized KV
 
@@ -808,7 +834,12 @@ speculative decoding 的 `new` 可能包含之后会被拒绝的 draft token。�
 min(total_computed_tokens + num_new_tokens, request.num_tokens)
 ```
 
-这个 `request.num_tokens` 上限防止把尚未确认属于请求的 KV 注册到 prefix cache。
+这个 `request.num_tokens` 上限防止把尚未确认属于请求的 token 位置注册到 prefix
+cache。这里 finalized 指 **token 内容已确认**，不是 GPU 已经执行完成：本地
+`allocate_slots()` 可在本轮 forward 前登记 hash，执行侧必须维持相应写入与读取依赖。
+远端异步接收另用 `delay_cache_blocks=True` 推迟登记，不能把两条路径混为一谈。
+
+[源码] `vllm/v1/core/kv_cache_manager.py` - `KVCacheManager.allocate_slots` 末尾的 `cache_blocks` 调用
 
 ## 5.12 Prefix Caching 的哈希链
 
@@ -823,11 +854,11 @@ $$
 
 ```mermaid
 flowchart LR
-    T0[tokens 0..B] --> H0[H0]
+    T0[tokens 0 到 B-1] --> H0[H0]
     H0 --> H1[H1]
-    T1[tokens B..2B] --> H1
+    T1[tokens B 到 2B-1] --> H1
     H1 --> H2[H2]
-    T2[tokens 2B..3B] --> H2
+    T2[tokens 2B 到 3B-1] --> H2
     E[MM / LoRA / salt keys] --> H0
     E --> H1
     E --> H2
@@ -1133,8 +1164,7 @@ sequenceDiagram
 `reserved_blocks` 可防止异步 load 的初始分配吃掉已有 in-flight 请求完成当前步骤依赖的
 容量。
 
-本章只解释本地 block 生命周期与 connector 的接口。具体 P/D 架构、传输协议和跨节点
-拓扑属于第 09 章。
+本章只解释本地 block 生命周期与 connector 的接口。第 09 章补充分布式拓扑；具体 P/D 传输协议仍是本书主线之外的扩展专题。
 
 ## 5.18 分配失败与 Scheduler 抢占的边界
 
@@ -1354,14 +1384,14 @@ free 减引用并可能进入 free queue；evict 删除 prefix lookup 元数据�
 
 ### 练习 1：从启动日志追到 tensor
 
-从 `GPUWorker.determine_available_memory()` 开始，追踪：
+从 `Worker.determine_available_memory()` 开始，追踪：
 
 ```text
 available bytes
 -> get_kv_cache_configs
 -> get_kv_cache_config_from_groups
 -> KVCacheConfig
--> GPUWorker.initialize_from_config
+-> Worker.initialize_from_config
 -> model_runner.initialize_kv_cache
 ```
 
@@ -1429,8 +1459,8 @@ block 被 append 到 free queue、但未调用 `_remove_cached_block_hashes()` �
 > **本节先看：** 下面先给出“启动容量与分组”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
 
 - `vllm/v1/worker/gpu_worker.py`
-  - `GPUWorker.determine_available_memory`
-  - `GPUWorker.initialize_from_config`
+  - `Worker.determine_available_memory`
+  - `Worker.initialize_from_config`
 - `vllm/v1/core/kv_cache_utils.py`
   - `get_kv_cache_groups`
   - `check_enough_kv_cache_memory`
@@ -1482,8 +1512,8 @@ request
 sequence position -> logical block -> block ID -> byte/token offset
 ```
 
-转成真实 K/V 读取，也没有解释当前 attention backend 如何选择 PagedAttention、FlashAttention
-或其他实现。第 06 章将沿着 `Attention`、backend selector、metadata builder、Model Runner
+转成真实 K/V 读取，也没有解释当前 attention backend 如何选择 FlashAttention、FlashInfer
+或其他能够消费分页 KV 的实现。第 06 章将沿着 `Attention`、backend selector、metadata builder、Model Runner
 block table 和 paged attention op 继续这条链。
 
 ## 本章小结

@@ -1,5 +1,9 @@
 # 第 04 章实验记录：Token 级调度与 Continuous Batching
 
+2026-09-08 全书复核补记：本地 CPU 重跑的版本、环境、命令与结果统一记录在
+[全书检查报告](../meta/full-book-review-2026-09-08.md)。下文历史输出保留原日期；GPU
+实验表格是待执行模板，空白不代表零值或测试通过。
+
 ## 目的
 
 在没有 CUDA、PyTorch 和真实模型权重的环境中，验证第 04 章依赖的控制流不变量：
@@ -62,13 +66,16 @@ prefill。
 构造队列：
 
 ```text
-long:  prompt=10
-short: prompt=2
-budget=8
+first:  prompt=8
+long:   prompt=8
+short:  prompt=2
+budget=10
 ```
 
-关闭 chunked prefill 时，long 整体放不进 budget，当前 step 停止准入，short 不能越过。
-开启后，long 可先获得 8 个 token 或受 threshold 截断的 chunk。
+先调度 first，剩余预算为 2。关闭 chunked prefill 时，long 放不进剩余预算，当前 step
+停止准入，short 不能越过；下一轮预算恢复后 long 可执行。开启后 long 可先获 2 token。
+不要让关闭 chunking 的请求永远大于整轮预算，否则教学循环可能无法完成；真实配置
+也可能直接拒绝这种组合。
 
 ## 实验三：KV Pressure
 

@@ -147,10 +147,9 @@ class AsyncRequestState:
         if self.num_output_placeholders < 0:
             raise AssertionError("output placeholders underflow")
 
-    def preempt(self, rollback_to: int) -> None:
-        if rollback_to < 0 or rollback_to > self.num_computed_tokens:
-            raise ValueError("invalid rollback point")
-        self.num_computed_tokens = rollback_to
+    def preempt(self) -> None:
+        """Recompute preemption drops KV-backed progress, as Scheduler does."""
+        self.num_computed_tokens = 0
         self.num_output_placeholders = 0
 
 
@@ -232,7 +231,12 @@ class GraphDispatcher:
             return GraphMode.FULL, self._descriptor(
                 padded, uniform_decode=uniform_decode, mode=GraphMode.FULL
             )
-        if desired == GraphMode.PIECEWISE and allow_piecewise:
+        # A uniform decode can use a relaxed piecewise key when FULL is
+        # disallowed. The configured mode must actually provide those keys.
+        if (
+            self.configured_mode.mixed_mode() == GraphMode.PIECEWISE
+            and allow_piecewise
+        ):
             return GraphMode.PIECEWISE, self._descriptor(
                 padded, uniform_decode=False, mode=GraphMode.PIECEWISE
             )

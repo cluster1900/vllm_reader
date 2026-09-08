@@ -23,13 +23,13 @@ from examples.ch09_parallel_topology import (
 
 class TopologyTest(unittest.TestCase):
     def test_world_sizes(self):
-        topology = ParallelTopology(tp=2, pp=3, dp=4, pcp=2, dcp=2)
+        topology = ParallelTopology(tp=4, pp=3, dp=4, dcp=2)
         self.assertEqual(topology.worker_world_size, 12)
         self.assertEqual(topology.world_size_across_dp, 48)
 
     def test_rank_round_trip(self):
-        topology = ParallelTopology(tp=2, pp=2, dp=2, pcp=2, dcp=2)
-        coordinate = RankCoordinate(dp=1, pp=0, pcp=1, tp=0)
+        topology = ParallelTopology(tp=2, pcp=2, dcp=2)
+        coordinate = RankCoordinate(dp=0, pp=0, pcp=1, tp=0)
         self.assertEqual(topology.coordinate(topology.rank(coordinate)), coordinate)
 
     def test_tp_and_pp_groups_match_rank_layout(self):
@@ -49,6 +49,10 @@ class TopologyTest(unittest.TestCase):
     def test_invalid_dcp_is_rejected(self):
         with self.assertRaises(ValueError):
             ParallelTopology(tp=3, dcp=2)
+
+    def test_pcp_with_dp_is_rejected_by_pinned_config(self):
+        with self.assertRaisesRegex(ValueError, "PCP does not support"):
+            ParallelTopology(tp=2, dp=2, pcp=2, dcp=2)
 
 
 class TensorParallelTest(unittest.TestCase):

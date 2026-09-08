@@ -258,11 +258,11 @@ def select_backend(
 
 def demo() -> None:
     block_size = 4
-    block_table = [2, 0, 3]
+    block_table = [2, 5, 3]
     positions = list(range(10))
     _, slots = build_slot_mapping([block_table], [positions], block_size)
-    key_cache = make_cache(4, block_size)
-    value_cache = make_cache(4, block_size)
+    key_cache = make_cache(6, block_size)
+    value_cache = make_cache(6, block_size)
     keys = [(float(i), 1.0) for i in positions]
     values = [(float(i), float(i * 10)) for i in positions]
     scatter_cache(key_cache, keys, slots)

@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-07
+verified_at: 2026-09-08
 content_complete: true
 runtime_verified: false
-audience: "有 LLM 使用经验、代码开发基础和基础数学直觉的工程读者"
-pedagogy_reviewed_at: 2026-09-07
+audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
+pedagogy_reviewed_at: 2026-09-08
 scope: "V1 token 级调度、动态批处理、chunked prefill、KV 准入与抢占"
 prerequisites:
   - 第03章
@@ -69,13 +69,22 @@ Scheduler 可以先理解为一个受多种预算约束的工单调度员：请�
 token 预算、序列名额和 KV block。它不是预测模型，也不是简单地从队列头取固定数量的
 请求，而是在每个 step 重新分配稀缺资源。
 
-本章公式优先按“账本”来读。`num_computed_tokens` 是已经完成的工作，目标 token 数是
+本章公式优先按“账本”来读。`num_computed_tokens` 是已记账的计算进度，可能含已提交
+但 GPU 尚未完成的工作；目标 token 数是
 当前希望推进到的位置，两者之差就是待安排工作。先用几个整数手算，再看 chunked
 prefill、speculative decoding 和 async scheduling 如何复用同一套差额模型。
 
 第一次阅读抓住 waiting、running、preempted 三种状态和一次 `schedule()` 的主路径；
 第二次再看 priority、encoder budget、remote KV 和 fence。调参前必须先明确优化的是
 TTFT、TPOT、吞吐还是公平性，因为同一个参数不可能同时把所有指标都推向更好。
+
+**先把预算换成数字。** token budget 是本轮计算位置的额度，sequence slot 是请求名额；
+例如 3 个请求各算 1 个 token，占 3 个名额与 3 个 token 额度，和一个请求算 3 个 token
+不同。TTFT 是首个输出的等待时间，TPOT 是首 token 后每输出 token 的平均时间。
+
+**第一遍走法：** 读 4.1–4.11，运行 4.23，再看 4.13 的抢占；remote KV、Mamba、LoRA、
+fence 是第二遍的扩展。**停下来算：** prompt=4、已接受输出=1、computed=4、无草稿，
+差额为多少？是 1 个待计算位置，不是再计算全部 5 个 token。
 
 ## 4.1 Static Batch 的基本问题
 
@@ -99,18 +108,21 @@ flowchart LR
         S0[step 0: A B C] --> S1[step 1: A B C]
         S1 --> S2[step 2: 空 B C]
         S2 --> S3[step 3: 空 B C]
-        S3 --> S4[step 4: 空 空 C]
+        S3 --> S4[step 8: 空 空 C]
         S4 --> S5[直到 C 完成]
         D[D E 已到达] -. 等待 .-> S5
     end
     subgraph Continuous[Continuous batching]
         C0[step 0: A B C] --> C1[step 1: A B C]
         C1 --> C2[step 2: D B C]
-        C2 --> C3[step 3: D E C]
+        C2 --> C3[step 8: D E C]
     end
 ```
 
 > **读图方法：** 阅读“Static Batch 的基本问题”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
+
+图中只统计输出轮次，省略 prefill，并假设 A 在第 2 轮前结束、B 在第 8 轮前结束，
+D 在第 8 轮仍运行；中间省略的轮次没有画出。
 
 固定 batch 的问题不只是“吞吐少一点”：
 
@@ -134,16 +146,28 @@ sequenceDiagram
     participant M as Model Runner
     F->>E: A 到达
     E->>S: add_request(A)
-    S->>M: step 0 调度 A prefill
+    E->>S: schedule
+    S-->>E: step 0: A prefill
+    E->>M: 经 Executor/Worker 执行
+    M-->>E: A 首个 token 结果
+    E->>S: update_from_output
     F->>E: B、C 到达
     E->>S: add_request(B,C)
-    S->>M: step 1 调度 A decode + B/C prefill
-    M-->>S: A token、B/C prefill 结果
-    S->>M: step 2 重新选择仍有工作的请求
-    M-->>S: A 完成
+    E->>S: schedule
+    S-->>E: step 1: A decode + B/C prefill
+    E->>M: 经 Executor/Worker 执行
+    M-->>E: 模型结果
+    E->>S: update_from_output
+    E->>S: step 2: schedule
+    S-->>E: SchedulerOutput
+    E->>M: 经 Executor/Worker 执行
+    M-->>E: 模型结果
+    E->>S: update_from_output，A 完成
     F->>E: D 到达
     E->>S: add_request(D)
-    S->>M: step 3 用 A 空出的槽接纳 D
+    E->>S: step 3: schedule，用空槽接纳 D
+    S-->>E: SchedulerOutput
+    E->>M: 经 Executor/Worker 执行
 ```
 
 > **读图方法：** 这是“Continuous Batching 的本质”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
@@ -175,8 +199,10 @@ flowchart LR
     API[LLMEngine / AsyncLLM] --> IP[InputProcessor]
     IP --> EC[EngineCore]
     EC -->|add_request| S[Scheduler]
-    S -->|SchedulerOutput| MR[Model Runner]
-    MR -->|ModelRunnerOutput| S
+    S -->|SchedulerOutput 返回| EC
+    EC -->|经 Executor / Worker 派发| MR[Model Runner]
+    MR -->|经 Executor 返回 ModelRunnerOutput| EC
+    EC -->|update_from_output| S
     S -->|EngineCoreOutputs| EC
     EC --> OP[OutputProcessor]
     OP --> API
@@ -262,6 +288,10 @@ stateDiagram-v2
 
 ## 4.5 V1 的统一 Token 差额模型
 
+本节所有 `N` 都是以 token 为单位的整数计数，不是张量或耗时；下标分别标明 prompt、
+已接受输出、草稿、预留位置和记账进度。“差额”是还需要安排多少个位置的计算，
+之后还要经过预算裁剪，不能直接当作本轮输出 token 数。
+
 Scheduler 源码在 `schedule()` 开头明确说明：调度器内部没有必须二选一的全局
 “prefill phase”或“decode phase”。每个请求只有当前目标和已计算进度。
 
@@ -321,14 +351,21 @@ target 变成 6，computed 变成 5，下一轮又差 1。
 sequenceDiagram
     participant R as Request
     participant S as Scheduler
+    participant EC as EngineCore
     participant M as Model Runner
     Note over R: target=4 computed=0
-    S->>M: schedule 4
+    EC->>S: schedule
     Note over R: computed 乐观变为 4
-    M-->>S: sample x1
+    S-->>EC: schedule 4 的结果
+    EC->>M: 经 Executor/Worker 执行并采样
+    M-->>EC: sample x1
+    EC->>S: update_from_output
     Note over R: target=5 computed=4
-    S->>M: schedule 1
-    M-->>S: sample x2
+    EC->>S: schedule
+    S-->>EC: schedule 1 的结果
+    EC->>M: 经 Executor/Worker 执行并采样
+    M-->>EC: sample x2
+    EC->>S: update_from_output
     Note over R: target=6 computed=5
 ```
 
@@ -609,6 +646,11 @@ flowchart TB
 
 图中方框不按 token 数等比例缩放，标签给出精确预算。
 
+[测试] `tests/v1/core/test_scheduler.py` - `test_schedule_concurrent_partial_requests`
+
+此测试人工构造 `ModelRunnerOutput` 来验证调度器账本，未运行模型或 GPU；表中的
+精确分配只证明该测试配置下的调度结果。
+
 ### 4.10.2 关闭切片后的队首语义
 
 上游 `test_schedule_order` 用两个 800-token 长请求和两个 10-token 短请求验证：关闭
@@ -687,9 +729,14 @@ flowchart LR
 而不是只看第一个小 chunk。它的目的不是声称“立刻占用所有 prompt block”，而是避免
 因首 chunk 很小而过度接纳，随后多个请求一起增长并频繁抢占。
 
-`watermark` 只在本 step 已经调度了其他请求时，对 waiting/preempted 请求的新准入要求
-保留一部分空闲 block，给后续增长留出余量。若当前 step 还是空的，第一个请求不受该
-门槛阻挡，避免系统在有可用 KV 时仍无法启动任何工作。
+`watermark` 对 waiting/preempted 的准入增加空闲 block 余量。要核对调用点：
+Scheduler 传的是 `has_scheduled_reqs=bool(self.running)`，所以实际条件是 **running
+集合非空**，不是“本轮已经安排了正数 token”。例如旧请求受节奏限制，本轮没有执行，
+但仍留在 running，watermark 依然生效。running 为空时，首个准入请求不加此门槛。
+
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule` 的 waiting 分配调用
+
+[源码] `vllm/v1/core/kv_cache_manager.py` - `KVCacheManager.allocate_slots`
 
 ```mermaid
 flowchart TB
@@ -731,8 +778,7 @@ stateDiagram-v2
     VICTIM --> FREE: 释放 KV / encoder 状态
     FREE --> RESET: computed=0 清 draft/placeholder
     RESET --> PREEMPTED: 记录 stale 与次数
-    PREEMPTED --> WAITING: 放回队列
-    WAITING --> RECOMPUTE: 后续重新准入并重算
+    PREEMPTED --> RECOMPUTE: 留在 waiting 容器，后续恢复准入
     RECOMPUTE --> RUNNING: 进度重新建立
 ```
 
@@ -818,7 +864,7 @@ N_{new}=N_{tokens}-N_{computed}
 ```
 
 ```mermaid
-flowchart LR
+flowchart TD
     P[完整 prompt] --> L[本地 prefix lookup]
     L --> HL[local hit]
     L --> MISS[未命中后缀]
@@ -830,7 +876,7 @@ flowchart LR
     D --> SCH[只调度未覆盖部分]
 ```
 
-> **读图方法：** 这是“Prefix Cache 与远端 KV 如何改变准入”的流程图。先从左向右只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
+> **读图方法：** 这是“Prefix Cache 与远端 KV 如何改变准入”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
 真实实现还处理 partial tail、block alignment、Mamba state 边界和外部命中覆盖本地尾块等
 细节，第 05 章会展开。
@@ -933,13 +979,19 @@ request.num_in_flight_tokens += num_scheduled_token
 sequenceDiagram
     participant S as Scheduler
     participant Q as Request counters
+    participant EC as EngineCore
     participant M as Model Runner
-    S->>M: step N SchedulerOutput
+    EC->>S: schedule step N
     S->>Q: computed += scheduled
     S->>Q: in_flight += scheduled
-    Note over S,Q: 不等待 step N 完成即可规划后续 step
-    S->>M: 可提交 step N+1
-    M-->>S: step N output
+    S-->>EC: step N SchedulerOutput
+    EC->>M: 经 Executor/Worker 提交 step N
+    Note over S,Q: async 等配置允许规划后续 step
+    EC->>S: schedule step N+1
+    S-->>EC: step N+1 SchedulerOutput
+    EC->>M: 经 Executor/Worker 提交
+    M-->>EC: step N output
+    EC->>S: update_from_output
     S->>Q: in_flight -= scheduled
     S->>Q: 必要时回滚 rejected/stale
 ```
@@ -994,9 +1046,15 @@ Scheduler 乐观地把 draft 位置计入 computed；Model Runner 验证后若�
 
 ### 4.19.4 完成后释放
 
-新 token 可能触发 stop string、EOS、长度上限、grammar error 或其他终止条件。完成请求
+新 token 在 Scheduler 侧可能触发 EOS、stop token ID、长度上限、重复检测或 grammar
+错误。stop string 需要前端 `OutputProcessor` 增量解码后判断，再发 abort 给后端；
+Scheduler 自己不搜索字符串。完成请求
 被移出 running/preempted 集合，释放 KV/encoder/connector 资源，并生成带 finish reason
 的 `EngineCoreOutput`。
+
+[源码] `vllm/v1/core/sched/utils.py` - `check_stop`
+
+[源码] `vllm/v1/engine/output_processor.py` - `OutputProcessor.process_outputs`
 
 Partial prefill 本身通常不产生可见 token 输出；只有到达可采样位置后才向上游发送结果。
 
@@ -1181,8 +1239,10 @@ first scheduled step 和 finished step。
 
 ### 实验 C：开启/关闭 Chunked Prefill
 
-将一个大于单轮 budget 的长 prompt 放在短请求之前。关闭时观察队首阻塞；开启时观察
-长请求被切片。
+使用“长请求小于整轮预算、但大于本轮剩余预算”的配置，例如预算 1024，先安排一个
+800-token 请求，再排另一个 800-token 请求和一个 10-token 请求。关闭 chunking 时第二个
+长请求放不进剩余 224，后面的短请求也等下一轮。不要在关闭 chunking 时设置 prompt
+大于整轮容量来无限等待；真实配置校验可能直接拒绝这类组合。
 
 ### 实验 D：KV Pressure
 
@@ -1336,6 +1396,8 @@ Chunked prefill 把长 prompt 从不可分割的大任务变成 token 级片段�
 block 怎样引用和回收，以及 PagedAttention 为什么需要 block table。
 
 ## 4.29 自检问题
+
+第一遍先完成前 5 题；余下题目是第二遍源码阅读的扩展题库，不要求一次做完。
 
 > **本节先看：** 建议先不看答案，用自己的话回答下面的问题。能够解释原因、画出数据流并指出源码位置，才算真正理解。
 

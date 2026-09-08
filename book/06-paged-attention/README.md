@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-07
+verified_at: 2026-09-08
 content_complete: true
 runtime_verified: false
-audience: "有 LLM 使用经验、代码开发基础和基础数学直觉的工程读者"
-pedagogy_reviewed_at: 2026-09-07
+audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
+pedagogy_reviewed_at: 2026-09-08
 scope: "分页 KV 寻址、block table、slot mapping、attention metadata、backend 选择和当前 FlashAttention 路径"
 prerequisites:
   - 第01章
@@ -70,9 +70,17 @@ attention 数学变了，而是 attention 读取历史 K/V 的寻址方式变了
 第三次才比较 FlashAttention、FlashInfer 等 backend。backend 名称会变，但逻辑位置、
 物理位置和元数据契约这三层长期更稳定。
 
+**先用数组理解地址。** `//` 是整除，`%` 是余数；stride 是索引增加 1 时在存储中
+跨过多少元素。gather 是按索引收集，scatter 是按索引分散写入。backend 是实现同一
+attention 接口的一套具体代码，metadata 是解释请求边界、长度和地址的数据。
+
+**第一遍走法：** 读 6.1–6.8、6.10–6.13、6.16，并运行 6.20；6.19 的 kernel 分析
+留到第二遍。**停下来算：** block size=4，表为 `[2,5,3]`，位置 5 写到哪里？
+逻辑块 `5//4=1`，物理块 5，页内偏移 1，所以 slot=`5*4+1=21`，不是字节地址 21。
+
 ## 6.1 从一个不可能的连续数组开始
 
-假设请求 A 最终会生成 8192 个 token。一种朴素方案是在请求进入时为它预留一块能容纳
+假设为请求 A 配置的最大总长度为 8192 个 token，包含 prompt 和生成结果。一种朴素方案是在请求进入时为它预留一块能容纳
 8192 个 token 的连续 KV 内存：
 
 ```mermaid
@@ -97,17 +105,19 @@ flowchart LR
         L0["tokens 0-3"] --> L1["tokens 4-7"] --> L2["tokens 8-9"]
     end
     subgraph Physical["physical KV block pool"]
-        P0["block 0: A 4-7"]
+        P0["block 5: A 4-7"]
         P1["block 1: free"]
         P2["block 2: A 0-3"]
         P3["block 3: A 8-9"]
     end
     L0 -. "table[0]=2" .-> P2
-    L1 -. "table[1]=0" .-> P0
+    L1 -. "table[1]=5" .-> P0
     L2 -. "table[2]=3" .-> P3
 ```
 
 > **读图方法：** 这张图用于压缩“从一个不可能的连续数组开始”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
+
+例子使用 block 2、5、3 存真实数据，避开第 05 章保留的 null block 0。
 
 于是 attention 面临本章核心问题：它必须保持**逻辑顺序**，但不要求**物理连续**。
 
@@ -258,7 +268,7 @@ flowchart LR
 
 ### 6.4.1 手算一个非连续例子
 
-设 `B=4`，请求块表为 `[2, 0, 3]`：
+设 `B=4`，请求块表为 `[2, 5, 3]`：
 
 | position `p` | logical block `i` | offset `o` | physical block `b` | slot |
 |---:|---:|---:|---:|---:|
@@ -266,23 +276,23 @@ flowchart LR
 | 1 | 0 | 1 | 2 | 9 |
 | 2 | 0 | 2 | 2 | 10 |
 | 3 | 0 | 3 | 2 | 11 |
-| 4 | 1 | 0 | 0 | 0 |
-| 5 | 1 | 1 | 0 | 1 |
-| 6 | 1 | 2 | 0 | 2 |
-| 7 | 1 | 3 | 0 | 3 |
+| 4 | 1 | 0 | 5 | 20 |
+| 5 | 1 | 1 | 5 | 21 |
+| 6 | 1 | 2 | 5 | 22 |
+| 7 | 1 | 3 | 5 | 23 |
 | 8 | 2 | 0 | 3 | 12 |
 | 9 | 2 | 1 | 3 | 13 |
 
 ```mermaid
 flowchart LR
     Q0["logical 0 1 2 3"] -->|"table 0 = 2"| B2["slots 8 9 10 11"]
-    Q1["logical 4 5 6 7"] -->|"table 1 = 0"| B0["slots 0 1 2 3"]
+    Q1["logical 4 5 6 7"] -->|"table 1 = 5"| B0["slots 20 21 22 23"]
     Q2["logical 8 9"] -->|"table 2 = 3"| B3["slots 12 13"]
 ```
 
 > **读图方法：** 阅读“手算一个非连续例子”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
 
-物理读取顺序是 `8,9,10,11,0,1,2,3,12,13`，但 attention 看见的逻辑 K/V 顺序仍是
+物理读取顺序是 `8,9,10,11,20,21,22,23,12,13`，但 attention 看见的逻辑 K/V 顺序仍是
 位置 `0..9`。随书 `slot_for_position()` 和对应测试固定了这个例子。
 
 ## 6.5 Allocation Block 与 Kernel Block 不一定相等
@@ -322,7 +332,7 @@ flowchart LR
 `BlockTables.append_block_ids()` 都执行这种展开；上游测试验证 manager ID `10,11` 在
 `32 -> 16` 时变成 `20,21,22,23`。
 
-必须满足 `A % K == 0`。这也解释了 `AttentionBackend.supports_block_size()` 为什么允许框架
+这里 `A`、`K` 的单位均为 token/block，`r` 是无单位整数；必须满足 `A % K == 0`。这也解释了 `AttentionBackend.supports_block_size()` 为什么允许框架
 block size 是 kernel 要求的整数倍，而不一定完全相等。
 
 ```mermaid
@@ -350,10 +360,10 @@ Runner 维护 request index 与持久 block table，将新增 ID 追加或覆盖
 ```mermaid
 sequenceDiagram
     participant S as Scheduler
-    participant O as SchedulerOutput
+    participant O as EngineCore / Executor / Worker
     participant R as Model Runner
     participant T as Persistent Block Tables
-    S->>O: scheduled request plus new block IDs
+    S-->>O: SchedulerOutput: request plus block IDs
     O->>R: execute step
     R->>T: append or overwrite request row
     R->>T: apply staged writes
@@ -1202,7 +1212,12 @@ final K/V pointer
 
 ### 6.19.4 第四层：追踪 online softmax 状态
 
-长 KV 往往按 tile/partition 处理。稳定 softmax 通常维护局部最大值 `m`、归一化分母 `l` 和
+这里的 online 是“分块到来、边读边累计”，不是在线 HTTP 服务。先想象统计两组
+候选：第一组总权重为 9，第二组为 1，合并输出应按 9:1 加权，不能取两个局部
+输出的简单平均。为了不保存完整分数矩阵，kernel 只保留能继续累计的摘要。
+
+长 KV 往往按 tile/partition 处理。tile 是本轮处理的一小片 K/V。对一个 Query，
+`s_j` 为第 `j` 个候选的无单位分数；稳定 softmax 通常维护局部最大值 `m`、归一化分母 `l` 和
 加权输出状态。新 tile 到来时旧状态需要按新的最大值重标定：
 
 ```math
@@ -1213,7 +1228,10 @@ m' = \max(m, m_{tile})
 l' = e^{m-m'}l + \sum_{j \in tile} e^{s_j-m'}
 ```
 
-输出累加也必须使用相同缩放。DCP 或 split-K 最终合并的正是这类 `(output, LSE)` 状态，而不是
+`m_tile` 是新片段的最大分数；`m`、`l`、`m_tile` 都是标量。`l` 保存的是
+`sum(exp(score-m))`，换用更大的最大值 `m′` 后，要把旧分母乘 `exp(m-m′)`，
+才能和新片段相加。加权输出摘要是长度为 Value 维度的向量，也必须使用相同缩放。
+LSE 指 `log(sum(exp(score)))`，可由 `m + log(l)` 得到。DCP 或 split-K 最终合并的正是这类 `(output, LSE)` 状态，而不是
 直接平均各分区输出。
 
 ```mermaid
@@ -1259,7 +1277,7 @@ flowchart LR
 运行：
 
 ```bash
-cd /Users/hawk_wu/Desktop/vllm_reader
+# 在 vllm_reader 仓库根目录运行
 python3 examples/ch06_paged_addressing.py
 python3 -m unittest tests.test_ch06_paged_addressing -v
 ```

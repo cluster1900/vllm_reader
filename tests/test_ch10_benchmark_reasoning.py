@@ -28,6 +28,25 @@ class RequestTraceTests(unittest.TestCase):
         self.assertEqual(trace.tpot, 0.0)
         self.assertEqual(trace.itls, ())
 
+    def test_multi_token_chunks_use_usage_for_tpot_and_throughput(self):
+        trace = RequestTrace(0.0, 0.0, (0.2, 0.5), 4, completion_tokens=4)
+        self.assertAlmostEqual(trace.tpot, 0.1)
+        self.assertAlmostEqual(trace.itls[0], 0.3)
+        self.assertEqual(summarize([trace], 1.0).total_output_tokens, 4)
+
+    def test_usage_only_tail_changes_e2el_but_not_itl(self):
+        trace = RequestTrace(
+            0.0, 0.0, (0.2, 0.5), 4,
+            completion_tokens=4, last_response_time=0.8,
+        )
+        self.assertAlmostEqual(trace.e2el, 0.8)
+        self.assertAlmostEqual(trace.tpot, 0.2)
+        self.assertAlmostEqual(trace.itls[0], 0.3)
+
+    def test_response_end_cannot_precede_content(self):
+        with self.assertRaises(ValueError):
+            RequestTrace(0.0, 0.0, (0.2, 0.5), 4, last_response_time=0.4)
+
     def test_failed_trace_has_no_output_metrics(self):
         trace = RequestTrace(0.0, 0.1, (), 4, success=False, error="timeout")
         self.assertEqual(trace.output_tokens, 0)

@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-07
+verified_at: 2026-09-08
 content_complete: true
 runtime_verified: false
-audience: "有 LLM 使用经验、代码开发基础和基础数学直觉的工程读者"
-pedagogy_reviewed_at: 2026-09-07
+audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
+pedagogy_reviewed_at: 2026-09-08
 scope: "SchedulerOutput 到 Worker 广播、GPU 输入准备、模型 forward、sampling、异步输出与 ModelRunnerOutput 的完整执行栈"
 prerequisites:
   - 第03章
@@ -30,7 +30,7 @@ prerequisites:
 attention backend。本章把这些局部机制装回一次完整的模型执行：
 
 ```mermaid
-flowchart LR
+flowchart TD
     S["SchedulerOutput"] --> E["Executor"]
     E --> W["Worker per rank"]
     W --> R["Model Runner"]
@@ -42,7 +42,7 @@ flowchart LR
     O --> S2["Scheduler update"]
 ```
 
-> **读图方法：** 阅读“本章定位”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
+> **读图方法：** 阅读“本章定位”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
 这一段调用链看起来只是“跑模型”，实际上同时跨越五类边界：编排、进程、设备、并行和状态。
 本章绑定源码 revision `5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`，继续使用以下标签：
@@ -80,6 +80,14 @@ Runner 的 batch 构造混在一起。
 第一次阅读追单 GPU、普通文本生成的完整 step；第二次加入 TP/PP 广播和返回值规则；
 第三次再看 MRV1/MRV2、warmup、CUDA Graph 与异步输出。模型内部算子已经在第 01 和
 第 06 章建立基础，本章重点是它们怎样被系统正确地调用。
+
+**先分清数据搬运。** H2D 是 CPU 主机内存到 GPU 设备内存，D2H 是反向拷贝；
+rank 是通信参与进程的编号，shard 是它负责的数据分片。persistent row 是给请求长期
+保留的状态行，本轮 batch row 则会随请求排序变化，二者用索引表连接。
+
+**第一遍走法：** 读 7.1–7.3、7.6、7.11–7.14、7.16–7.18 和 7.23，先跑单卡教学链；
+通信与 Runner 自动选择第二遍细读。**停下来追：** 请求 B 存在状态行 3，本轮排第 0，
+模型该读哪行？通过 `idx_mapping[0]=3` 收集状态，不能直接把状态行 0 当作 B。
 
 ## 7.1 五层执行栈：先把名字放对位置
 
@@ -271,6 +279,13 @@ flowchart LR
 
 “只回复”不等于“只有一个 rank 运行”。让非输出 rank 跳过 forward 会令 collective 永久等待。
 
+这张图限定为没有 KV/encoder connector 输出聚合器的普通路径。有聚合器时，
+`collective_rpc` 会把发给 Worker 的 `output_rank` 置为 `None`，收集所有 rank 回复，
+再合并 connector 元数据并选出面向 Scheduler 的输出。“最后只得到一份输出”不等于
+“通信时永远只收一个 rank”。
+
+[源码] `vllm/v1/executor/multiproc_executor.py` - `MultiprocExecutor.collective_rpc`
+
 ### 7.4.2 WorkerProc 的 busy loop 与错误路径
 
 每个 `WorkerProc` 初始化 Worker、设备和模型，报告 `READY`，再持续 dequeue RPC、调用方法并按条件
@@ -453,7 +468,9 @@ offload 会改变 I/O 和搬运方式；可靠结论是**最终本地参数由�
 M_{KV}=M_{requested}-M_{nonKV}-M_{graph,applied}
 ```
 
-- `M_requested` 来自启动快照和 `gpu_memory_utilization`；
+- 所有 `M` 的单位都是 byte（换成 GiB 时所有项一起换）；
+- `M_requested = total_memory * gpu_memory_utilization`，不是 free memory 乘利用率；
+  启动还会检查 free memory 是否足以满足 requested；
 - `M_nonKV` 包含权重及 profile 期间非 KV 消耗；
 - `M_graph,applied` 是启用相应估算时预留的 CUDA Graph memory。
 
@@ -461,7 +478,9 @@ M_{KV}=M_{requested}-M_{nonKV}-M_{graph,applied}
 
 ```mermaid
 flowchart TB
-    TOTAL["initial free memory"] --> REQ["requested by utilization"]
+    TOTAL["device total memory"] --> REQ["total times gpu_memory_utilization"]
+    FREE["initial free memory"] --> CHECK["check free is at least requested"]
+    REQ --> CHECK
     REQ --> W["weights and persistent state"]
     REQ --> A["activation/transient peak"]
     REQ --> G["applied graph estimate"]
@@ -483,22 +502,26 @@ profile run 以编译最大 batch，但跳过自动 memory profiling，且该容
 > **本节先看：** 这一小节先用图建立“KV Cache 初始化与 warmup”的整体路径。先找输入、关键状态和输出，再阅读图后的源码解释，不必一开始记住全部节点。
 
 ```mermaid
-flowchart LR
+flowchart TD
     ID["init_device"] --> LM["load_model"]
-    LM --> PM["determine_available_memory"]
-    PM --> SPEC["collect KV specs"]
-    SPEC --> PLAN["EngineCore chooses config"]
+    LM --> SPEC["collect KV specs"]
+    SPEC --> LAYOUT["resolve and publish KV layout"]
+    LAYOUT --> PM["determine_available_memory"]
+    PM --> PLAN["EngineCore chooses config"]
     PLAN --> IKV["initialize_from_config"]
     IKV --> WARM["compile / warmup / capture"]
     WARM --> RUN["serve steps"]
 ```
 
-> **读图方法：** 这张图用于压缩“KV Cache 初始化与 warmup”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
+> **读图方法：** 这张图用于压缩“KV Cache 初始化与 warmup”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
-先加载模型才能测权重与 activation；先 profile 才知道能分多少 blocks；先创建 KV Cache，warmup/capture
-才能使用与真实执行一致的 cache shape。`initialize_from_config()` 先记录 block 数/layout，再初始化 KV
+先加载模型并收集 KV specs，才能确定 layout；先 profile，才能确定最终池容量。某些
+profiling 路径已经会创建最小临时 KV 并估算 graph，不能把图理解成 profile 时绝无
+KV 或 capture。最终缓存初始化后，服务前的 warmup/capture 再使用正式布局。`initialize_from_config()` 先记录 block 数/layout，再初始化 KV
 connector，然后调用 Runner `initialize_kv_cache()`。warmup 覆盖 compile sizes、kernel warmup、MRV2
 额外 warmup 和非 eager 下的 graph capture。
+
+[源码] `vllm/v1/engine/core.py` - `EngineCore._initialize_kv_caches`
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.initialize_from_config`
 
@@ -754,7 +777,7 @@ MRV1 主干是：保存配置要求的 raw logits/logprobs、转 float32、allow
 [源码] `vllm/v1/sample/sampler.py` - `Sampler.sample`
 
 ```mermaid
-flowchart LR
+flowchart TD
     L["raw logits"] --> MASK["constraints and bias"]
     MASK --> PEN["penalties"]
     PEN --> GREEDY["greedy candidate"]
@@ -766,7 +789,7 @@ flowchart LR
     RAND --> MIX
 ```
 
-> **读图方法：** 这是“Sampling 的准确处理顺序”的流程图。先从左向右只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
+> **读图方法：** 这是“Sampling 的准确处理顺序”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
 MRV2 的 modular sampler 顺序是 logit bias、penalties、bad words、thinking budget、temperature、min-p、
 top-k/top-p，随后选择 FlashInfer 或 Triton Gumbel sampling。
@@ -776,7 +799,7 @@ top-k/top-p，随后选择 FlashInfer 或 Triton Gumbel sampling。
 [源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.sample`
 
 ```mermaid
-flowchart LR
+flowchart TD
     L2["logits"] --> BI["logit bias"]
     BI --> PE["penalties"]
     PE --> BW["bad words"]
@@ -787,13 +810,16 @@ flowchart LR
     TK --> GS["FlashInfer or Gumbel"]
 ```
 
-> **读图方法：** 阅读“Sampling 的准确处理顺序”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
+> **读图方法：** 阅读“Sampling 的准确处理顺序”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
 随机路径常把 logits 除以温度：
 
 ```math
 p_i=\frac{\exp(z_i/T)}{\sum_j\exp(z_j/T)}
 ```
+
+本式只适用于 `T>0`，`z`、`p` 的 shape 都是 `[vocab_size]`，概率无单位；`T=0`
+走 greedy 语义，不做除零。MRV1 全 greedy 时提前返回，混合 batch 才按行合并结果。
 
 Top-k 保留固定数量最高分 token；top-p 保留累计概率达到 p 的最小集合。即使 temperature 为零，
 grammar、allowed tokens、bad words、bias 和 penalties 也可能先改变 argmax。
@@ -944,30 +970,41 @@ graph manager；MRV1 仍覆盖部分 V2 尚不支持组合。共存是能力迁�
 
 ```mermaid
 sequenceDiagram
+    participant EC as EngineCore
     participant S as Scheduler
     participant E as Executor
     participant W as Worker ranks
     participant R as Model Runner
     participant M as Model
     participant P as Sampler
-    S->>E: execute_model(SchedulerOutput)
+    EC->>S: schedule()
+    S-->>EC: SchedulerOutput
+    EC->>E: execute_model(SchedulerOutput, non_block=True)
     E->>W: broadcast same step
+    E-->>EC: Future
+    EC->>S: get_grammar_bitmask
+    S-->>EC: GrammarOutput
     W->>R: execute_model(step, PP input)
     R->>R: update state and prepare tensors
     R->>M: forward under context
     M-->>R: hidden / intermediates
-    S->>E: sample_tokens(GrammarOutput)
+    R-->>EC: 经 Worker / Executor 返回 None
+    EC->>E: sample_tokens(GrammarOutput)
     E->>W: broadcast sampling call
     W->>R: sample_tokens(grammar)
     R->>P: process logits and sample
     P-->>R: tokens and logprobs
     R-->>W: async or sync output
     W-->>E: selected rank reply
-    E-->>S: ModelRunnerOutput
+    E-->>EC: ModelRunnerOutput
+    EC->>S: update_from_output
     S->>S: append, finish, free, reschedule
 ```
 
 > **读图方法：** 这是“一次完整 step”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
+
+本图展开需要单独 `sample_tokens` 的普通文本生成路径；若 execute 已返回完整输出，
+EngineCore 不重复采样。箭头上的派发者是 EngineCore，Scheduler 只生成工作和结算状态。
 
 五次语义转换是：
 

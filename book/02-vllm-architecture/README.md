@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-07
+verified_at: 2026-09-08
 content_complete: true
 runtime_verified: false
-audience: "有 LLM 使用经验、代码开发基础和基础数学直觉的工程读者"
-pedagogy_reviewed_at: 2026-09-07
+audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
+pedagogy_reviewed_at: 2026-09-08
 scope: "V1 文本生成主链；覆盖离线 LLM.generate 和 OpenAI-compatible 在线 chat 入口"
 prerequisites:
   - 第01章
@@ -67,6 +67,15 @@ structured output、speculative decoding 和分离式 prefill/decode 只在它�
 本章不要求你理解 attention kernel。你需要建立的是系统地图：谁拥有请求状态，谁拥有
 调度权，谁拥有设备内存，谁把 token 还原成用户看到的文本。后续章节都是对这张地图的
 局部放大。
+
+**先分清三种并发对象。** 进程拥有自己的内存空间；线程共享所在进程的内存；
+asyncio task 是事件循环调度的一段协程，在 `await` 等待时允许其他 task 继续。
+IPC 是进程间通信，ZMQ 是这里传递消息的库，SSE 是服务器持续向 HTTP 客户端发送事件
+的格式。它们都不会自动让 Transformer 层并行计算。
+
+**第一遍走法：** 读 2.1–2.4、2.6–2.12，再运行 2.17 的模拟器；用 2.14 检查取消路径。
+**停下来追：** token ID 已从 GPU 返回，为什么用户还没看到文字？先查 OutputProcessor
+的增量解码，再查 collector 与 SSE；模型输出不直接等于 HTTP 输出。
 
 ## 2.1 为什么模型外面还需要一套系统
 
@@ -165,7 +174,7 @@ flowchart TB
         S[Scheduler]
         KVM[KV Cache metadata]
     end
-    subgraph D[数据面 Accelerator]
+    subgraph D[执行侧: CPU 派发与 GPU 计算]
         EX[Executor]
         W[Worker / Model Runner]
         M[Model + Sampler]
@@ -174,7 +183,8 @@ flowchart TB
     API --> R --> IP --> CL --> EC
     EC --> S
     S <--> KVM
-    S --> EX --> W --> M
+    S -->|调度结果交回 EngineCore| EC
+    EC --> EX --> W --> M
     M <--> KV
     M --> EC --> CL --> OP --> API
 ```
@@ -273,8 +283,8 @@ data: [DONE]
 |---|---|---|
 | 用户输入 | Python prompt/list | HTTP JSON messages |
 | chat template | `LLM.chat` 时使用 | `OnlineRenderer.render_chat` |
-| 请求推进 | 调用线程主动循环 `step()` | EngineCore 后台 busy loop |
-| 常见 client | `InprocClient`，也可启用 MP | `AsyncMPClient` 或 DP 变体 |
+| 请求推进 | 前端循环 `LLMEngine.step()` 取结果；默认后端有独立 busy loop | EngineCore 后台 busy loop |
+| 常见 client | 默认 `SyncMPClient`；显式关闭 MP 时为 `InprocClient` | `AsyncMPClient` 或 DP 变体 |
 | 输出交付 | 返回最终 `list[RequestOutput]` | 每请求异步 collector，再转 SSE/JSON |
 | 取消来源 | 调用方显式 abort | HTTP 断开、task cancel、显式 abort |
 | 共同后端 | EngineCore、Scheduler、Executor、Worker、Model Runner | 同左 |
@@ -539,7 +549,8 @@ N 通常由当前 DP rank 内的 TP、PP、PCP 等并行维度决定，完整公
 
 ### 离线 in-process 路径
 
-默认离线 `LLMEngine` 可以使用 `InprocClient`。此时 EngineCore 和 `UniProcExecutor`
+显式设置 `VLLM_ENABLE_V1_MULTIPROCESSING=0` 时，离线 `LLMEngine` 使用
+`InprocClient`。配合单 rank 的 `UniProcExecutor`，此时 EngineCore 和 `UniProcExecutor`
 Worker 都在调用者进程，`LLM.generate()` 的调用线程主动推进 step：
 
 ```mermaid
@@ -653,7 +664,12 @@ sequenceDiagram
     EC->>EX: execute_model(non_block=True)
     EX->>W: execute_model
     W-->>EX: ModelRunnerOutput/future
-    EX-->>EC: future.result()
+    EX-->>EC: future.result(): output 或 None
+    opt output 为 None，需要单独采样
+        EC->>EX: sample_tokens(grammar_output)
+        EX->>W: sample_tokens
+        W-->>EC: ModelRunnerOutput 经 Executor 返回
+    end
     EC->>AQ: drain aborts
     EC->>S: update_from_output(...)
     S-->>EC: EngineCoreOutputs
@@ -681,7 +697,7 @@ sequenceDiagram
 同一个请求在不同层不是同一个 Python 对象。每次转换都在缩小或改变责任边界。
 
 ```mermaid
-flowchart LR
+flowchart TD
     A[HTTP JSON / Python Prompt] --> B[EngineInput]
     B --> C[EngineCoreRequest]
     C --> D[Request]
@@ -693,7 +709,7 @@ flowchart LR
     I --> J[SSE JSON / Python return]
 ```
 
-> **读图方法：** 这张图用于压缩“数据形态怎样逐层变化”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
+> **读图方法：** 这张图用于压缩“数据形态怎样逐层变化”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
 ### `EngineInput`
 
@@ -727,7 +743,7 @@ EngineCore 内部的可变状态对象。它增加：
 
 ### `SchedulerOutput`
 
-一次 step 的不可变工作说明，包含：
+一次 step 的工作说明，包含：
 
 - 新请求的完整数据 `scheduled_new_reqs`
 - 已缓存请求的增量数据 `scheduled_cached_reqs`
@@ -735,7 +751,10 @@ EngineCore 内部的可变状态对象。它增加：
 - 新 block IDs、finished/preempted request IDs
 - encoder input、spec decode token、common prefix 信息
 
-它回答“这一轮 Worker 应该做什么”，不等于长期 Request 状态。
+它回答“这一轮 Worker 应该做什么”，不等于长期 Request 状态。它是普通可变
+`dataclass`，不是 Python 层面的不可变对象；异步执行时还会更新草稿 token 等字段。
+
+[源码] `vllm/v1/core/sched/output.py` - `SchedulerOutput`
 
 ### `ModelRunnerOutput`
 
@@ -858,7 +877,11 @@ sequenceDiagram
         EC->>S: schedule
         S-->>EC: SchedulerOutput
         EC->>W: execute_model
-        W-->>EC: ModelRunnerOutput
+        W-->>EC: output 或 None
+        opt output 为 None
+            EC->>W: sample_tokens(grammar_output)
+            W-->>EC: ModelRunnerOutput
+        end
         EC->>S: update_from_output
         S-->>EC: EngineCoreOutput
         EC->>C: ZMQ output
@@ -871,6 +894,10 @@ sequenceDiagram
 ```
 
 > **读图方法：** 这是“从请求到输出的完整在线时序”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
+
+图中以 `EngineCore.step` 的非队列路径展开执行与采样；启用异步调度等配置时会选择
+`step_with_batch_queue`，第 03、08 章再解释多批次在途。不要由本图推断每次提交后
+CPU 都必须等到 GPU 完成才允许下一次调度。
 
 这里最容易忽略的是：一次用户请求通常经历许多次 loop。只有 prefill 和若干次 decode
 全部完成，或者遇到 EOS、stop、length、abort、error 等结束条件，生命周期才终止。
@@ -1254,14 +1281,21 @@ stop 检查。
   -> Python return 或 SSE
 ```
 
-离线与在线路径共享 EngineCore 之后的大部分后端，但推进方式不同：离线调用线程主动
-step，在线 EngineCoreProc 在后台 busy loop 中持续工作，前端通过异步 output handler
-分发结果。
+离线与在线路径共享 EngineCore 之后的大部分后端。默认两者的 EngineCoreProc 都在
+后台推进；离线前端循环调用 `LLMEngine.step()` 同步取结果，在线前端用异步 output
+handler 分发结果。只有显式关闭多进程的离线 `InprocClient` 路径，调用线程才直接
+执行 `EngineCore.step_fn()`。
+
+[源码] `vllm/v1/engine/llm_engine.py` - `LLMEngine.from_engine_args`、`step`
+
+[源码] `vllm/v1/engine/core_client.py` - `InprocClient.get_output`、`SyncMPClient.get_output`
 
 理解 vLLM 源码时必须同时问四个问题：当前对象拥有什么状态、运行在哪个并发边界、
 输入输出是什么数据形态、完成或取消时由谁清理。只记住类名不能回答这些问题。
 
 ## 2.24 自检问题
+
+第一遍先完成前 5 题；余下题目是第二遍源码阅读的扩展题库，不要求一次做完。
 
 > **本节先看：** 建议先不看答案，用自己的话回答下面的问题。能够解释原因、画出数据流并指出源码位置，才算真正理解。
 

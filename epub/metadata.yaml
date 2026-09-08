@@ -3,7 +3,7 @@ subtitle: "从 Transformer 推理到调度、KV Cache、PagedAttention 与多 GP
 author:
   - "vLLM Reader Project"
 lang: zh-CN
-date: "2026-09-07"
+date: "2026-09-08"
 rights: "本书正文采用项目约定许可；上游 vLLM 源码归原项目贡献者所有。"
-description: "面向有 Python 开发经验读者的 vLLM V1 源码导读。"
+description: "面向初中级程序员与软件工程类学生的 vLLM V1 源码导读。"
 publisher: "vLLM Reader Project"

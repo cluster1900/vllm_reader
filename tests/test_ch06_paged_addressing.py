@@ -26,19 +26,19 @@ class AddressingTest(unittest.TestCase):
             expand_manager_blocks([1], 24, 16)
 
     def test_non_contiguous_block_table_maps_positions(self):
-        table = [2, 0, 3]
+        table = [2, 5, 3]
         self.assertEqual([slot_for_position(table, p, 4) for p in range(10)],
-                         [8, 9, 10, 11, 0, 1, 2, 3, 12, 13])
+                         [8, 9, 10, 11, 20, 21, 22, 23, 12, 13])
 
     def test_ragged_query_boundaries(self):
         self.assertEqual(build_query_start_loc([3, 1, 2]), [0, 3, 4, 6])
 
     def test_slot_mapping_is_flattened_and_padded(self):
         starts, slots = build_slot_mapping(
-            [[2, 0], [3]], [[4, 5], [0]], 4, padded_tokens=5
+            [[2, 5], [3]], [[4, 5], [0]], 4, padded_tokens=5
         )
         self.assertEqual(starts, [0, 2, 3])
-        self.assertEqual(slots, [0, 1, 12, PAD_SLOT_ID, PAD_SLOT_ID])
+        self.assertEqual(slots, [20, 21, 12, PAD_SLOT_ID, PAD_SLOT_ID])
 
     def test_disabled_slot_mapping_is_all_padding(self):
         _, slots = build_slot_mapping([[5]], [[0, 1]], 4, enabled=False)
@@ -47,11 +47,11 @@ class AddressingTest(unittest.TestCase):
 
 class CacheAndAttentionTest(unittest.TestCase):
     def test_scatter_then_gather_restores_logical_order(self):
-        table = [2, 0, 3]
+        table = [2, 5, 3]
         positions = list(range(10))
         _, slots = build_slot_mapping([table], [positions], 4)
         values = [(float(i),) for i in positions]
-        cache = make_cache(4, 4)
+        cache = make_cache(6, 4)
         scatter_cache(cache, values, slots)
         self.assertEqual(gather_sequence(cache, table, 10, 4), values)
 

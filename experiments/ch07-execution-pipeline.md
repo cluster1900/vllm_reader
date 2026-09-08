@@ -1,5 +1,9 @@
 # 第 07 章实验：从 SchedulerOutput 到 ModelRunnerOutput
 
+2026-09-08 全书复核补记：本地 CPU 重跑的版本、环境、命令与结果统一记录在
+[全书检查报告](../meta/full-book-review-2026-09-08.md)。下文历史输出保留原日期；GPU
+实验表格是待执行模板，空白不代表零值或测试通过。
+
 本实验绑定 vLLM commit `5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`，目标是分层验证执行栈，
 而不是只记录一次端到端耗时。
 
@@ -23,8 +27,9 @@ python3 -m unittest tests.test_ch07_execution_pipeline -v
 记录硬件/软件、model revision、dtype/quantization、memory 参数、graph mode、TP/PP/DP，以及：
 
 ```text
+device total memory
 initial free memory
-requested memory
+requested memory = total memory * gpu_memory_utilization
 model weight memory
 profile non-KV memory
 CUDA Graph estimate and whether applied
@@ -51,7 +56,8 @@ D2H、峰值显存与 block 数。若强制 MRV2 因不支持组合报错，应�
 ## E. Multiprocessing 与 PP
 
 每 rank 记录 step sequence、rpc/global/local rank、device、execute/sample entry、是否 enqueue reply。
-预期所有参与 rank 执行，只有 selected rank 提供主回复。
+普通无输出聚合器路径预期所有参与 rank 执行、selected rank 提供回复；KV/encoder
+connector 聚合器启用时会收集多 rank 回复再合并。
 
 PP 额外记录 layer 范围、`IntermediateTensors` keys/shape/dtype、send/receive events、上一轮 send wait、
 last-rank logits/sample 和 sampled-token broadcast。非末 rank 的空输出不是失败。

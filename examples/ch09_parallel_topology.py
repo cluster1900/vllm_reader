@@ -39,6 +39,8 @@ class ParallelTopology:
     def __post_init__(self) -> None:
         if min(self.tp, self.pp, self.dp, self.pcp, self.dcp) < 1:
             raise ValueError("parallel sizes must be positive")
+        if self.pcp > 1 and self.dp > 1:
+            raise ValueError("PCP does not support data parallelism yet")
         if self.pcp == 1:
             if self.tp % self.dcp:
                 raise ValueError("TP must be divisible by DCP when PCP is disabled")

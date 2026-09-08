@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-07
+verified_at: 2026-09-08
 content_complete: true
 runtime_verified: false
-audience: "有 LLM 使用经验、代码开发基础和基础数学直觉的工程读者"
-pedagogy_reviewed_at: 2026-09-07
+audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
+pedagogy_reviewed_at: 2026-09-08
 scope: "V1 Engine 的异步调度与 batch queue、vLLM compile、piecewise/full CUDA Graph、MRV1/MRV2 dispatch、capture、replay 和 fallback"
 prerequisites:
   - 第04章
@@ -89,6 +89,15 @@ vLLM 如何把它们组合起来。
 的 placeholder 和确认边界；第三次再进入 MRV1/MRV2 dispatcher。性能图必须同时看
 冷启动、稳定态、显存和正确性，不能只比较一个平均延迟数字。
 
+**先翻译编译器名词。** 计算图是运算与数据依赖的关系图；Dynamo 从 Python 执行中
+捕获它，FX 是图的表示，Inductor 把图转成可运行代码。pass 是一次图改写；guard 是
+复用图之前的条件检查；eager 是直接执行模型运算。CUDA Graph 另外记录 GPU 工作的
+提交关系，与“用编译器改写运算”是两件事。
+
+**第一遍走法：** 读 8.1–8.2、8.6、8.9–8.10、8.11.3 和 8.20，再补 8.3–8.5 的异步
+账本；dispatcher 内部第二遍追。**停下来算：** 实际 3 token 使用 4-token graph，
+多算 1 个 padding 位置，地址仍要稳定；graph 命中不等于没有额外计算。
+
 ## 8.1 先建立正确的时间成本模型
 
 > **本节先看：** 本节要回答：**先建立正确的时间成本模型**。下面的小节会逐层拆开概念、运行过程和源码落点；第一次阅读先抓对象之间的关系，第二次再记类名、字段和分支。
@@ -98,7 +107,7 @@ vLLM 如何把它们组合起来。
 一次 decode step 可以粗略拆成：
 
 ```mermaid
-flowchart LR
+flowchart TD
     S["Scheduler\n选请求和 token"] --> U["更新持久状态"]
     U --> I["准备 input / metadata"]
     I --> H["H2D copy"]
@@ -108,16 +117,17 @@ flowchart LR
     D --> O["Scheduler update"]
 ```
 
-> **读图方法：** 这张图用于压缩“GPU utilization 低不只说明算子慢”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
+> **读图方法：** 这张图用于压缩“GPU utilization 低不只说明算子慢”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
-设这些阶段耗时分别为：
+先构造完全串行、不重叠的教学模型。以下所有 `T` 都是耗时，单位统一为毫秒，
+下标分别代表调度、准备、主机到设备拷贝、前向、采样、设备到主机拷贝和结算：
 
 ```math
 T_{step}=T_{sched}+T_{prepare}+T_{H2D}+T_{forward}+T_{sample}+T_{D2H}+T_{update}
 ```
 
-同步执行时，很多区间会串行累加。异步执行的目标不是把右侧每一项都变为零，而是在依赖
-允许时让它们重叠。
+只有阶段互不重叠时才能直接相加；实际 trace 中不能把重叠区间重复计入墙钟耗时。
+异步执行的目标不是把右侧每一项都变为零，而是在依赖允许时让它们重叠。
 
 ### 8.1.2 为什么 decode 更容易暴露 launch 开销
 
@@ -323,11 +333,16 @@ flowchart LR
 
 > **读图方法：** 阅读“同一请求为何能提前进入下一步”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
 
-确认边界为：
+用于本节缓存记账的保守边界为：
 
 ```math
 N_{confirmed}=N_{computed}-N_{placeholders}
 ```
+
+所有 `N` 都以 token 计数。这个差值是源码用于限制缓存/释放的边界，不能当作 GPU
+完成事件。例如最后一段 prefill 刚提交时，computed 已增加，GPU 可能还没算完；
+第 05 章的本地 hash 登记也可能先于 forward。需释放在途 block 时，还要看
+`num_in_flight_tokens` 和适用的 step fence，不能只减 placeholder。
 
 ### 8.3.2 schedule 后 placeholder 如何增加
 
@@ -412,8 +427,13 @@ sequenceDiagram
     S->>W: step N for request A
     S->>W: step N+1 for request A
     S->>S: A 被抢占并回滚
-    S->>W: A 重新加入后的新 step
-    W-->>S: 旧 step N+1 返回
+    alt 普通抢占，保留旧输出
+        W-->>S: 旧 step N+1 返回，按 stale 结算
+        S->>W: 旧输出排空后重新准入 A
+    else drop_stale_output=True
+        S->>W: A 可提前重新准入
+        W-->>S: 旧结果返回后丢弃
+    end
     Note over S: 该输出相对新状态已过期
 ```
 
@@ -483,7 +503,7 @@ flowchart TB
 > **读图方法：** 这张图用于压缩“异步正确性的本质”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
 **设计含义：**异步优化不是单纯把 `future.result()` 移走，而是把状态机从“只有已知进度”升级为
-“已确认进度 + 在途进度”。若没有这个双边界模型，吞吐提升会直接变成状态一致性问题。
+“可提交内容的边界 + 在途工作”。若没有这个双边界模型，吞吐提升会直接变成状态一致性问题。
 
 ## 8.5 输出异步拷贝：另一个重叠层
 
@@ -561,7 +581,7 @@ flowchart LR
 简化后的路径是：
 
 ```mermaid
-flowchart LR
+flowchart TD
     P["Python model.forward"] --> D["TorchDynamo trace"]
     D --> FX["FX graph"]
     FX --> VB["VllmBackend"]
@@ -570,7 +590,7 @@ flowchart LR
     I --> K["compiled runnable"]
 ```
 
-> **读图方法：** 这是“从 Python `forward` 到 compiled callable”的流程图。先从左向右只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
+> **读图方法：** 这是“从 Python `forward` 到 compiled callable”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
 Dynamo 捕获 Python 级运算图，FX 表示图结构，vLLM backend 决定如何切分与增加 passes，Inductor
 生成和调度具体内核。真实路径还包括 fake tensor、AOTAutograd、cache、动态 shape 和平台后端。
@@ -581,7 +601,7 @@ Dynamo 捕获 Python 级运算图，FX 表示图结构，vLLM backend 决定如�
 
 | 模式 | 含义 |
 |---|---|
-| `NONE` | 完全 eager，不应用 `torch.compile` |
+| `NONE` | 不应用 `torch.compile`；是否 replay 另由 CUDA Graph 配置决定 |
 | `STOCK_TORCH_COMPILE` | 标准 `torch.compile` pipeline |
 | `DYNAMO_TRACE_ONCE` | 单次 Dynamo trace，移除 guard，要求控制流适配动态 shape |
 | `VLLM_COMPILE` | vLLM 自定义 backend，支持 cache、piecewise、shape specialization 和 passes |
@@ -760,7 +780,8 @@ MRV1 dispatcher 会验证具体 `compile_sizes` 不会被 CUDA Graph padding 改
 ### 8.8.4 `PiecewiseBackend` 在启动期编译全部范围
 
 每个可编译 subgraph 构造 `PiecewiseBackend`，为 general ranges 和显式 compile sizes 建立
-`RangeEntry`，并在初始化时执行 `compile_all_ranges()`；运行时只按 shape 查找已编译 callable。
+`RangeEntry`，并在有 FX graph 时执行 `compile_all_ranges()`；从缓存恢复、没有 graph 时则走
+`load_all_ranges()`。运行时按 shape 查找已经准备好的 callable。
 
 [源码] `vllm/compilation/piecewise_backend.py` - `PiecewiseBackend`
 
@@ -953,7 +974,7 @@ NONE, PIECEWISE, FULL
 
 ```mermaid
 flowchart TB
-    E["Eager NONE"] --> E1["raw/compiled model call, no graph replay"]
+    E["compile NONE + CG NONE"] --> E1["原始模型调用，不编译也不 replay"]
     P["PIECEWISE"] --> P1["safe partitions replay"]
     P1 --> P2["breakpoint ops eager"]
     F["FULL"] --> F1["entire selected forward captured/replayed"]
@@ -1428,9 +1449,10 @@ flowchart TD
     A["EngineArgs / VllmConfig"] --> B["apply optimization defaults"]
     B --> C["resolve compile mode / splitting ops"]
     C --> D["load @support_torch_compile model"]
-    D --> E["first dummy call triggers compile"]
-    E --> F["initialize attention backend"]
-    F --> G["resolve graph support/mode"]
+    D --> F["模型构造时选择 attention backend"]
+    F --> KV["收集 KV specs，解析 layout，初始化 metadata 路径"]
+    KV --> E["dummy/profile 调用可触发 compile"]
+    E --> G["按 backend 能力解析 graph mode"]
     G --> H["build dispatch descriptors"]
     H --> I["warmup and capture"]
     I --> J["lock stable workspace"]
@@ -1462,7 +1484,7 @@ flowchart LR
 > **本节先看：** 这一小节先用图建立“稳定态 MRV2”的整体路径。先找输入、关键状态和输出，再阅读图后的源码解释，不必一开始记住全部节点。
 
 ```mermaid
-flowchart LR
+flowchart TD
     Batch["num reqs/tokens/query/LoRA/u-batches"] --> Disp["CudaGraphManager.dispatch"]
     Disp --> Desc["BatchExecutionDescriptor"]
     Desc --> Prep["prepare persistent inputs + attention"]
@@ -1470,7 +1492,7 @@ flowchart LR
     Branch --> Out["hidden/intermediate output"]
 ```
 
-> **读图方法：** 这是“稳定态 MRV2”的流程图。先从左向右只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
+> **读图方法：** 这是“稳定态 MRV2”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
 ### 8.16.4 与异步 batch queue 合起来看
 
@@ -1689,7 +1711,8 @@ python3 -m unittest tests.test_ch08_async_compile_graph -v
 示例包含五个互相独立的模型：
 
 1. `synchronous_timeline()` / `overlapped_timeline()`：展示两级流水的理论重叠。
-2. `AsyncRequestState`：展示乐观进度、placeholder、确认边界、preemption 和 stale output。
+2. `AsyncRequestState`：展示 decode 的计数关系、preemption 清零和 stale 输出不重复扣减；
+   不模拟完整 speculative rejection、prefill、KV 释放或 GPU 完成信号。
 3. `GraphMode` / `GraphDispatcher`：展示配置模式拆成 runtime mode、padding 和 fallback。
 4. `StaticBuffer` / `CapturedGraph`：展示数据可变但 storage 地址必须稳定。
 5. `compile_cache_key()`：展示配置与 traced source 都应参与 cache 失效。
@@ -1772,7 +1795,8 @@ cascade / encoder / force eager conditions
 
 - prefix cache/encoder release 的安全边界是多少？
 - 收到 2 个非 stale token 后是多少？
-- 抢占回滚到 96 并收到旧输出时为什么不能再减 placeholder？
+- 真实 `_preempt_request` 把 computed 和 placeholder 都清零；收到旧输出时为什么
+  不能再减 placeholder？为什么不能把“减到 96”当作保留了有效 KV？
 
 ### 练习 3：静态地址
 
@@ -1807,6 +1831,11 @@ cascade / encoder / force eager conditions
 10. **误解：`non_blocking=True` 保证异步。** 还需要 pinned memory、正确 stream 依赖和 tensor 生命周期。
 11. **误解：设计文档中的默认值永久有效。** 当前默认由 optimization level、平台、模型和功能组合解析。
 12. **误解：没有 NVIDIA GPU 也能验证 CUDA Graph 性能。** CPU 教学测试只能验证状态和选择契约。
+
+图调度教学模型也需服从这些边界：`FULL_AND_PIECEWISE` 的 decode 若禁用 FULL，
+仍能命中更宽松的 PIECEWISE key；`FULL_DECODE_ONLY` 没有这种 key 才回退 NONE。
+
+[源码] `vllm/v1/cudagraph_dispatcher.py` - `CudagraphDispatcher.dispatch`
 
 ## 8.24 本章小结
 

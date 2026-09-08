@@ -10,6 +10,17 @@ from scripts.enrich_pedagogy import (
 
 
 class PedagogyTextTests(unittest.TestCase):
+    def test_reviewed_section_lead_is_preserved(self):
+        source = "## 入口\n\n> **本节先看：** 默认走多进程。\n\n- 分支\n"
+        self.assertEqual(add_section_leads(source), source)
+
+    def test_reviewed_diagram_guide_is_preserved(self):
+        source = (
+            "## 调用\n\n```mermaid\nflowchart LR\nA --> B\n```\n\n"
+            "> **读图方法：** 箭头是 EngineCore 派发，不是 Scheduler 直接调用。\n"
+        )
+        self.assertEqual(add_diagram_guides(source), source)
+
     def test_heading_topic_removes_number_and_decorative_quotes(self):
         self.assertEqual(
             heading_topic('### 8.1.1 “GPU utilization 低”不只说明算子慢'),

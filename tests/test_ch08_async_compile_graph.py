@@ -50,10 +50,10 @@ class PlaceholderTest(unittest.TestCase):
 
     def test_stale_output_does_not_underflow_after_preemption(self):
         state = AsyncRequestState(14, 4)
-        state.preempt(10)
+        state.preempt()
         state.apply_output([101], stale=True)
         self.assertEqual(state.num_output_placeholders, 0)
-        self.assertEqual(state.confirmed_tokens, 10)
+        self.assertEqual(state.confirmed_tokens, 0)
 
 
 class ModeTest(unittest.TestCase):
@@ -121,9 +121,22 @@ class DispatchTest(unittest.TestCase):
         self.assertEqual(mode, GraphMode.PIECEWISE)
         self.assertIsNone(desc.num_reqs)
 
-    def test_disabling_full_falls_back_to_none_for_decode_only_route(self):
+    def test_disabling_full_uses_available_piecewise_graph(self):
         mode, _ = self.dispatcher.dispatch(
             2, uniform_decode=True, allow_full=False
+        )
+        self.assertEqual(mode, GraphMode.PIECEWISE)
+
+    def test_decode_only_mode_has_no_piecewise_fallback(self):
+        dispatcher = GraphDispatcher(
+            GraphMode.FULL_DECODE_ONLY, [1, 2, 4, 8], max_num_reqs=8
+        )
+        mode, _ = dispatcher.dispatch(2, uniform_decode=True, allow_full=False)
+        self.assertEqual(mode, GraphMode.NONE)
+
+    def test_disabling_both_graph_modes_falls_back_to_none(self):
+        mode, _ = self.dispatcher.dispatch(
+            2, uniform_decode=True, allow_full=False, allow_piecewise=False
         )
         self.assertEqual(mode, GraphMode.NONE)
 

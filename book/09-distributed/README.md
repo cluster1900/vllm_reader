@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-07
+verified_at: 2026-09-08
 content_complete: true
 runtime_verified: false
-audience: "有 LLM 使用经验、代码开发基础和基础数学直觉的工程读者"
-pedagogy_reviewed_at: 2026-09-07
+audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
+pedagogy_reviewed_at: 2026-09-08
 scope: "TP、PP、DP、EP、PCP、DCP 的进程拓扑、通信语义、执行器、负载均衡与多机排障"
 prerequisites:
   - 第03章
@@ -68,10 +68,18 @@ rank 还会进入同一专家通信域。
 
 rank 公式优先画坐标而不是死记乘法。把一个 worker 看成位于 DP、PP、PCP、TP 等轴上的
 一个坐标点，process group 就是在固定其他坐标后沿某一轴取出的一组点。DCP 复用 TP
-worker，因此不会像新轴一样增加进程数，这是本章尤其需要避免的误区。
+或 PCP 已有 worker，因此不会像新轴一样增加进程数，这是本章尤其需要避免的误区。
 
 第一次阅读只掌握 TP、PP、DP；第二次加入 EP、PCP、DCP；第三次再看 executor、NCCL
 和跨节点部署。任何“并行更快”的结论都必须同时核算计算量、通信量、显存和请求规模。
+
+**先把通信做成小数例子。** 两个 rank 的局部结果为 `[1,2]`、`[3,4]`：求和式
+all-reduce 让双方都得到 `[4,6]`；all-gather 得到拼接的 `[1,2,3,4]`。NCCL 是 GPU
+通信库，Gloo 常用于 CPU 通信；MoE 是用路由器选择部分专家网络参与每个 token 的模型。
+
+**第一遍走法：** 读 9.1–9.7，运行 9.18 的拓扑与矩阵例子，再读 9.16 的排障；
+EP、PCP、DCP 是进阶支线。**停下来算：** TP=2、PP=2、DP=2、PCP=1，共 8 个 Worker；
+这还没计 API 与 EngineCore 进程。只说“8 卡”不能确定一条请求经过哪些设备。
 
 ## 9.1 先问瓶颈，再选并行方式
 
@@ -203,6 +211,12 @@ W_{all\ DP}=TP\times PP\times PCP\times DP
 在 external launcher 下，`world_size` 本身已经是 `TP×PP×PCP×DP`。此时若再机械读取
 `world_size_across_dp = world_size×DP`，会把 DP 重复计算，不能把该 property 无条件当作
 真实进程总数。读代码时必须同时确认启动方式和字段的消费位置。
+
+所有并行度是无单位正整数，`W` 是 worker 数，不包含 API、EngineCore 等辅助进程。
+能写出乘法不代表组合可运行：当前 `ParallelConfig` 明确拒绝 `PCP>1` 与 `DP>1`
+同时开启，MRV2 PCP 还不支持 `PP>1`。先检查合法性，再算部署规模。
+
+[源码] `vllm/config/parallel.py` - `ParallelConfig` 的 PCP/DP 与 DCP 校验、`__post_init__`
 
 ### 9.3.2 rank 的逻辑布局是一个多维张量
 
@@ -373,7 +387,9 @@ A=[A_0,A_1,\ldots,A_{p-1}]
 Y_i=XA_i+b_i
 ```
 
-本地结果已经是最终输出的一列。如果下一个算子也接受分片输出，可以继续保持分片；若
+先用 shape 建立坐标：`X:[T,Din]`、`A:[Din,Dout]`、`b:[Dout]`，
+`T` 为本轮 token 数，`Din/Dout` 为输入/输出宽度，`p` 为 TP rank 数。Column
+切分后 `A_i:[Din,Dout/p]`、`Y_i:[T,Dout/p]`。本地结果是最终输出的一组列。如果下一个算子也接受分片输出，可以继续保持分片；若
 调用者要求完整 hidden states，则执行 all-gather：
 
 ```math
@@ -415,8 +431,15 @@ P_i=X_iA_i
 Y=\sum_i P_i+b
 ```
 
-所以需要 all-reduce。为避免 bias 被重复累加，当前实现只在 TP rank 0 的 partial output
-上加入 bias，再一起规约。
+这里 `X_i:[T,Din/p]`、`A_i:[Din/p,Dout]`，所以每个 `P_i` 都是 `[T,Dout]`，
+但只累加了部分输入维度，必须求和。例如 `X=[1,2]`、`A=[[3],[4]]`，两个 rank 分别
+算出 3 和 8，完整结果是 11；concat 得到 `[3,8]` 就错了。
+
+默认 `reduce_results=True` 且 `TP>1` 时执行 all-reduce；关闭规约则返回 partial
+output，让上层继续处理。直接加 bias 的路径只在 TP rank 0 加一次；若
+`skip_bias_add=True`，bias 单独返回，交给调用者融合，不能无条件说它在规约前相加。
+
+[源码] `vllm/model_executor/layers/linear.py` - `RowParallelLinear.forward`
 
 ```mermaid
 flowchart LR
@@ -521,7 +544,7 @@ flowchart TB
 
 ### 9.6.4 Worker 如何传 intermediate tensors
 
-`GPUWorker.execute_model` 在非 first PP rank 上先调用 `irecv_tensor_dict`，在本地执行完成后，
+`Worker.execute_model` 在非 first PP rank 上先调用 `irecv_tensor_dict`，在本地执行完成后，
 非 last rank 调用 `isend_tensor_dict`。元数据经 CPU group 传递，GPU tensor 经 device group
 传递。
 
@@ -540,8 +563,15 @@ sequenceDiagram
 
 > **读图方法：** 这是“Worker 如何传 intermediate tensors”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
-若 tensor 在 TP ranks 上只是 slice，通信实现可以先做 TP all-gather，再由对应 PP peer
-发送，从而保证下游拿到协议要求的完整 tensor。
+对在发送侧 TP ranks 上重复的完整 tensor，启用该优化后，各 rank **先切片并发送
+自己的片段**；下一个 PP stage 的对应 peer 收到片段，等待接收完成后，再在接收侧
+TP group 内 all-gather 恢复完整 tensor。已经分片的 tensor（例如特定 SP residual）
+需要关闭该 gather 优化，不能重复切分。
+
+[源码] `vllm/distributed/parallel_state.py` - `GroupCoordinator.isend_tensor_dict`、
+`irecv_tensor_dict`、`_should_use_all_gather`
+
+[源码] `vllm/v1/worker/gpu_worker.py` - `Worker.execute_model`
 
 ### 9.6.5 异步 send 的 buffer 生命周期
 
@@ -831,6 +861,7 @@ Decode tokens 不按相同方式分片，而是复制到 PCP ranks；执行结�
 - 仅支持 MLA 路径；
 - 不与 PP 同时使用；
 - 不支持 encoder-decoder、multimodal、LoRA、speculative decode；
+- 通用并行配置还拒绝 `PCP>1` 与 `DP>1` 组合；
 - sparse MLA 不支持 CUDA Graph；
 - 普通 PCP 只允许 piecewise graph，不允许 full graph。
 
@@ -861,8 +892,12 @@ flowchart TB
 
 ### 9.9.5 partial attention 为什么不能求平均
 
-每个 DCP rank 只看一部分 keys/values。设其局部 softmax 归一化对数为 `L_i`、局部输出为
-`O_i`。全局归一化量是：
+先算一个例子：两个 shard 的未归一化概率总量分别为 1 和 3，局部输出分别为 10 和
+20。全局应为 `1/4*10 + 3/4*20 = 17.5`，不是平均值 15。下面的对数公式只是
+用不容易溢出的方式保存这两个总量。
+
+每个 DCP rank 只看一部分 keys/values。对同一个 Query/head，设其局部 softmax
+分母的自然对数为标量 `L_i`，局部输出为长度 `[D_v]` 的向量 `O_i`。全局归一化量是：
 
 ```math
 L=\log\sum_i e^{L_i}
@@ -875,15 +910,22 @@ O=\sum_i e^{L_i-L}O_i
 ```
 
 直接计算 `(O_0+O_1)/2` 隐含假设两个 shard 的 softmax denominator 相同，通常不成立。
-因此 DCP attention backend 必须返回 LSE；没有 LSE，就无法从局部归一化结果精确恢复全局
-attention。
+当前 DCP 接口用 LSE 保存归一化信息；仅有局部归一化输出而没有 LSE 或等价的
+分母信息，无法精确合并。所有指数权重无单位，求和后为 1；输出仍是 `[D_v]`。
+空 shard 必须贡献零权重，不能让无效 LSE 导致 NaN。
 
 ### 9.9.6 DCP 的两类通信路径
 
 当前代码包含 AG+RS/AR 与 A2A 等路径：
 
-- AG+RS：收集 query 或必要元数据，本地 attention 后 reduce-scatter/all-reduce 合并；
-- A2A：按目标 rank 交换数据，再执行本地 attention 与逆向交换。
+- AG+RS/AR：本地 attention 之后，all-gather 各 rank 的 LSE，修正局部输出权重，
+  再 reduce-scatter 或 all-reduce 求和。Query 的 gather 属于更前面的准备阶段。
+- A2A：`dcp_a2a_lse_reduce` 的输入已经是局部 attention 输出及 LSE；把二者打包，
+  做一次 all-to-all，随后解包并按 LSE 加权合并，输出按 head 分给目标 rank。
+  不能把它画成“先 A2A、再 attention、再逆向 A2A”。
+
+[源码] `vllm/v1/attention/ops/dcp.py` - `cp_lse_ag_out_rs`、`cp_lse_ag_out_ar`、
+`dcp_a2a_lse_reduce`
 
 哪条路径更快取决于 token shape、互联与 kernel 支持，不能只根据理论字节数下结论。
 
@@ -938,7 +980,7 @@ flowchart LR
     MQ --> W1[WorkerProc 1]
     W0 <--> |NCCL/device group| W1
     W0 -->|result| OUT[Output queue]
-    W1 -->|ack/status| OUT
+    W1 -. 仅被选中或需聚合时回复 .-> OUT
     OUT --> EC
 ```
 
@@ -989,7 +1031,8 @@ flowchart TB
         G11[GPU1]
         G10 <-->|high-frequency TP| G11
     end
-    G01 -->|PP activation| G10
+    G00 -->|PP peer: TP rank 0| G10
+    G01 -->|PP peer: TP rank 1| G11
 ```
 
 > **读图方法：** 这张图用于压缩“单机优先把高频通信留在高速互联内”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
@@ -1111,7 +1154,12 @@ sequenceDiagram
     P0->>P0: TP local matmul and collectives
     P0-->>P1: IntermediateTensors
     P1->>P1: TP local matmul and collectives
-    P1-->>EX: sampled output rank result
+    P1-->>EX: forward 结束，等待 sampling
+    EX-->>EC: execute 阶段结果
+    EC->>EX: sample_tokens(grammar)
+    EX->>P0: sampling RPC，接收 token 广播
+    EX->>P1: sampling RPC，末 stage 采样
+    P1-->>EX: output rank result
     EX-->>EC: ModelRunnerOutput
 ```
 
@@ -1128,8 +1176,9 @@ sequenceDiagram
     participant E1 as EngineCore DP1
     participant W0 as EP ranks from DP0
     participant W1 as EP ranks from DP1
-    C->>E0: coordinated step
-    C->>E1: coordinated or dummy step
+    C-->>E0: START_DP_WAVE（需要启动 wave 时）
+    C-->>E1: START_DP_WAVE（唤醒空闲 engine）
+    Note over E0,E1: 各自 busy loop 推进；不逐 step 等 coordinator 发令
     E0->>W0: execute batch
     E1->>W1: execute batch/dummy
     W0->>W1: route and all-to-all
@@ -1152,7 +1201,8 @@ sequenceDiagram
 T_{comm}\approx n_{phase}\alpha+\frac{bytes}{bandwidth}
 ```
 
-`alpha` 是每阶段固定延迟。小 tensor 高频 collective 常被 `alpha` 主导，大 tensor 则更受
+`n_phase` 是通信阶段数，`alpha` 是每阶段固定延迟（秒），`bytes` 是实际传输字节量，
+`bandwidth` 必须用 byte/s，结果才是秒。若资料给的是 bit/s，要先除以 8。小 tensor 高频 collective 常被 `alpha` 主导，大 tensor 则更受
 带宽影响。该模型不能替代 NCCL profile，但能帮助判断：合并通信、降低频次和减少字节中
 哪一种更可能有效。
 
@@ -1398,7 +1448,8 @@ group。
 - 每 stage layer 区间；
 - intermediate tensor keys、shape、dtype；
 - send/recv 时间线；
-- pipeline batch queue 深度从 1 增大时的吞吐、显存与延迟。
+- 实际 batch queue 深度、在途 batch 数、吞吐、显存与延迟。容量由 PP、Runner 和
+  async 配置推导，不是可独立从 1 调起的公开参数；若做自定义调度实验需另记修改。
 
 ### 实验 D：DP 负载均衡
 
@@ -1425,9 +1476,12 @@ group。
 
 ## 9.20 练习题
 
+第一遍先完成前 5 题；余下题目是第二遍源码阅读的扩展题库，不要求一次做完。
+
 > **本节先看：** 下面先给出“练习题”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
 
-1. `TP=4, PP=2, PCP=2, DP=3` 时，每个 DP engine 与跨 DP 的 worker 数分别是多少？
+1. `TP=4, PP=2, PCP=2, DP=3` 的形式乘积分别是多少？为什么当前版本会在启动前
+   拒绝它？将 PCP 改为 1 后再计算可部署的 worker 数。
 2. 为什么 `DCP=2` 不一定需要比 `DCP=1` 多两倍进程？
 3. 对 `TP=2, PP=2, DP=2` 手工推导 rank 5 的坐标和三个 process groups。
 4. 证明 Row Parallel Linear 的 partial outputs 必须求和，不能 concat。

@@ -1,5 +1,9 @@
 # 第10章性能实验与优化报告
 
+2026-09-08 全书复核补记：本地 CPU 重跑的版本、环境、命令与结果统一记录在
+[全书检查报告](../meta/full-book-review-2026-09-08.md)。下文历史输出保留原日期；GPU
+实验表格是待执行模板，空白不代表零值或测试通过。
+
 > 这是可复现实验记录，不是结论先行的调参日志。每个 treatment 只改变已声明的因素，
 > 所有结果同时经过性能与正确性门槛。
 
@@ -62,7 +66,7 @@
 | CUDA Graph capture 状态 | |
 | 是否包含 detokenize | |
 | TTFT 起止点 | HTTP send -> first valid streamed chunk |
-| E2EL 起止点 | HTTP send -> last valid streamed chunk |
+| E2EL 起止点 | HTTP send -> endpoint-specific final measured event（记录是否含 usage-only） |
 | client queue 是否单列 | |
 | profiler 是否开启 | |
 
@@ -84,7 +88,7 @@
 |---:|---|---|---:|---:|---:|---:|---:|---:|---:|
 | | | | | | | | | | |
 
-请求时间拆分：
+请求时间拆分（必须按同一请求对齐再求差，不能用 E2EL p99 减各阶段 p99 得到网络耗时）：
 
 | request class | client queue p99 | server queue p99 | prefill p99 | decode p99 | network/front-end residual |
 |---|---:|---:|---:|---:|---:|

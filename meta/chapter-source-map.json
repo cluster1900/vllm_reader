@@ -56,7 +56,7 @@
     ],
     "05-kv-cache": [
       {"path": "vllm/v1/kv_cache_interface.py", "symbols": ["class KVCacheSpec", "class AttentionSpec", "class FullAttentionSpec", "class MLAAttentionSpec", "class SlidingWindowSpec", "class MambaSpec", "class KVCacheTensor", "class KVCacheGroupSpec", "class KVCacheConfig"]},
-      {"path": "vllm/v1/worker/gpu_worker.py", "symbols": ["def determine_available_memory", "def initialize_from_config"]},
+      {"path": "vllm/v1/worker/gpu_worker.py", "symbols": ["class Worker", "def determine_available_memory", "def initialize_from_config"]},
       {"path": "vllm/v1/core/kv_cache_utils.py", "symbols": ["class KVCacheBlock", "class FreeKVCacheBlockQueue", "def get_request_block_hasher", "def check_enough_kv_cache_memory", "def get_kv_cache_config_from_groups", "def get_kv_cache_groups", "def get_kv_cache_configs"]},
       {"path": "vllm/v1/core/kv_cache_manager.py", "symbols": ["class KVCacheBlocks", "class KVCacheManager", "def get_computed_blocks", "def allocate_slots", "def free", "def cache_blocks"]},
       {"path": "vllm/v1/core/kv_cache_coordinator.py", "symbols": ["class KVCacheCoordinator", "class UnitaryKVCacheCoordinator", "class HybridKVCacheCoordinator", "def find_longest_cache_hit"]},

@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-07
+verified_at: 2026-09-08
 content_complete: true
 runtime_verified: false
-audience: "有 LLM 使用经验、代码开发基础和基础数学直觉的工程读者"
-pedagogy_reviewed_at: 2026-09-07
+audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
+pedagogy_reviewed_at: 2026-09-08
 scope: "decoder-only 文本生成的最小知识闭环；不讲训练与反向传播"
 prerequisites:
   - Python 基础
@@ -74,7 +74,7 @@ prerequisites:
 | Attention | 让当前位置按相关程度聚合历史位置 Value 的计算。 |
 | Causal mask | 禁止一个位置读取未来 token 的约束。 |
 | RoPE | 通过旋转 Query/Key 向量注入位置信息的方法。 |
-| Prefill | 一次处理 prompt，建立初始 KV Cache。 |
+| Prefill | 处理尚未计算的 prompt token，建立 KV Cache；可拆成多个 chunk。 |
 | Decode | 利用已有 KV Cache 继续生成 token。 |
 | KV Cache | 保存各层历史 token 的 Key 和 Value。 |
 | Sampling | 对 logits 做规则处理并选出下一个 token。 |
@@ -85,7 +85,7 @@ prerequisites:
 logits；sampling 决定选择哪个 token；自回归循环把新 token 再送回模型。
 
 ```mermaid
-flowchart LR
+flowchart TD
     Text[输入文本] --> Tokenizer[Tokenizer]
     Tokenizer --> IDs[token IDs]
     IDs --> Model[Decoder-only Transformer]
@@ -98,7 +98,7 @@ flowchart LR
     Next -. 追加到上下文 .-> IDs
 ```
 
-> **读图方法：** 阅读“全局位置”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
+> **读图方法：** 阅读“全局位置”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
 这张图有两个重要边界：
 
@@ -111,7 +111,7 @@ flowchart LR
 本章按“对象 -> 单层计算 -> 时间维度 -> 系统实现”的顺序推进：
 
 ```mermaid
-flowchart LR
+flowchart TD
     A[Token 和 logits] --> B[Decoder layer]
     B --> C[QKV 与 causal attention]
     C --> D[RoPE 和位置]
@@ -121,7 +121,7 @@ flowchart LR
     G --> H[vLLM 源码映射]
 ```
 
-> **读图方法：** 这张图用于压缩“本章阅读路线”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
+> **读图方法：** 这张图用于压缩“本章阅读路线”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
 第一次阅读时，先抓住每节开头的图和结论；第二次再手算数值例子并运行代码；第三次
 进入第 1.9 节，逐跳对照 vLLM 源码。不要一开始就在 CUDA kernel 中寻找完整的
@@ -142,6 +142,15 @@ temperature 和上下文长度这些产品概念，但不要求你学过深度�
 attention 是按相关性翻阅历史笔记，KV Cache 是保存已经整理好的历史笔记，sampler
 则根据模型给出的候选分数做最后选择。类比只帮助入门，进入源码时仍以张量、位置和
 缓存所有权为准。
+
+**先补两个读图工具。** Tensor（张量）可以先当作多维数组，shape 是各维的长度；
+`[3,4]` 就是 3 行、每行 4 个数。forward 是一次从输入算到输出的前向计算，不包含训练。
+prompt 是用户交给模型的已有文本；上下文是预测时允许参考的 token 序列。
+
+**第一遍走法：** 先读 1.1、1.3 的手算例子、1.5–1.8，再读 1.2 和 1.4 补齐模型结构，
+最后进入 1.9 的源码；TP/PP 和两代 Runner 先只认职责，留到第 07、09 章。
+**停下来算：** prompt 有 4 个 token，刚采样出第一个输出时，缓存有几个位置？
+答案是 4：新 token 的 KV 要等下一次 forward 才生成。
 
 ## 1.1 语言模型到底输出什么
 
@@ -194,7 +203,9 @@ logits:       [vocab_size]
 p_i = \frac{e^{z_i}}{\sum_j e^{z_j}}
 ```
 
-其中 `z_i` 是第 `i` 个 token 的 logit。实际高性能 sampler 不一定显式构造完整
+这里的 `z` 是形状 `[V]` 的分数向量，`V` 是词表大小；`z_i` 是候选 `i` 的分数，
+`e` 是自然指数的底数，分母把所有候选的指数分数相加。`p_i` 是无单位概率，所有
+`p_i` 相加为 1。例如两个候选分数相同，就各分到 1/2 的概率。实际高性能 sampler 不一定显式构造完整
 softmax；数学上的概率定义与实现是否物化整张概率表是两回事。
 
 ## 1.2 Decoder-only Transformer 的最小结构
@@ -248,7 +259,11 @@ vLLM 的 RMSNorm 接口能够把 residual 融合进调用，因此源码中的�
 MLP(x) = W_{down}(SiLU(W_{gate}x) \odot W_{up}x)
 ```
 
-`⊙` 表示逐元素相乘。源码中 `gate_proj` 与 `up_proj` 被合并为
+`x` 是一个 token 的列向量，shape 为 `[D]`；`D` 是 hidden size。设 MLP 中间宽度为
+`I`，则 `W_gate`、`W_up` 的 shape 为 `[I,D]`，`W_down` 为 `[D,I]`。两个投影先把
+`[D]` 变成 `[I]`，`⊙` 把对应位置相乘，最后投影回 `[D]`，便于与输入相加。
+SiLU 是平滑的非线性函数 `u/(1+exp(-u))`，可理解为按输入大小调节通过量的门。
+本式用列向量；下一节为了展示多 token batch，改用每行一个 token 的矩阵表示。源码中 `gate_proj` 与 `up_proj` 被合并为
 `MergedColumnParallelLinear`，这是执行优化和 Tensor Parallel 布局，不改变上述
 数学角色。
 
@@ -310,7 +325,11 @@ Q = XW_Q, \quad K = XW_K, \quad V = XW_V
 Attention(Q,K,V) = softmax(\frac{QK^T}{\sqrt{D_h}} + M)V
 ```
 
-`D_h` 是 head size，`M` 是 causal mask。除以 `sqrt(D_h)` 是为了避免点积随维度增大
+先取单 head、无 batch 的例子：若本轮有 `Nq` 个 Query、可读取 `Nk` 个历史及当前
+位置，则 `Q:[Nq,D_h]`、`K:[Nk,D_h]`、`V:[Nk,D_v]`。上标 `T` 表示转置，
+所以 `QK^T` 是 `[Nq,Nk]` 的相关性表；softmax 对每一行归一化，乘 `V` 后得到
+`[Nq,D_v]`。`D_h`、`D_v` 分别是每个 Key/Query 和 Value 向量的长度。`M` 与分数表
+同形状，允许位置填 0，屏蔽位置填负无穷；这些分数和权重没有时间或字节单位。除以 `sqrt(D_h)` 是为了避免点积随维度增大
 而过度放大，导致 softmax 过于尖锐。
 
 ### 一个可以手算的 Attention
@@ -447,7 +466,9 @@ Value 上。
 token = argmax(logits)
 ```
 
-它确定、易复现，但容易陷入重复或缺少多样性。随机采样则按处理后的概率分布选择。
+给定完全相同的 logits 和并列值处理规则，它总会选择同一项；但不同硬件或 batch
+引起的浮点误差仍可能改变非常接近的分数，所以 `temperature=0` 不是跨环境逐字复现
+的保证。随机采样则按处理后的概率分布选择。
 
 ### Temperature
 
@@ -457,7 +478,10 @@ Temperature 在 softmax 前缩放 logits：
 p_i(T) = softmax(z_i / T)
 ```
 
-- `T < 1`：差距被放大，分布更尖锐。
+这里的 `T` 是无单位温度参数，与前面表示 token 数的 `T` 含义不同；本公式只适用于
+`T > 0`，输入和输出都是长度为词表大小的向量。
+
+- `0 < T < 1`：差距被放大，分布更尖锐。
 - `T > 1`：差距被压平，选择更多样。
 - 在 vLLM `SamplingParams` 中，`temperature=0` 表示 greedy。
 
@@ -519,25 +543,32 @@ Top-k 与 top-p 最终都通过 mask 排除候选，并对保留项重新归一�
 因此同一模型、同一上下文可以因请求参数不同而输出不同 token。
 
 ```mermaid
-flowchart LR
+flowchart TD
     Raw[raw logits] --> Rules[allowed IDs, bad words, bias]
     Rules --> Penalty[repetition, frequency, presence penalties]
-    Penalty --> Temp[temperature]
+    Penalty --> Mode{greedy 或随机采样}
+    Mode -->|greedy| Greedy[argmax，不除以温度]
+    Greedy --> Token
+    Mode -->|随机采样| Temp[temperature 大于 0]
     Temp --> MinP[min-p if enabled]
     MinP --> TopK[top-k]
     TopK --> TopP[top-p]
-    TopP --> Choose[greedy or random choice]
+    TopP --> Choose[random choice]
     Choose --> Token[next token ID]
 ```
 
-> **读图方法：** 这是“Penalty、Bias 与约束”的流程图。先从左向右只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
+> **读图方法：** 这是“Penalty、Bias 与约束”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
-这张图是当前 V1 sampling 主路径的教学归纳，不应推广成所有版本和所有自定义 logits
-processor 的永恒顺序。固定 revision 下：
+这张图只展示 MRV1 的基础采样依赖，省略 logprobs 和批内混合 greedy/random 请求的
+合并操作。greedy 在影响 argmax 的约束和 penalty 之后取最大值，绕过温度缩放与随机
+过滤；不要把图当作 MRV2 的逐函数顺序。固定 revision 下：
 
-- MRV1 `vllm/v1/sample/sampler.py::Sampler` 的类注释直接列出了处理顺序。
+- MRV1 `vllm/v1/sample/sampler.py::Sampler.forward`、`sample` 和
+  `apply_logits_processors` 实际执行上述分支，类注释可辅助阅读。
 - MRV2 把 sampling state、penalty、bad words、logprob 等拆到
-  `vllm/v1/worker/gpu/sample/`，并大量使用 Triton-oriented 实现。
+  `vllm/v1/worker/gpu/sample/`，并大量使用 Triton 实现。其 `Sampler.apply_sampling_params`
+  实际按 bias → penalties → bad words → thinking budget → temperature → min-p 处理，
+  随后在采样路径应用 top-k/top-p；不能把 MRV1 的顺序原样套过去。
 - MRV2 可以使用 Gumbel sampling 等方法避免简单地“先物化完整 softmax 再抽样”。
 
 因此源码阅读时要区分三层：参数语义、数学等价形式、实际 kernel 实现。
@@ -552,7 +583,8 @@ processor 的永恒顺序。固定 revision 下：
 
 ### Prefill
 
-Prefill 一次提交 prompt token。每个位置通过 causal mask 读取自己和之前的位置，生成
+Prefill 处理尚未计算的 prompt token。先看不分块、无前缀命中的简化情况：一次提交
+全部 prompt token。每个位置通过 causal mask 读取自己和之前的位置，生成
 所有层的初始 K/V。通常只需要最后一个有效位置的 logits 来选择首个输出 token；若
 请求 prompt logprobs，则还可能保留其他位置的 logits 结果。
 
@@ -589,9 +621,14 @@ sequenceDiagram
 |---|---|---|
 | 本轮新 token 数 | 通常较多 | 普通生成通常每请求 1 个 |
 | 历史 KV | 起始时没有或部分命中 | 通常已有完整历史 |
-| 主要并行维度 | prompt token、layer、head | 请求数、head、历史长度 |
+| 主要并行维度 | 本层内的 prompt token、head、矩阵元素 | 请求数、head、历史长度 |
 | 常见瓶颈直觉 | 大矩阵计算更突出 | 内存读取和 launch overhead 更突出 |
 | 输出 | 建立 KV，产生首个采样位置 | 追加 KV，产生后续采样位置 |
+
+同一请求的 decoder layers 依赖上一层输出，不能同时独立计算。第 09 章的流水线并行
+是让不同批次占据不同层段，不会消除这个依赖。
+
+[源码] `vllm/model_executor/models/llama.py` - `LlamaModel.forward` 的逐层循环
 
 ### 用三个请求理解扁平 Token Batch
 
@@ -669,10 +706,12 @@ multi-token prediction 等机制可以让一个请求在 step 中处理多个 to
 ```mermaid
 flowchart TB
     subgraph NoCache[没有 KV Cache]
+      direction TB
       N1[step 1: recompute t0..t3] --> N2[step 2: recompute t0..t4]
       N2 --> N3[step 3: recompute t0..t5]
     end
     subgraph WithCache[使用 KV Cache]
+      direction TB
       C1[prefill: compute t0..t3 once] --> C2[decode: compute only t4]
       C2 --> C3[decode: compute only t5]
       K[(cached K/V t0..history)] -. read .-> C2
@@ -836,6 +875,8 @@ next_logits = model.decode_one(next_token_id, cache)
 最重要的等价性断言是：
 
 ```python
+token_ids = prompt_ids + [next_token_id]
+_, cache = model.prefill(prompt_ids)
 recomputed = model.forward_full(token_ids)[-1]
 cached = model.decode_one(next_token_id, cache)
 assert max_abs_diff(cached, recomputed) < 1e-12
@@ -940,10 +981,10 @@ attention output: [1.2309, 0.9047]
 | 教学概念 | 当前源码入口 | 作用 |
 |---|---|---|
 | Llama 模型主体 | `vllm/model_executor/models/llama.py::LlamaModel` | embedding、decoder layers、final norm |
-| 单层 decoder | `llama.py::LlamaDecoderLayer` | attention/MLP/residual/RMSNorm |
-| QKV 与 RoPE | `llama.py::LlamaAttention` | QKV projection、split、RoPE、attention |
+| 单层 decoder | `vllm/model_executor/models/llama.py::LlamaDecoderLayer` | attention/MLP/residual/RMSNorm |
+| QKV 与 RoPE | `vllm/model_executor/models/llama.py::LlamaAttention` | QKV projection、split、RoPE、attention |
 | 通用 attention 层 | `vllm/model_executor/layers/attention/attention.py::Attention` | KV 写入、backend attention、输出 |
-| LM head/logits | `llama.py::LlamaForCausalLM.compute_logits` | hidden states 投影到 vocabulary |
+| LM head/logits | `vllm/model_executor/models/llama.py::LlamaForCausalLM.compute_logits` | hidden states 投影到 vocabulary |
 | Logits processor | `vllm/model_executor/layers/logits_processor.py::LogitsProcessor` | 并行 LM head 与 logits 处理 |
 | 用户采样参数 | `vllm/sampling_params.py::SamplingParams` | temperature、top-k、top-p、penalties 等 |
 | MRV1 sampling | `vllm/v1/sample/sampler.py::Sampler` | MRV1 logits processing 与采样 |
@@ -980,15 +1021,15 @@ flowchart TD
 
 以下行号只适用于本章固定 commit，长期定位应优先使用完整路径和符号名：
 
-1. `LlamaAttention.forward` 在 `llama.py:224` 附近执行 QKV projection，随后 split、
+1. `LlamaAttention.forward` 在 `vllm/model_executor/models/llama.py:224` 附近执行 QKV projection，随后 split、
    RoPE，再调用 `self.attn(q,k,v)`。
-2. `LlamaDecoderLayer.forward` 在 `llama.py:313` 附近体现两次 RMSNorm、attention、
+2. `LlamaDecoderLayer.forward` 在 `vllm/model_executor/models/llama.py:313` 附近体现两次 RMSNorm、attention、
    MLP 与 residual 数据流。
-3. `LlamaModel.forward` 在 `llama.py:406` 附近遍历当前 PP rank 所拥有的 layers，
+3. `LlamaModel.forward` 在 `vllm/model_executor/models/llama.py:406` 附近遍历当前 PP rank 所拥有的 layers，
    最后一个 PP rank 执行 final norm。
 4. `LlamaForCausalLM.forward` 只返回模型 hidden states；`compute_logits` 在
-   `llama.py:546` 附近单独调用 `LogitsProcessor`。模型 forward 不等于 sampling。
-5. 通用 `Attention` 类在 `attention.py:223` 附近声明自己的职责包括写 KV Cache、
+   `vllm/model_executor/models/llama.py:546` 附近单独调用 `LogitsProcessor`。模型 forward 不等于 sampling。
+5. 通用 `Attention` 类在 `vllm/model_executor/layers/attention/attention.py:223` 附近声明自己的职责包括写 KV Cache、
    执行 attention 和返回输出；具体 backend 由配置和能力选择。
 6. `Attention.forward` 接收扁平 token tensor，并 reshape 为
    `[num_tokens,num_heads,head_size]` 后进入实现层。
@@ -1130,7 +1171,7 @@ sampling。这是模型数学与分布式所有权结合的一个具体例子。
 
 | 结论 | 生产源码 | 相关上游测试 |
 |---|---|---|
-| RoPE 修改 Query/Key | `llama.py::LlamaAttention.forward`、`rotary_embedding/` | `tests/kernels/core/test_rotary_embedding.py` |
+| RoPE 修改 Query/Key | `vllm/model_executor/models/llama.py::LlamaAttention.forward`、`rotary_embedding/` | `tests/kernels/core/test_rotary_embedding.py` |
 | SamplingParams 校验 greedy、top-k/top-p | `vllm/sampling_params.py` | `tests/test_sampling_params.py`、`tests/benchmarks/test_sampling_params.py` |
 | MRV1 penalty 行为 | `vllm/v1/sample/sampler.py` | `tests/v1/sample/test_sampler.py` |
 | top-k/top-p 参考实现与 kernel 等价 | `vllm/v1/sample/ops/topk_topp_sampler.py` | `tests/v1/sample/test_topk_topp_sampler.py` |

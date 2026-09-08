@@ -33,7 +33,11 @@ def percentile(values: Sequence[float], q: float) -> float:
 
 @dataclass(frozen=True)
 class RequestTrace:
-    """Client-observed timestamps for one streaming generation request."""
+    """Client event timestamps; default teaching case is one token per event.
+
+    Real SSE traces must supply completion_tokens from usage/tokenization and
+    last_response_time when the endpoint includes a later usage-only event.
+    """
 
     arrival_time: float
     send_time: float
@@ -41,10 +45,14 @@ class RequestTrace:
     prompt_tokens: int
     success: bool = True
     error: str = ""
+    completion_tokens: int | None = None
+    last_response_time: float | None = None
 
     def __post_init__(self) -> None:
         if self.prompt_tokens < 0:
             raise ValueError("prompt_tokens must be non-negative")
+        if self.completion_tokens is not None and self.completion_tokens < 0:
+            raise ValueError("completion_tokens must be non-negative")
         if self.send_time < self.arrival_time:
             raise ValueError("send_time cannot precede client arrival")
         if any(
@@ -56,10 +64,20 @@ class RequestTrace:
             raise ValueError("a token cannot arrive before the request is sent")
         if self.success and not self.token_times:
             raise ValueError("a successful streaming request needs a token")
+        if self.last_response_time is not None and self.last_response_time < (
+            self.token_times[-1] if self.token_times else self.send_time
+        ):
+            raise ValueError("last_response_time cannot precede a measured event")
 
     @property
     def output_tokens(self) -> int:
-        return len(self.token_times) if self.success else 0
+        if not self.success:
+            return 0
+        return (
+            self.completion_tokens
+            if self.completion_tokens is not None
+            else len(self.token_times)
+        )
 
     @property
     def client_queue_time(self) -> float:
@@ -84,7 +102,12 @@ class RequestTrace:
     def e2el(self) -> float:
         if not self.success or not self.token_times:
             return 0.0
-        return self.token_times[-1] - self.send_time
+        end = (
+            self.last_response_time
+            if self.last_response_time is not None
+            else self.token_times[-1]
+        )
+        return end - self.send_time
 
     @property
     def tpot(self) -> float:

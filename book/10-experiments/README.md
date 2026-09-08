@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-07
+verified_at: 2026-09-08
 content_complete: true
 runtime_verified: false
-audience: "有 LLM 使用经验、代码开发基础和基础数学直觉的工程读者"
-pedagogy_reviewed_at: 2026-09-07
+audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
+pedagogy_reviewed_at: 2026-09-08
 scope: "端到端 benchmark、指标语义、profiling、参数实验、归因和回归验证"
 prerequisites:
   - 第04章
@@ -37,7 +37,7 @@ prerequisites:
 从用户指标到内部机制的证据链：
 
 ```mermaid
-flowchart LR
+flowchart TD
     W[Workload and SLO] --> B[Reproducible baseline]
     B --> O[Metrics and traces]
     O --> H[Testable hypothesis]
@@ -47,7 +47,7 @@ flowchart LR
     G --> D[Decision and limits]
 ```
 
-> **读图方法：** 阅读“本章定位”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
+> **读图方法：** 阅读“本章定位”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
 ## 阅读目标
 
@@ -77,6 +77,14 @@ flowchart LR
 第一次阅读建立指标词典和五层 benchmark；第二次学习 profiler 与诊断树；第三次设计
 完整实验矩阵。任何结果至少同时报告正确性、延迟分布、吞吐、资源使用和实验环境，单个
 峰值数字不能支持生产结论。
+
+**先认识统计词。** SLO 是预先规定的服务目标；p99 是把样本排序后约 99% 不超过
+的值，受样本量和插值方法影响，不是最大值。CV 是标准差除以均值，用于观察相对波动；
+benchmark 测性能，profiler 解释耗时所在。先保留原始样本，再计算汇总值。
+
+**第一遍走法：** 读 10.1–10.4、10.7、10.10、10.18，运行 10.23，再做综合案例；
+多种 profiler 与扫参工具可第二遍选读。**停下来算：** 发送后 0.3 秒收到首 token，
+共 5 token，末 token 在 0.5 秒，TPOT=`(0.5-0.3)/4=0.05` 秒；客户端发前排队另计。
 
 ## 10.1 先定义“谁觉得快”
 
@@ -130,14 +138,16 @@ sequenceDiagram
     Note over S: optional client-side wait
     S->>A: HTTP request sent at t_send
     A->>G: queue, prefill, first sampling
-    G-->>L: first streamed chunk at t_first
-    G-->>L: later chunk at t_2
-    G-->>L: final chunk at t_last
+    G-->>A: sampled token 结果
+    A-->>L: first streamed chunk at t_first
+    A-->>L: later chunk at t_2
+    A-->>L: final measured event at t_last
 ```
 
 > **读图方法：** 这是“客户端看到的时间线”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
-由此定义：
+先采用每个内容事件对应一个 token 的教学模型。所有 `t` 来自同一客户端时钟，
+以下时间差统一用秒；`N` 是输出 token 数，不是响应消息条数。由此定义：
 
 ```math
 client\_queue=t_{send}-t_{arrival}
@@ -185,6 +195,14 @@ token 数，缺失时可能重新 tokenize 文本；ITL 列表则来自流式事
 - usage 是否返回真实 token 数；
 - tokenizer 是否与服务端一致。
 
+**当前适配器还有细微差异。** `async_request_openai_completions` 在含 choices 的
+消息上更新时间戳；chat 适配器 `async_request_openai_chat_completions` 连 usage-only
+消息也会更新末时间戳，而且含 choices 的空 content/role 消息可能触发首事件计时。
+因此 `t_last` 应解释为该适配器计入的末事件，不能无条件称为最后一个文本 token。
+
+[源码] `vllm/benchmarks/lib/endpoint_request_func.py` -
+`async_request_openai_completions`、`async_request_openai_chat_completions`
+
 ### 10.2.4 E2EL 不等于服务器纯推理时间
 
 客户端 E2EL 还包含网络、协议解析与流式传输。vLLM 内部 metrics 中的 inference time 则
@@ -199,7 +217,8 @@ token 数，缺失时可能重新 tokenize 文本；ITL 列表则来自流式事
 
 ### 10.3.1 三种吞吐分母相同，分子不同
 
-设 benchmark duration 为 `T`、成功请求数为 `R`、输入和输出 token 总数为 `I/O`：
+设 benchmark duration 为 `T` 秒、成功请求数为 `R`、成功请求的输入和输出 token 总数
+分别为 `I`、`O`。请求吞吐单位是 request/s，token 吞吐单位是 token/s：
 
 ```math
 request\ throughput=R/T
@@ -224,7 +243,9 @@ total\ token\ throughput=(I+O)/T
 goodput=\frac{\#\ requests\ satisfying\ all\ configured\ SLOs}{T}
 ```
 
-当前 `bench serve` 的 goodput 对已配置门槛采用 AND 关系。吞吐 100 req/s、只有 60 req/s
+当前 `bench serve` 的 goodput 对已配置门槛采用 AND 关系，只计成功请求。CLI 的
+`--goodput` 阈值用毫秒，计算时转为秒；未配置门槛时结果字段为 0，不能解释为
+“所有请求都不达标”。吞吐 100 req/s、只有 60 req/s
 满足 SLO 时，平台可售卖容量更接近 60，而不是 100。
 
 ```mermaid
@@ -418,8 +439,13 @@ interval\sim Gamma(shape=b,\ scale=1/(rate\cdot b))
 - `b` 趋近无穷时，间隔趋近常数 `1/rate`；
 - `request_rate=inf` 时所有 delay 为 0，近似一次性压入全部请求。
 
-固定 request rate 时，代码还会归一化累计 delay，使总发送跨度接近 `N/rate`，减少随机 seed
-造成的总负载漂移。
+`rate` 的单位为 request/s，`b` 是无单位正数，间隔以秒计；其平均值为 `1/rate`。
+例如 10 request/s 的平均间隔是 0.1 秒，不表示每个间隔都恰好为 0.1 秒。
+固定 request rate 时，代码还会将累计 delay 缩放到 `N/rate`，减少总负载漂移。
+严格地说，这使最终间隔不再是相互独立的指数样本；“Poisson”描述原始采样方式，
+不是归一化后有限序列的精确概率性质。
+
+[源码] `vllm/benchmarks/serve.py` - `get_request`、`calculate_metrics`
 
 ```mermaid
 flowchart TB
@@ -507,7 +533,7 @@ prefix 重复、停止条件、chat template、语言分布和 structured output
 > **本节先看：** 这一小节先用图建立“一次启动包含多种一次性成本”的整体路径。先找输入、关键状态和输出，再阅读图后的源码解释，不必一开始记住全部节点。
 
 ```mermaid
-flowchart LR
+flowchart TD
     S[Process start] --> M[Model load]
     M --> K[KV memory profiling and allocation]
     K --> C[torch.compile]
@@ -516,7 +542,7 @@ flowchart LR
     F --> T[Steady state]
 ```
 
-> **读图方法：** 这张图用于压缩“一次启动包含多种一次性成本”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
+> **读图方法：** 这张图用于压缩“一次启动包含多种一次性成本”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
 把第一请求和第 1000 个请求放在同一个平均值里，会同时测到部署冷启动与稳定态服务，通常
 无法解释。
@@ -633,6 +659,10 @@ inference=last\ token-first\ scheduled
 preemption 发生在 prefill 或 decode 时，其等待会包含在对应区间内。`scheduled_ts` 只记录
 第一次 scheduled，避免抢占后重排覆盖起点。
 
+这些差值的起止点需来自同一时钟；不要用 wall-clock 的 arrival time 去减 monotonic
+的 scheduled 时间。按同一请求计算完整区间后再汇总，不能用 E2EL p99 减去各阶段
+p99 推导网络延迟，因为几个 p99 可能来自不同请求。
+
 ### 10.11.2 Prometheus 关键指标
 
 > **本节先看：** 下面先用表格整理“Prometheus 关键指标”。先横向比较每一列解决的问题和适用边界，再把具体名称映射到源码。
@@ -641,11 +671,11 @@ preemption 发生在 prefill 或 decode 时，其等待会包含在对应区间�
 |---|---|---|
 | `vllm:num_requests_running` | gauge | 当前活跃请求 |
 | `vllm:num_requests_waiting` | gauge | Scheduler queue 压力 |
-| `vllm:kv_cache_usage_perc` | gauge | KV 容量压力 |
-| `vllm:num_preemptions` | counter | KV/调度压力结果 |
-| `vllm:prompt_tokens` | counter | prompt token 总量 |
-| `vllm:prompt_tokens_by_source` | labeled counter | 本地计算、cache hit、external KV |
-| `vllm:generation_tokens` | counter | generation token 总量 |
+| `vllm:kv_cache_usage_perc` | gauge，0–1 的占用比例 | KV 池内 block 压力，不是进程显存百分数 |
+| `vllm:num_preemptions_total` | counter | KV/调度压力结果 |
+| `vllm:prompt_tokens_total` | counter | prompt token 总量 |
+| `vllm:prompt_tokens_by_source_total` | labeled counter | 本地计算、cache hit、external KV |
+| `vllm:generation_tokens_total` | counter | generation token 总量 |
 | `vllm:time_to_first_token_seconds` | histogram | 内部 TTFT |
 | `vllm:inter_token_latency_seconds` | histogram | 内部 ITL |
 | `vllm:e2e_request_latency_seconds` | histogram | 内部 E2E |
@@ -653,7 +683,13 @@ preemption 发生在 prefill 或 decode 时，其等待会包含在对应区间�
 | `vllm:request_prefill_time_seconds` | histogram | prefill 区间 |
 | `vllm:request_decode_time_seconds` | histogram | decode 区间 |
 
-指标名和 buckets 属于固定 commit 的源码事实，升级后要重新核对。
+表中的 counter 使用 `/metrics` 导出样本名，带 `_total`；源码构造 `Counter` 时可不写
+该后缀。histogram 表中列的是家族名，实际查询常用 `_bucket`、`_sum`、`_count`。
+例如 `kv_cache_usage_perc=0.8` 表示池内约 80% 可分配 block 正被引用，不是 0.8%。
+
+[源码] `vllm/v1/metrics/loggers.py` - `PrometheusStatLogger.__init__`
+
+[设计] `docs/design/metrics.md` - 指标类型与导出名称
 
 ### 10.11.3 日志吞吐不是请求总 token 数
 
@@ -720,7 +756,9 @@ prompt throughput 可能下降，同时业务输入吞吐上升，这并不矛�
 > **本节先看：** 下面先给出“开环与闭环负载”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
 
 - 固定 request rate 是开环：无论系统变慢，load generator 仍按计划产生请求。
-- 固定 max concurrency 更接近闭环：请求完成后才释放 slot。
+- 仅设置 max concurrency 不会改变上游到达过程；配合无限 request rate 和充足待发
+  请求时，向服务端补位的行为才近似闭环：请求完成后释放 slot。有限 rate 与信号量
+  同时存在时，仍可能在客户端持续积累等待。
 - `request_rate=inf` 且大量 prompts 是一次性 batch pressure，不代表稳态到达。
 
 开环适合观察过载与排队；闭环适合估算一定并发用户下的体验。两者不能混为一个“并发数”。
@@ -990,7 +1028,8 @@ Cache 或 GPU attention 性能。
 
 ### 10.17.4 微基准收益怎样传回端到端
 
-若某 kernel 占端到端时间比例为 `f`，kernel 加速 `s` 倍，Amdahl 上限为：
+先假设其他阶段耗时不变、阶段串行且工作量固定。`f` 是该 kernel 占原耗时的比例
+（0 到 1），`s` 是其加速倍数，两者无单位，Amdahl 加速上限为：
 
 ```math
 S_{total}\leq\frac{1}{(1-f)+f/s}
@@ -1012,11 +1051,13 @@ GPU telemetry 和完整命令。检查错误率、长度分布和 run-to-run var
 
 ### 10.18.2 第二步：定位用户指标的主要组成
 
-例如 p99 TTFT 高：
+先区分两种抱怨：“从用户计划发送到看到首字很慢”可能含客户端等待；
+`bench serve` 的 TTFT 已排除 semaphore 等待。对后者，应查服务端排队、prefill、
+网络和前端处理，不能把客户端排队直接算进 TTFT。
 
 ```mermaid
 flowchart TD
-    A[p99 TTFT high] --> B{client queue high}
+    A[到达后首字总等待很长] --> B{client queue high}
     B -- yes --> C[load generator concurrency bottleneck]
     B -- no --> D{server queue high}
     D -- yes --> E[capacity or scheduling]
@@ -1171,16 +1212,23 @@ max concurrency。结果汇总后可绘图。
 当前 Pareto 工具可计算：
 
 ```math
-tokens/user=output\ throughput/user\ count
+tokens/(s\cdot user)=output\ throughput/user\ count
 ```
 
 ```math
-tokens/GPU=output\ throughput/GPU\ count
+tokens/(s\cdot GPU)=output\ throughput/GPU\ count
 ```
 
-user count 缺失时可用 request rate 或观察到的 peak concurrency 近似；GPU 数可由显式字段或
-TP×PP×DP 推导。注意该工具当前推导没有纳入 PCP，含 PCP 实验最好显式提供 GPU count，避免
-低估资源数。这是把第 9 章源码语义带回 benchmark 工具审计的一个例子。
+**工具行为与物理含义需要分开。** `_infer_user_count` 优先使用指定字段，否则用
+`request_rate`，最后才回退到 peak concurrency。但 request/s 不是用户数：
+`1000 token/s ÷ 10 request/s = 100 token/request`，不能标成每用户生成速率。
+要使用上面的第一式，应显式提供有定义的活跃用户/并发数，并在图上写清分母。
+
+GPU 数可由显式字段或 TP×PP×DP 推导；当前默认推导未计入 PCP，含 PCP 实验应
+显式提供 GPU count。这些是对上游工具结果的解释限制，不是推荐照搬的估算方法。
+
+[源码] `vllm/benchmarks/sweep/plot_pareto.py` - `_infer_user_count`、`_infer_gpu_count`、
+`_prepare_records`
 
 ### 10.20.4 扫参防止组合爆炸
 
@@ -1299,13 +1347,15 @@ python3 examples/ch10_benchmark_reasoning.py
 python3 -m unittest tests.test_ch10_benchmark_reasoning
 ```
 
-21 个单元测试覆盖计时边界、失败请求、goodput AND 语义、ITL 展平、噪声、正确性门槛和
+24 个单元测试覆盖计时边界、失败请求、goodput AND 语义、ITL 展平、噪声、正确性门槛和
 Pareto dominance。
 
 ### 10.23.1 教学代码与真实 benchmark 的边界
 
 该脚本不会启动 vLLM、发送 HTTP 或测量 GPU。它用于让读者在 CPU 上验证指标公式，并分析
-真实 benchmark 导出的 timestamps。GPU 性能结论必须来自真实环境，记录在
+逐 token 的教学 timestamps。若直接分析真实 benchmark 导出的 SSE 事件，必须额外
+提供服务端实际输出 token 数（`completion_tokens`）和适配器的末计时点
+（`last_response_time`），不能把事件条数当作 token 数。GPU 性能结论必须来自真实环境，记录在
 [`experiments/ch10-optimization.md`](../../experiments/ch10-optimization.md)。
 
 ---
@@ -1357,6 +1407,8 @@ throughput、goodput、p99 TTFT/TPOT、client queue、server queue。
 ---
 
 ## 10.25 练习题
+
+第一遍先完成前 5 题；余下题目是第二遍源码阅读的扩展题库，不要求一次做完。
 
 > **本节先看：** 下面先给出“练习题”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
 

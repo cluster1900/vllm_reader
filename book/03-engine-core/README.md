@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-07
+verified_at: 2026-09-08
 content_complete: true
 runtime_verified: false
-audience: "有 LLM 使用经验、代码开发基础和基础数学直觉的工程读者"
-pedagogy_reviewed_at: 2026-09-07
+audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
+pedagogy_reviewed_at: 2026-09-08
 scope: "V1 Engine 前后端边界、EngineCore 生命周期、主循环、批队列与 IPC"
 prerequisites:
   - 第02章
@@ -70,6 +70,14 @@ LLMEngine / AsyncLLM
 本章涉及的“异步”主要是控制流并发，不等于 GPU kernel 自动并行。看到 async、线程或
 ZMQ 时先问“谁可以继续做别的工作”，再问“结果由谁、在何时确认”。
 
+**先理解 Future。** Future 像一张取货凭证：拿到它表示有地方领取结果；
+`.result()` 可能需要等待，也可能立刻得到已经完成的结果。队列的 enqueue/dequeue
+就是入队/出队；FIFO 表示先进先出，RPC 表示经通信边界请求另一端调用方法。
+
+**第一遍走法：** 读 3.1、3.3–3.4、3.8–3.11，再运行 3.18；配置回写、pause 和 Ray
+留作第二遍。**停下来追：** 前端 `LLMEngine.step()` 正在等结果，后端还能继续工作吗？
+默认 SyncMPClient 可以，因为后端有独立 busy loop；InprocClient 则由同一调用链推进。
+
 ## 3.1 Engine 不是 EngineCore
 
 源码里最容易产生误解的词是 “Engine”。不同类名字接近，却处在不同责任层。
@@ -104,7 +112,7 @@ flowchart LR
         CORE <--> SCH
         CORE <--> EX
     end
-    CL <-->|直接调用或 ZMQ| PROC
+    CL <-->|多进程: ZMQ| PROC
     CL -. in-process .-> CORE
 ```
 
@@ -202,7 +210,7 @@ sequenceDiagram
 
 ### 3.3.1 同步 `LLMEngine`
 
-同步离线路径通常由调用线程主动推进：
+同步离线前端由调用线程循环取结果；默认后台 EngineCore 独立推进：
 
 ```text
 add_request(...)
@@ -447,8 +455,14 @@ KV cache 的真实规格来自执行侧模型层，容量又依赖加载模型�
 - 值为 1：`step_fn = step`。
 - 值大于 1：创建有界 deque，`step_fn = step_with_batch_queue`。
 
-PP 需要多个并发 batch 填充 pipeline；async scheduling 也可能把并发 batch 数提高到
-2。条件集中在 `VllmConfig.max_concurrent_batches`，主循环无需每轮重新推导。
+设 `P` 为 PP stage 数（至少 1）。关闭 async scheduling 时容量为 `P`；开启时，
+MRV2 容量为 `P+1`，MRV1 在 `P=1` 时为 2，在 `P>1` 时仍返回 `P`。这是
+`VllmConfig.max_concurrent_batches` 的规则；其他配置校验还可能拒绝不支持的组合。
+例如 MRV2、PP=4、async 开启时容量为 5，并不是固定 2。
+
+[源码] `vllm/config/vllm.py` - `VllmConfig.max_concurrent_batches`
+
+[源码] `vllm/v1/engine/core.py` - `EngineCore.__init__` 中 `step_fn` 的绑定
 
 ## 3.7 请求消息与 Utility RPC
 
@@ -538,7 +552,9 @@ EngineCore 不把 Scheduler 内部可变对象直接交给 Worker，而是交付
 
 ### 3.8.2 `non_block=True` 的真实边界
 
-它表示 executor 返回 Future，可以异步形状提交工作；但普通 step 随后就在同一函数调用
+它表示 executor 以 Future 形式交付结果；这不保证 Python 方法本身在后台线程运行。
+例如 `UniProcExecutor.collective_rpc` 仍在当前线程执行 `run_method`，GPU 操作可异步入队，
+返回值再包装为 Future。普通 step 随后就在同一函数调用
 `future.result()`。因此：
 
 > `non_block=True` 不等于整个 `EngineCore.step()` 不阻塞。
@@ -681,7 +697,10 @@ flowchart TD
 
 ### 3.11.2 容量为 2 的时间线
 
-假设同一请求生成 3 个 token：
+以下先看教学模型：同一请求有 3 份顺序工作，队列容量为 2。教学 executor 根据位置
+生成固定 token，所以可以提前提交。真实自回归生成还依赖前一个采样 token；要得到
+类似时间线，需要 async scheduling 的 placeholder 和 Worker 内部 token 回填配合。
+仅有 batch queue，不保证同一请求能连续提前 decode；PP 场景还受调度节奏限制。
 
 | 调用 | 新提交 | 调用后在途 | 本次结算 | 返回 |
 |---|---|---|---|---|
@@ -728,7 +747,7 @@ Pause 是 Scheduler 状态，不等于进程退出。
 | mode | 已在途请求 | 新请求 | pause 完成条件 |
 |---|---|---|---|
 | `abort` | 立即标记 abort | 入队但不调度 | abort 输出发送、设备 idle |
-| `wait` | 允许继续完成 | 入队但不调度 | 旧请求 drain |
+| `wait` | 已 running 请求允许继续完成 | waiting 请求不准入，包括暂停前已排队者 | running 与在途 batch 排空 |
 | `keep` | 冻结并保留 | 入队但不调度 | 在途 batch/输出排空 |
 
 基础 `EngineCore.pause_scheduler()` 不支持 in-process 的 `wait`；`EngineCoreProc` 覆盖该
@@ -747,6 +766,11 @@ stateDiagram-v2
 
 > **读图方法：** 这是“Pause、Sleep 与 Resume”的状态图。先找初始状态，再沿箭头观察触发条件和状态变化；重点不是背状态名，而是弄清谁触发转换、转换后哪些资源需要更新。
 
+这里的“旧请求”仅指已经 running 的请求，不包括暂停前已进入 waiting 的请求；
+`Scheduler.schedule` 只在 `UNPAUSED` 时接纳 waiting。
+
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`、`get_num_unfinished_requests`
+
 `_finish_pause()` 先调用 executor collective RPC `synchronize_device`，再按需 reset cache。
 否则调用者收到“pause 完成”时 GPU 仍可能访问即将释放的 KV。上游测试固定顺序为：
 
@@ -755,7 +779,9 @@ synchronize_device -> reset_caches -> Future complete
 ```
 
 Sleep 在 pause 之上增加设备内存管理：level 0 只暂停调度；level 1 offload 权重并丢弃
-KV；level 2 丢弃全部 GPU 内存。wake up 只有在 executor 已不 sleeping 时才恢复
+KV；level 2 不保留 sleep backend 管理的权重/KV 内容，Worker 会另存必要的模型
+buffers。它不保证进程所有 GPU 占用降到零；源码日志仍会报告残余占用。wake up
+只有在 executor 已不 sleeping 时才恢复
 Scheduler，避免权重尚未驻留就调度请求。
 
 ## 3.13 Shutdown：立即 abort 与优雅 drain
@@ -887,6 +913,7 @@ OfflineInferenceMixin._run_engine
 -> EngineCore.step_fn
 -> Scheduler.schedule
 -> Executor.execute_model
+-> 等待结果；若为 None，再 Executor.sample_tokens
 -> Scheduler.update_from_output
 -> OutputProcessor.process_outputs
 ```
@@ -1005,6 +1032,9 @@ tick=3 launched=False queue=0 outputs=(... token_ids=(102,), finish_reason='leng
 | executor failure 为 fatal | `EXECUTOR_FAILED` dispatch |
 | 零秒 shutdown abort 请求 | `_handle_shutdown` |
 
+教学模型没有单独区分暂停前的 waiting 与 running，且 token 由位置直接生成，因此
+不能用于证明真实 pause 准入规则或自回归 token 的数据依赖。
+
 模型没有模拟真实 token budget、KV block、structured output、spec decode、ZMQ 序列化、
 GPU stream 和分布式 collective，所以只验证控制流解释，不验证性能。
 
@@ -1065,6 +1095,8 @@ batch queue 再把提交与结算分开，使多个 batch 能同时在途。
 continuous batching 为什么自然地从 token 级调度产生。
 
 ## 3.22 自检问题
+
+第一遍先完成前 5 题；余下题目是第二遍源码阅读的扩展题库，不要求一次做完。
 
 > **本节先看：** 建议先不看答案，用自己的话回答下面的问题。能够解释原因、画出数据流并指出源码位置，才算真正理解。
 
@@ -1162,7 +1194,8 @@ aborts queue 让取消在 GPU 返回后、Scheduler update 前生效；input que
 <details>
 <summary>10. wait 与 keep</summary>
 
-两者暂停新请求；wait 允许已有请求 drain，keep 冻结已有请求，只排空在途工作。
+两者暂停 waiting 准入；wait 允许已有 running 请求 drain，暂停前尚在 waiting 的请求
+也会等待 resume。keep 冻结 running 请求，只排空已提交的工作。
 </details>
 
 <details>
