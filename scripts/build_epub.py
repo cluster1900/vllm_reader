@@ -13,9 +13,11 @@ import sys
 from pathlib import Path
 
 try:
+    from .epub_content import source_paths, annotate_document, rewrite_links, stamp_mermaid, add_legacy_cover_metadata
     from .math_support import (check_math, formula_counts, math_nodes,
                                normalized_tex, read_document, render_document_math)
 except ImportError:
+    from epub_content import source_paths, annotate_document, rewrite_links, stamp_mermaid, add_legacy_cover_metadata
     from math_support import (check_math, formula_counts, math_nodes,
                               normalized_tex, read_document, render_document_math)
 
@@ -35,7 +37,6 @@ CHAPTERS = (
 )
 MERMAID_RE = re.compile(r"```mermaid\s*\n(.*?)\n```", re.DOTALL)
 IMAGE_RE = re.compile(r"!\[([^\]\n]*)\]\(([^)\n]+)\)")
-LINK_RE = re.compile(r"(?<!!)\[([^\]\n]+)\]\(([^)\n]+)\)")
 
 
 def strip_frontmatter(text: str) -> str:
@@ -82,6 +83,7 @@ def render_mermaid(
                 str(ROOT / "epub" / "puppeteer-config.json"),
             ]
         )
+        stamp_mermaid(output, match.group(1))
         source.unlink()
         relative = f"media/{chapter_name}/{output.name}"
         return f"![{chapter_name} 图 {counter}]({relative}){{.diagram}}"
@@ -115,42 +117,9 @@ def copy_images(text: str, source_path: Path, chapter_name: str, media_dir: Path
     return IMAGE_RE.sub(replace, text)
 
 
-def neutralize_repo_links(text: str) -> str:
-    """Avoid dangling links to files that are not packaged in the EPUB."""
-
-    def replace(match: re.Match[str]) -> str:
-        label, target = match.groups()
-        if target.startswith(("http://", "https://", "mailto:", "#")):
-            return match.group(0)
-        return f"{label}（随书仓库：`{target}`）"
-
-    return LINK_RE.sub(replace, text)
-
-
 def make_intro() -> str:
-    return """# 阅读指南
-
-本书面向初中级程序员和软件工程类学生。具备 Python 类、函数和循环基础即可开始，
-不要求预先掌握大模型推理、CUDA 或分布式系统。全书以 vLLM V1 为主线，从 Transformer 的一次 token 预测开始，逐步进入
-EngineCore、Scheduler、KV Cache、PagedAttention、模型执行、CUDA Graph 和多 GPU。
-
-## 源码基线
-
-- Repository: `vllm-project/vllm`
-- Commit: `5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`
-- Branch: `main`
-- Static review: `2026-09-08`
-- Runtime GPU verification: not completed
-
-章节中的“源码事实”均绑定上述 revision。标为 `draft` 的章节表示正文已经形成，但真实
-NVIDIA GPU 动态实验或独立人工复核尚未全部完成。
-
-## 阅读方法
-
-先按顺序阅读第 01 至 05 章建立请求、调度和内存主线；再阅读第 06 至 09 章理解 GPU
-执行和分布式；最后用第 10 章的方法设计实验。代码路径使用仓库相对路径，符号名比
-行号更适合在后续版本中重新定位。
-"""
+    """The reading guide is Markdown source, just like every chapter."""
+    return (ROOT / "book" / "reading-guide.md").read_text(encoding="utf-8")
 
 
 def build(output: Path, keep_stage: bool) -> None:
@@ -169,33 +138,29 @@ def build(output: Path, keep_stage: bool) -> None:
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
     staged_markdown = []
-
-    intro = stage / "00-reading-guide.md"
-    intro.write_text(make_intro(), encoding="utf-8")
-    staged_markdown.append(intro)
-
-    for index, chapter_name in enumerate(CHAPTERS, start=1):
-        source = ROOT / "book" / chapter_name / "README.md"
-        text = strip_frontmatter(source.read_text(encoding="utf-8"))
-        text = normalize_display_math(text)
+    prepared = []
+    anchors = {}
+    revision = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+    ).strip()
+    for index, source in enumerate(source_paths(ROOT)):
+        chapter_name = source.parent.name if source.name == "README.md" else source.stem
+        text = normalize_display_math(strip_frontmatter(source.read_text(encoding="utf-8")))
         media_dir = stage / "media" / chapter_name
         media_dir.mkdir(parents=True)
         text = copy_images(text, source, chapter_name, media_dir)
         text = render_mermaid(text, chapter_name, media_dir, mmdc)
-        text = neutralize_repo_links(text)
         destination = stage / f"{index:02d}-{chapter_name}.md"
         destination.write_text(text.rstrip() + "\n", encoding="utf-8")
         staged_markdown.append(destination)
+        part = read_document([destination])
+        anchors[source.resolve()] = annotate_document(part, source, ROOT, revision)
+        prepared.append((source, part))
 
-    glossary_source = ROOT / "glossary" / "terms.md"
-    glossary = stage / "99-glossary.md"
-    glossary.write_text(
-        neutralize_repo_links(glossary_source.read_text(encoding="utf-8")),
-        encoding="utf-8",
-    )
-    staged_markdown.append(glossary)
-
-    document = read_document(staged_markdown)
+    for source, part in prepared:
+        rewrite_links(part, source, ROOT, revision, anchors)
+    document = {"pandoc-api-version": prepared[0][1]["pandoc-api-version"], "meta": {},
+                "blocks": [block for _, part in prepared for block in part["blocks"]]}
     expected_math = formula_counts([path.read_text() for path in staged_markdown])
     parsed_math = Counter(
         (node["c"][0]["t"] == "DisplayMath", normalized_tex(node["c"][1]))
@@ -216,12 +181,14 @@ def build(output: Path, keep_stage: bool) -> None:
         "--toc",
         "--toc-depth=2",
         "--split-level=1",
+        "--template",
+        str(ROOT / "epub" / "template.xhtml"),
         "--metadata-file",
         str(ROOT / "epub" / "metadata.yaml"),
         "--css",
         str(ROOT / "epub" / "style.css"),
         "--epub-cover-image",
-        str(ROOT / "epub" / "cover.svg"),
+        str(ROOT / "epub" / "cover-imagegen.png"),
         "--resource-path",
         str(stage),
         "--output",
@@ -229,6 +196,7 @@ def build(output: Path, keep_stage: bool) -> None:
         str(document_path),
     ]
     run(command)
+    add_legacy_cover_metadata(output)
     run([sys.executable, str(ROOT / "scripts" / "check_epub.py"), str(output)])
 
     if not keep_stage:

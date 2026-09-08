@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Perform dependency-free structural checks on an EPUB3 archive."""
+"""Check EPUB structure, cover and source content (Pandoc required)."""
 
 from __future__ import annotations
 
@@ -11,10 +11,13 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 from collections import Counter
+from urllib.parse import unquote, urlsplit
 
 try:
+    from .epub_content import check_content, source_paths
     from .math_support import formula_counts, normalized_tex
 except ImportError:
+    from epub_content import check_content, source_paths
     from math_support import formula_counts, normalized_tex
 
 
@@ -63,6 +66,8 @@ def main() -> int:
 
         xhtml_items: list[str] = []
         image_items: list[str] = []
+        spine: list[str] = []
+        cover_items: list[tuple[str, str]] = []
         if rootfile and rootfile in names:
             opf = ET.fromstring(archive.read(rootfile))
             opf_dir = posixpath.dirname(rootfile)
@@ -79,11 +84,36 @@ def main() -> int:
                     xhtml_items.append(full_name)
                 if media_type.startswith("image/"):
                     image_items.append(full_name)
+                if "cover-image" in item.attrib.get("properties", "").split():
+                    cover_items.append((item_id, full_name))
+                    if media_type not in {"image/png", "image/jpeg"}:
+                        fail(errors, "cover should be a PNG/JPEG library thumbnail")
 
             for itemref in opf.findall(".//opf:spine/opf:itemref", OPF_NS):
                 item_id = itemref.attrib.get("idref", "")
                 if item_id not in manifest:
                     fail(errors, f"spine idref missing from manifest: {item_id}")
+                else:
+                    spine.append(manifest[item_id])
+
+            if len(cover_items) != 1:
+                fail(errors, f"expected one cover-image, found {len(cover_items)}")
+            else:
+                cover_id, cover_name = cover_items[0]
+                if archive.read(cover_name) != (ROOT / "epub/cover-imagegen.png").read_bytes():
+                    fail(errors, "packaged cover does not match the selected imagegen cover")
+                legacy_cover = opf.find('.//opf:meta[@name="cover"]', OPF_NS)
+                if legacy_cover is None or legacy_cover.attrib.get("content") != cover_id:
+                    fail(errors, "EPUB cover metadata does not identify the cover image")
+                if spine:
+                    cover_page = ET.fromstring(archive.read(spine[0]))
+                    references = []
+                    for element in cover_page.iter():
+                        for attr, value in element.attrib.items():
+                            if attr in {"src", "href", "data"} or attr.endswith("}href"):
+                                references.append(posixpath.normpath(posixpath.join(posixpath.dirname(spine[0]), unquote(value))))
+                    if cover_name not in references:
+                        fail(errors, "first reading-order page does not display the selected cover")
 
         chapter_heads = 0
         mermaid_code_blocks = 0
@@ -93,6 +123,11 @@ def main() -> int:
         diagram_guides = 0
         diagram_images = 0
         rendered_formulas: Counter = Counter()
+        document_ids = {}
+        for name in xhtml_items:
+            if name in names:
+                doc = ET.fromstring(archive.read(name))
+                document_ids[name] = {e.attrib["id"] for e in doc.iter() if "id" in e.attrib}
         for item_name in xhtml_items:
             if item_name not in names:
                 continue
@@ -163,12 +198,15 @@ def main() -> int:
 
             for link in document.findall(".//x:a", XHTML_NS):
                 href = link.attrib.get("href", "")
-                if not href or href.startswith(("http://", "https://", "mailto:", "#")):
+                if not href or urlsplit(href).scheme or href.startswith("//"):
                     continue
-                target = href.split("#", 1)[0]
-                resolved = posixpath.normpath(posixpath.join(base, target))
+                parts = urlsplit(href)
+                target = unquote(parts.path)
+                resolved = posixpath.normpath(posixpath.join(base, target)) if target else item_name
                 if resolved not in names:
                     fail(errors, f"XHTML link target is missing: {resolved}")
+                elif parts.fragment and unquote(parts.fragment) not in document_ids.get(resolved, set()):
+                    fail(errors, f"XHTML anchor target is missing: {resolved}#{parts.fragment}")
 
         if chapter_heads < 11:
             fail(errors, f"expected at least 11 h1 headings, found {chapter_heads}")
@@ -187,7 +225,7 @@ def main() -> int:
             source_text = source.read_text(encoding="utf-8")
             expected_section_leads += source_text.count("> **本节先看：**")
             expected_diagram_guides += source_text.count("> **读图方法：**")
-        math_sources = chapter_sources + [ROOT / "glossary" / "terms.md"]
+        math_sources = source_paths(ROOT)
         expected_formulas = formula_counts([p.read_text(encoding="utf-8") for p in math_sources])
         if rendered_formulas != expected_formulas:
             fail(errors, "formula mismatch between Markdown and EPUB: "
@@ -217,6 +255,7 @@ def main() -> int:
                 "diagram/image mismatch: "
                 f"{diagram_images} diagram images, {diagram_guides} guides",
             )
+        content_stats = check_content(archive, spine, ROOT, errors)
 
     if errors:
         print("EPUB validation failed:", file=sys.stderr)
@@ -231,6 +270,8 @@ def main() -> int:
         f"{chapter_heads} h1 headings, {section_leads} section leads, "
         f"{diagram_guides} diagram guides."
     )
+    print(f"Markdown/EPUB content matched: {content_stats['documents']} documents, "
+          f"{content_stats['tokens']} ordered semantic tokens; cover and anchors verified.")
     return 0
 
 

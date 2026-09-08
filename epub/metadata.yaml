@@ -1,7 +1,8 @@
 title: "vLLM 源码教程"
 subtitle: "从 Transformer 推理到调度、KV Cache、PagedAttention 与多 GPU"
 author:
-  - "vLLM Reader Project"
+  - "Hawk Wu"
+author-email: "hawk.wu525@gmail.com"
 lang: zh-CN
 date: "2026-09-08"
 rights: "本书正文采用项目约定许可；上游 vLLM 源码归原项目贡献者所有。"
