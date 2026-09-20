@@ -39,6 +39,13 @@
 `draft` 表示章节正文、图解和无 GPU 实验已经形成，但真实 NVIDIA GPU 动态验证或独立
 人工复核仍待完成；`outline` 表示源码入口已建立，正文尚在扩写。
 
+## 对外阅读页（GitHub Pages）
+
+项目首页已提供一套可直接发布的静态展示页：<https://cluster1900.github.io/vllm_reader/>。
+页面源码位于 [`docs/`](docs/)，不依赖构建工具；在 GitHub 仓库的 **Settings → Pages** 中将
+Source 设为 `Deploy from a branch`，选择 `main` 和 `/docs` 目录即可发布。首页包含封面、
+主调用链、十章目录、阅读路线、源码证据说明和作者信息；章节正文仍以仓库 Markdown 为唯一维护源。
+
 ## 构建 EPUB
 
 项目将 Mermaid 图和 LaTeX 公式渲染为自包含 SVG，再由 Pandoc 生成 EPUB3：

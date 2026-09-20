@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="vLLM 源码教程：从 Transformer 推理到调度、KV Cache、PagedAttention 与多 GPU。" />
+    <meta name="theme-color" content="#f5f7fb" />
+    <title>vLLM 源码教程 · 把一次生成读成一条系统调用链</title>
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="progress" aria-hidden="true"><span></span></div>
+    <header class="site-header" data-header>
+      <a class="brand" href="#top" aria-label="回到首页">
+        <span class="brand-mark">v</span>
+        <span><strong>vLLM Reader</strong><small>源码教程 · 公开版</small></span>
+      </a>
+      <nav class="top-nav" aria-label="主导航">
+        <a href="#book">这本书</a>
+        <a href="#chapters">章节</a>
+        <a href="#evidence">方法</a>
+        <a href="#about">关于作者</a>
+        <a class="nav-github" href="https://github.com/cluster1900/vllm_reader" target="_blank" rel="noreferrer">GitHub ↗</a>
+      </nav>
+      <button class="theme-toggle" type="button" aria-label="切换深色模式" data-theme-toggle>◐</button>
+    </header>
+
+    <main id="top">
+      <section class="hero shell">
+        <div class="hero-copy reveal">
+          <p class="eyebrow"><span class="live-dot"></span> vLLM V1 · 源码基线 5893426b</p>
+          <h1>把一次生成，读成一条<strong>可验证的系统调用链。</strong></h1>
+          <p class="hero-lede">一份从 Transformer 推理出发，沿着 EngineCore、Scheduler、KV Cache、Attention Backend 和多 GPU 执行栈走到源码现场的中文教程。</p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="#chapters">开始阅读 <span>↓</span></a>
+            <a class="button button-quiet" href="https://github.com/cluster1900/vllm_reader/blob/main/book/reading-guide.md" target="_blank" rel="noreferrer">先看阅读指南 ↗</a>
+          </div>
+          <div class="hero-meta">
+            <span><b>10</b> 个章节</span>
+            <span><b>10</b> 个教学程序</span>
+            <span><b>1</b> 条主线</span>
+          </div>
+        </div>
+        <div class="hero-art reveal reveal-delay">
+          <div class="art-glow"></div>
+          <div class="book-frame">
+            <img src="assets/cover-imagegen.png" alt="vLLM 源码教程封面：请求、KV Cache 与 GPU 执行链路" />
+            <span class="frame-label frame-label-top">SOURCE-GROUNDED / 2026</span>
+            <span class="frame-label frame-label-bottom">READ THE SYSTEM</span>
+          </div>
+          <div class="float-card float-card-a"><span class="mini-icon">→</span><span><b>Request</b><small>从入口开始追踪</small></span></div>
+          <div class="float-card float-card-b"><span class="mini-icon mini-icon-cyan">▦</span><span><b>KV Cache</b><small>逻辑 token → 物理 block</small></span></div>
+        </div>
+      </section>
+
+      <section class="signal-strip shell reveal" aria-label="项目状态">
+        <div><span class="signal-label">研究范围</span><strong>vLLM V1 / NVIDIA GPU 主线</strong></div>
+        <div><span class="signal-label">文档状态</span><strong><i class="status-dot"></i> 10 章 draft · 持续复核</strong></div>
+        <div><span class="signal-label">固定版本</span><strong class="mono">5893426b · 2026-09-07</strong></div>
+        <div><span class="signal-label">交付形态</span><strong>Web · Markdown · EPUB</strong></div>
+      </section>
+
+      <section id="book" class="section shell">
+        <div class="section-heading reveal">
+          <p class="kicker">01 / WHY THIS BOOK</p>
+          <h2>不是背组件名称，<br /><em>而是看清系统为什么这样工作。</em></h2>
+          <p>每一章都从一个能观察到的问题进入，再回到当前 revision 的真实源码。读者最终要能回答：谁创建了这个对象？数据从哪里来？状态在哪里变化？GPU 为什么要等？</p>
+        </div>
+        <div class="principles-grid">
+          <article class="principle-card reveal">
+            <span class="card-index">01</span>
+            <h3>从现象出发</h3>
+            <p>先解释“为什么请求会排队”“为什么 KV Cache 会耗尽”，再进入抽象、公式和实现。</p>
+            <span class="card-line"></span>
+          </article>
+          <article class="principle-card reveal reveal-delay-1">
+            <span class="card-index">02</span>
+            <h3>沿调用链落地</h3>
+            <p>从用户入口一直追到 EngineCore、Scheduler、Worker 和 Model Runner，不把模块孤立讲解。</p>
+            <span class="card-line"></span>
+          </article>
+          <article class="principle-card reveal reveal-delay-2">
+            <span class="card-index">03</span>
+            <h3>用证据收束</h3>
+            <p>源码事实、测试、设计文档和实验观察分开标注，让结论能够被复查和继续维护。</p>
+            <span class="card-line"></span>
+          </article>
+        </div>
+      </section>
+
+      <section class="flow-section">
+        <div class="shell">
+          <div class="section-heading section-heading-light reveal">
+            <p class="kicker">02 / ONE REQUEST</p>
+            <h2>沿着一条请求，<br /><em>走完整个 vLLM。</em></h2>
+            <p>这是全书的阅读主线。章节会不断回到这条路径，把控制面、数据面和设备边界逐层放大。</p>
+          </div>
+          <div class="request-flow reveal">
+            <div class="flow-track" aria-hidden="true"><span></span></div>
+            <article class="flow-node"><span class="flow-number">01</span><b>Request</b><small>prompt / sampling</small><p>请求进入 client，完成 tokenization 与参数准备。</p></article>
+            <article class="flow-node"><span class="flow-number">02</span><b>EngineCore</b><small>IPC / step loop</small><p>主循环接收请求，驱动一次又一次 engine step。</p></article>
+            <article class="flow-node"><span class="flow-number">03</span><b>Scheduler</b><small>budget / preemption</small><p>根据 token budget 与 KV 容量选择本轮工作。</p></article>
+            <article class="flow-node"><span class="flow-number">04</span><b>KV Cache</b><small>block / table</small><p>把逻辑序列映射到可复用、可回收的物理 block。</p></article>
+            <article class="flow-node"><span class="flow-number">05</span><b>Model Runner</b><small>forward / sample</small><p>组织 batch、调用模型、采样 token，再把结果送回。</p></article>
+          </div>
+          <p class="flow-caption"><span>阅读提示</span> 第一遍只追粗线主路径；第二遍再回头看异步、并行、fallback 与异常传播。</p>
+        </div>
+      </section>
+
+      <section id="chapters" class="section shell chapters-section">
+        <div class="section-heading split-heading reveal">
+          <div>
+            <p class="kicker">03 / THE READING MAP</p>
+            <h2>十章，从输入到优化。</h2>
+          </div>
+          <p>先建立一条能复述的端到端主线，再按需进入调度、显存、GPU 执行和分布式系统。每章都绑定同一个 vLLM revision。</p>
+        </div>
+        <div class="chapter-grid">
+          <a class="chapter-card chapter-card-featured reveal" href="https://github.com/cluster1900/vllm_reader/blob/main/book/01-transformer-inference/README.md" target="_blank" rel="noreferrer"><span class="chapter-no">01</span><span class="chapter-status">基础</span><h3>从 Transformer 到<br />大模型推理</h3><p>一段文本如何变成一个又一个输出 token？</p><span class="chapter-arrow">↗</span></a>
+          <a class="chapter-card reveal reveal-delay-1" href="https://github.com/cluster1900/vllm_reader/blob/main/book/02-vllm-architecture/README.md" target="_blank" rel="noreferrer"><span class="chapter-no">02</span><span class="chapter-status">全景</span><h3>vLLM 全景与请求生命周期</h3><p>一次请求经过哪些对象、线程、进程和设备？</p><span class="chapter-arrow">↗</span></a>
+          <a class="chapter-card reveal reveal-delay-2" href="https://github.com/cluster1900/vllm_reader/blob/main/book/03-engine-core/README.md" target="_blank" rel="noreferrer"><span class="chapter-no">03</span><span class="chapter-status">控制面</span><h3>Engine 与 EngineCore</h3><p>谁驱动主循环，谁负责一轮执行完成？</p><span class="chapter-arrow">↗</span></a>
+          <a class="chapter-card reveal" href="https://github.com/cluster1900/vllm_reader/blob/main/book/04-scheduler/README.md" target="_blank" rel="noreferrer"><span class="chapter-no">04</span><span class="chapter-status">调度</span><h3>Scheduler 与 Continuous Batching</h3><p>当前 step 到底应该计算谁？</p><span class="chapter-arrow">↗</span></a>
+          <a class="chapter-card chapter-card-accent reveal reveal-delay-1" href="https://github.com/cluster1900/vllm_reader/blob/main/book/05-kv-cache/README.md" target="_blank" rel="noreferrer"><span class="chapter-no">05</span><span class="chapter-status">内存</span><h3>KV Cache 内存管理</h3><p>历史 token 如何放进有限显存，又如何被复用？</p><span class="chapter-arrow">↗</span></a>
+          <a class="chapter-card reveal reveal-delay-2" href="https://github.com/cluster1900/vllm_reader/blob/main/book/06-paged-attention/README.md" target="_blank" rel="noreferrer"><span class="chapter-no">06</span><span class="chapter-status">寻址</span><h3>PagedAttention 与 Attention Backend</h3><p>分散的 KV block 如何仍被看成一条历史序列？</p><span class="chapter-arrow">↗</span></a>
+          <a class="chapter-card reveal" href="https://github.com/cluster1900/vllm_reader/blob/main/book/07-model-execution/README.md" target="_blank" rel="noreferrer"><span class="chapter-no">07</span><span class="chapter-status">执行</span><h3>Executor、Worker 与 Model Runner</h3><p>谁把调度结果真正变成 GPU 工作？</p><span class="chapter-arrow">↗</span></a>
+          <a class="chapter-card reveal reveal-delay-1" href="https://github.com/cluster1900/vllm_reader/blob/main/book/08-compile-cuda-graph/README.md" target="_blank" rel="noreferrer"><span class="chapter-no">08</span><span class="chapter-status">优化</span><h3>异步执行、Compile 与 CUDA Graph</h3><p>怎样减少 CPU 准备和 kernel launch 的等待？</p><span class="chapter-arrow">↗</span></a>
+          <a class="chapter-card reveal reveal-delay-2" href="https://github.com/cluster1900/vllm_reader/blob/main/book/09-distributed/README.md" target="_blank" rel="noreferrer"><span class="chapter-no">09</span><span class="chapter-status">并行</span><h3>分布式与多 GPU 推理</h3><p>谁拥有状态，谁计算结果，谁必须通信？</p><span class="chapter-arrow">↗</span></a>
+          <a class="chapter-card chapter-card-dark reveal" href="https://github.com/cluster1900/vllm_reader/blob/main/book/10-experiments/README.md" target="_blank" rel="noreferrer"><span class="chapter-no">10</span><span class="chapter-status">验证</span><h3>实验、性能分析与优化</h3><p>如何知道瓶颈在哪里，并证明改动有效？</p><span class="chapter-arrow">↗</span></a>
+        </div>
+      </section>
+
+      <section id="evidence" class="evidence-section">
+        <div class="shell evidence-layout">
+          <div class="section-heading section-heading-light reveal">
+            <p class="kicker">04 / HOW TO TRUST IT</p>
+            <h2>每一个结论，<br /><em>都留一条回到源码的路。</em></h2>
+            <p>这不是把源码换成更长的 prose。页面上的每个章节都携带 revision、范围、相关测试和实验边界。</p>
+            <a class="text-link" href="https://github.com/cluster1900/vllm_reader/blob/main/meta/source-revisions.md" target="_blank" rel="noreferrer">查看源码版本记录 ↗</a>
+          </div>
+          <div class="evidence-stack reveal reveal-delay-1">
+            <div class="evidence-row"><span class="evidence-tag tag-source">SOURCE</span><div><strong>源码事实</strong><p>当前 revision 中可直接观察到的调用、字段和状态变化。</p></div><span class="evidence-symbol">⌘</span></div>
+            <div class="evidence-row"><span class="evidence-tag tag-test">TEST</span><div><strong>测试证据</strong><p>用 fixture、单元测试和边界用例反证初始理解。</p></div><span class="evidence-symbol">✓</span></div>
+            <div class="evidence-row"><span class="evidence-tag tag-design">DESIGN</span><div><strong>设计意图</strong><p>把注释、设计文档和实现行为放在同一张地图里比较。</p></div><span class="evidence-symbol">◎</span></div>
+            <div class="evidence-row"><span class="evidence-tag tag-lab">LAB</span><div><strong>实验观察</strong><p>记录命令、配置、硬件和限制，避免把单次结果写成普遍规律。</p></div><span class="evidence-symbol">↗</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="paths-section section shell">
+        <div class="section-heading split-heading reveal">
+          <div><p class="kicker">05 / PICK A PATH</p><h2>按你的问题进入。</h2></div>
+          <p>如果你还不知道从哪一章开始，下面三条路线足够覆盖最常见的阅读目标。</p>
+        </div>
+        <div class="path-grid">
+          <a class="path-card path-card-primary reveal" href="#chapters"><span class="path-icon">↗</span><small>01 / 建立主干</small><h3>我想看懂一次请求</h3><p>01 → 02 → 03 → 04 → 05 → 06</p><span class="path-cta">从入口读到 attention <b>→</b></span></a>
+          <a class="path-card reveal reveal-delay-1" href="#chapters"><span class="path-icon">▦</span><small>02 / 进入执行</small><h3>我想知道 GPU 在忙什么</h3><p>04 → 05 → 06 → 07 → 08</p><span class="path-cta">追踪 token 到 kernel <b>→</b></span></a>
+          <a class="path-card reveal reveal-delay-2" href="#chapters"><span class="path-icon">⌁</span><small>03 / 面向生产</small><h3>我想做性能分析</h3><p>07 → 08 → 09 → 10</p><span class="path-cta">从执行到可复现实验 <b>→</b></span></a>
+        </div>
+      </section>
+
+      <section id="about" class="about-section shell reveal">
+        <div class="about-mark">v</div>
+        <div><p class="kicker">ABOUT THE AUTHOR</p><h2>你好，我是 Hawk Wu。</h2><p>我把阅读 vLLM 源码时反复遇到的“入口在哪里、状态谁拥有、为什么这样调度”整理成一份可以跟着走、可以回查、也可以继续维护的中文教程。</p></div>
+        <div class="about-actions"><a class="button button-primary" href="https://github.com/cluster1900/vllm_reader" target="_blank" rel="noreferrer">查看 GitHub 仓库 ↗</a><a class="mail-link" href="mailto:hawk.wu525@gmail.com">hawk.wu525@gmail.com</a></div>
+      </section>
+    </main>
+
+    <footer class="site-footer shell">
+      <span>© 2026 Hawk Wu · vLLM Reader Project</span>
+      <span>Built from <a href="https://github.com/cluster1900/vllm_reader" target="_blank" rel="noreferrer">cluster1900/vllm_reader</a> · <a href="https://github.com/vllm-project/vllm/tree/5893426b88f7b3cd21101d194eb1c6f0a6f0e27b" target="_blank" rel="noreferrer">source revision ↗</a></span>
+    </footer>
+    <script src="main.js"></script>
+  </body>
+</html>
