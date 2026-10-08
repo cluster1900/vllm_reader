@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-08
+verified_at: 2026-10-08
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
-pedagogy_reviewed_at: 2026-09-08
+pedagogy_reviewed_at: 2026-10-08
 scope: "V1 Engine 的异步调度与 batch queue、vLLM compile、piecewise/full CUDA Graph、MRV1/MRV2 dispatch、capture、replay 和 fallback"
 prerequisites:
   - 第04章
@@ -49,7 +49,7 @@ flowchart LR
 
 > **读图方法：** 阅读“本章定位”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
 
-**核心结论：**三者可以协同，但它们不是同一个开关，也不是严格的先后版本。定位性能
+**核心结论：** 三者可以协同，但它们不是同一个开关，也不是严格的先后版本。定位性能
 问题时，必须先确认收益来自哪一层。
 
 本章绑定源码 revision `5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`，沿用以下标签：
@@ -146,10 +146,10 @@ flowchart TB
 
 > **读图方法：** 这是“为什么 decode 更容易暴露 launch 开销”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
-**设计含义：**CUDA Graph 对短小、重复、shape 可覆盖的 decode batch 往往更有吸引力；但这不是
+**设计含义：** CUDA Graph 对短小、重复、shape 可覆盖的 decode batch 往往更有吸引力；但这不是
 “decode 一定更快”的无条件结论。实际收益仍取决于模型、硬件、batch、attention backend 和命中率。
 
-### 生活化类比：硬件级指令流录制与重放宏（Recorded Command Stream / Macro）
+### 生活化类比：预先编排的操作清单
 
 CUDA Graph 可以类比预先定义的一组操作及依赖：CPU 不必每轮重新逐项安排其中的
 GPU 工作，而是启动已经准备好的可执行图。它记录的是操作和地址关系，不是缓存
@@ -224,8 +224,9 @@ sequenceDiagram
 ### 8.2.2 batch queue 先填队列，再取最老结果
 
 当 `vllm_config.max_concurrent_batches > 1` 时，EngineCore 使用
-`step_with_batch_queue()`。它优先在队列未满时调度和提交新 batch，只有队列已满或没有更多可调度
-工作时，才等待最老 future。
+`step_with_batch_queue()`。普通路径优先提交新 batch，队列达到容量或没有后续工作时，
+等待最老 Future。若新 batch 的 structured-output grammar 依赖上一轮结果，则需要先结算
+旧输出，即使队列还没满；第 03 章 3.11.3 节解释这一例外。
 
 [源码] `vllm/v1/engine/core.py` - `EngineCore.__init__`、`EngineCore.step_with_batch_queue`
 
@@ -234,13 +235,17 @@ flowchart TD
     A["进入 step_with_batch_queue"] --> B{"queue 未满且还有请求?"}
     B -- 是 --> C["schedule 新 batch"]
     C --> D["execute_model non-blocking"]
-    D --> E["把 future 放到队首"]
+    D --> DEP{"需等待上一轮 grammar 状态?"}
+    DEP -- 否 --> E["把 future 放到队首"]
+    DEP -- 是 --> WAIT["暂存新 batch 的调度结果"]
+    WAIT --> H
     E --> F{"仍有空位且可继续?"}
     F -- 是 --> G["立即返回，不等结果"]
     F -- 否 --> H["从队尾取最老 batch"]
     B -- 否 --> H
     H --> I["future.result"]
     I --> J["update_from_output"]
+    J -. 若有暂存 batch .-> RESUME["生成 grammar 并提交 sample Future"]
 ```
 
 > **读图方法：** 这是“batch queue 先填队列，再取最老结果”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
@@ -268,7 +273,7 @@ flowchart LR
 
 > **读图方法：** 阅读“`max_concurrent_batches` 从哪里来”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
 
-**纠正：**batch queue 不等于 `AsyncScheduler`。PP 即使不启用 async scheduler，也可能因为填充
+**纠正：** batch queue 不等于 `AsyncScheduler`。PP 即使不启用 async scheduler，也可能因为填充
 pipeline 而拥有并发 batch 队列；`AsyncScheduler` 进一步改变 request progress 的表示，使同一请求在
 输出尚未回到 CPU 时仍可继续被调度。
 
@@ -525,7 +530,7 @@ flowchart TB
 
 > **读图方法：** 这张图用于压缩“异步正确性的本质”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
-**设计含义：**异步优化不是单纯把 `future.result()` 移走，而是把状态机从“只有已知进度”升级为
+**设计含义：** 异步优化不是单纯把 `future.result()` 移走，而是把状态机从“只有已知进度”升级为
 “可提交内容的边界 + 在途工作”。若没有这个双边界模型，吞吐提升会直接变成状态一致性问题。
 
 ## 8.5 输出异步拷贝：另一个重叠层
@@ -988,7 +993,7 @@ NONE, PIECEWISE, FULL
 
 [源码] `vllm/forward_context.py` - `ForwardContext`、`set_forward_context`
 
-**纠正：**日志显示配置为 `FULL_AND_PIECEWISE`，不代表某个 batch 的 runtime mode 也叫
+**纠正：** 日志显示配置为 `FULL_AND_PIECEWISE`，不代表某个 batch 的 runtime mode 也叫
 `FULL_AND_PIECEWISE`。必须看该 batch 最终 dispatch 的 `FULL`、`PIECEWISE` 或 `NONE`。
 
 ### 8.10.3 四种执行层级
@@ -1163,7 +1168,7 @@ flowchart LR
 
 > **读图方法：** 这是“wrapper 不拥有持久输入 buffer”的流程图。先从左向右只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
-**纠正：**把 `CUDAGraphWrapper` 看成“自动静态化任意 Python 函数”的容器是错误的。它只负责在
+**纠正：** 把 `CUDAGraphWrapper` 看成“自动静态化任意 Python 函数”的容器是错误的。它只负责在
 已经满足输入、shape 和 context 契约后执行 capture/replay。
 
 ### 8.12.3 nested wrappers 如何共存
@@ -1574,6 +1579,16 @@ FULL graph 绑定 KV pointer，profiling 只捕获最大的少数 descriptor，�
 $$
 M_{\mathrm{available\ KV}}\approx M_{\mathrm{requested}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph\ reserve}}
 $$
+
+各项单位均为 byte；`requested` 是设备总显存乘 `gpu_memory_utilization`，`nonKV` 是
+profile 得到的非 KV 占用，`graph reserve` 是实际应用的 graph 估算。该式描述自动预算路径，
+不覆盖显式 `kv_cache_memory_bytes` 的手动容量分支。固定 revision 默认启用
+`VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1`；禁用该项只改变估算是否扣除，不代表 graph
+运行时不占显存。
+
+[源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`
+
+[源码] `vllm/envs.py` - `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS`
 
 捕获更多 graph 可能减少 launch/padding，却压缩 KV block 数，进而降低并发容量或增加抢占。优化不能
 只看单 step latency。

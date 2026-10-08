@@ -4,7 +4,7 @@ author:
   - "Hawk Wu"
 author-email: "hawk.wu525@gmail.com"
 lang: zh-CN
-date: "2026-09-08"
+date: "2026-10-08"
 rights: "本书正文采用项目约定许可；上游 vLLM 源码归原项目贡献者所有。"
 description: "面向初中级程序员与软件工程类学生的 vLLM V1 源码导读。"
 publisher: "vLLM Reader Project"

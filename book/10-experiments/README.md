@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-08
+verified_at: 2026-10-08
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
-pedagogy_reviewed_at: 2026-09-08
+pedagogy_reviewed_at: 2026-10-08
 scope: "端到端 benchmark、指标语义、profiling、参数实验、归因和回归验证"
 prerequisites:
   - 第04章
@@ -179,10 +179,10 @@ SSE 事件。下表沿用本章 `bench serve` 的客户端计时起点，并与�
 
 | 指标 | 体验上的近似对应 | 本章测量口径 | 需要注意 |
 |---|---|---|---|
-| TTFT | 等待首次响应 | HTTP 发送到首个被适配器计入的流式事件 | 不含发送前 semaphore 排队；也未必等于首个可见汉字 |
+| TTFT | 等待首次响应 | 请求函数内 HTTP 调用前的计时点，到首个被适配器计入的流式事件 | 不含请求函数前的 semaphore 排队；也未必等于首个可见汉字 |
 | TPOT | 首次响应后的平均生成速度 | $\frac{\mathrm{E2EL}-\mathrm{TTFT}}{N-1}$，`N>1` | 单位为秒/token，不能按汉字数计算 |
 | ITL | 流式更新是否有长间隔 | 相邻被计入的流式事件间隔 | 事件可能含多个 token，不是逐字时间 |
-| E2EL | 等待整个回复结束 | HTTP 发送到适配器规定的末计时点 | 相同口径且 `N>1` 时为 $\mathrm{TTFT}+(N-1)\mathrm{TPOT}$ |
+| E2EL | 等待整个回复结束 | 请求函数内 HTTP 调用前的计时点，到适配器规定的末计时点 | 相同口径且 `N>1` 时为 $\mathrm{TTFT}+(N-1)\mathrm{TPOT}$ |
 
 例如生成 5 个 token，TTFT=0.3 秒、TPOT=0.05 秒，则 E2EL=0.5 秒；若用户在发送
 之前已经等待 0.2 秒，UI 的总体验还需单独计入这段等待。
@@ -1057,7 +1057,9 @@ flowchart LR
 
 ### 10.17.1 `benchmarks/benchmark_block_pool.py`
 
-该微基准反复调用 `BlockPool.get_new_blocks` 和 `free_blocks`，每组前执行 GC，输出内存分配的平均耗时与最大耗时（微秒）。它能回答 Python block allocator 在指定 pool/allocate size 下的成本，不能说明完整 KV
+该微基准反复调用 `BlockPool.get_new_blocks` 和 `free_blocks`，每组前执行 GC，输出 block
+元数据分配与回收的平均、最大耗时（微秒）。它没有为每个 block 重新申请 GPU 物理显存，
+只能回答 Python block allocator 在指定 pool/allocate size 下的成本，不能说明完整 KV
 Cache 或 GPU attention 性能。
 
 ### 10.17.2 prefix cache benchmark
@@ -1234,24 +1236,49 @@ trace 显示最长 prefill step 从 D ms 降至 E ms，GPU idle 增加 F%。所�
 ### 10.20.1 为什么不选“分数最高的一行”
 
 多个参数共同决定 throughput、latency、显存和成本，通常不存在所有指标都最优的配置。
-Pareto frontier 保留那些没有被另一配置同时在所有目标上击败的点。
+若方案 B 在所有目标上都不差于 A，且至少一个目标严格更好，就称 B **支配** A。
+Pareto frontier（帕累托前沿）保留未被其他候选支配的方案；并不要求每个目标都严格改善。
+
+先看一组教学数据，数值不是 vLLM 实测结果。假设只优化吞吐和 p99 延迟，且工作负载、
+硬件和正确性条件相同：
+
+| 方案 | 输出吞吐（token/s，越高越好） | p99 延迟（ms，越低越好） | 判断 |
+|---|---:|---:|---|
+| A | 100 | 100 | 被 B 支配：延迟相同，吞吐更低 |
+| B | 150 | 100 | 保留 |
+| C | 200 | 160 | 保留：与 B 各有取舍 |
+| D | 120 | 140 | 被 B 支配：吞吐更低，延迟更高 |
 
 ```mermaid
 flowchart TD
-    subgraph Pareto["吞吐量与 P99 延迟权衡（Pareto Frontier）"]
-        direction TB
-        Q2["【被支配区 Dominated】<br/>低吞吐 / 高延迟 (淘汰劣质配置)"] --- Q1["【高吞吐高延迟区】<br/>吞吐极高但排队加剧 / P99 尾延迟劣化"]
-        Q3["【轻载区 Low Load】<br/>低延迟但吞吐受限 (算力未充分利用)"] --- Q4["【最优前沿 Preferred Frontier】<br/>高吞吐 / 低延迟 (推荐的帕累托平衡点)"]
-    end
+    B["B：150 token/s，100 ms"] -->|支配：延迟相同，吞吐更高| A["A：100 token/s，100 ms"]
+    B -->|支配：两项均更好| D["D：120 token/s，140 ms"]
+    B ---|各有取舍，均保留| C["C：200 token/s，160 ms"]
 ```
 
-> **读图方法：** 这是“为什么不选分数最高的一行”的二维权衡图。先确认两个坐标轴越大分别意味着什么，再看方案落在哪个象限；位置表达相对取舍，不表示未经实验验证的精确性能。
+> **读图方法：** 先沿有向边看 B 为什么能淘汰 A、D，再看 B 与 C 之间表示取舍的无向线。
+> 节点位置不是坐标值，比较依据是上表；读完应能解释为什么高吞吐的 C 和低延迟的 B 都在前沿。
+
+若业务要求 p99 不超过 120 ms，这组候选应选 B；没有该约束时，前沿本身不能替读者决定。
+真实实验还应考虑测量噪声，不能把统计上无法区分的小差异当作确定优势。
+
+教学实现见 `examples/ch10_benchmark_reasoning.py` 的 `pareto_frontier`。
 
 ### 10.20.2 当前 `bench sweep`
 
 `ParameterSweep` 从 JSON 读取命名参数组合，把键归一化为 CLI 参数并运行 server/benchmark
 组合。workload sweep 可以从 serial 到 batch 估计范围，再探索中间 request rate 或
 max concurrency。结果汇总后可绘图。
+
+上面的教学例子使用“吞吐越高、延迟越低”两项目标。当前上游 `plot_pareto.py` 使用的则是
+`tokens_per_user` 与 `tokens_per_gpu`，两轴均越高越好；不能把教学坐标直接当作该工具的输出口径。
+
+**源码边界：** `_pareto_frontier` 按两轴降序排列，再保留第二轴满足
+`y_val >= best_y - epsilon` 的点。这会保留近似持平的点，甚至可能保留“第一轴更小、第二轴
+相同”的被支配点。因此工具画出的集合不严格等同于上文的数学定义，解释报告时应检查
+原始数值和容差。
+
+[源码] `vllm/benchmarks/sweep/plot_pareto.py` - `_pareto_frontier`
 
 ### 10.20.3 每用户与每 GPU 效率
 

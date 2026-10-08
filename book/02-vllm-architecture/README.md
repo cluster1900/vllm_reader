@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-08
+verified_at: 2026-10-08
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
-pedagogy_reviewed_at: 2026-09-08
+pedagogy_reviewed_at: 2026-10-08
 scope: "V1 文本生成主链；覆盖离线 LLM.generate 和 OpenAI-compatible 在线 chat 入口"
 prerequisites:
   - 第01章
@@ -797,9 +797,17 @@ connector metadata、draft token 等。它还不是用户文本。
 
 ### `EngineCoreOutputs` 与 `EngineCoreOutput`
 
-需要注意两者的从属关系：
-- `EngineCoreOutputs` 是跨进程 ZMQ 传输给指定 client 的批次外壳，包含本轮该 client 所有请求的增量输出以及 utility 结果。
-- `EngineCoreOutput` 则是其 `outputs` 列表中的单个请求输出单元：包含该请求本 step 新生成的 `new_token_ids`、finish reason、stop reason、事件及 prefill stats 等。
+两者分别表示输出容器与单请求输出，不能只靠名称中的复数判断进程边界：
+
+- `EngineCoreOutputs` 按 client 组织本轮输出；`outputs` 列表只包含本轮需要交付的请求项，
+  不要求该 client 的所有请求都出现。它还可以携带统计或可选的 `utility_output`。
+  多进程 client 通过 ZMQ 收到此对象，同进程 client 也使用同一输出类型。
+- `EngineCoreOutput` 是 `outputs` 中的单请求输出单元，包含 `new_token_ids`、
+  finish reason、stop reason、事件及 prefill stats 等。
+
+[源码] `vllm/v1/engine/__init__.py` - `EngineCoreOutputs`、`EngineCoreOutput`
+
+[源码] `vllm/v1/engine/core_client.py` - `InprocClient.get_output`
 
 ### `RequestOutput`
 

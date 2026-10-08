@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-08
+verified_at: 2026-10-08
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
-pedagogy_reviewed_at: 2026-09-08
+pedagogy_reviewed_at: 2026-10-08
 scope: "V1 token 级调度、动态批处理、chunked prefill、KV 准入与抢占"
 prerequisites:
   - 第03章
@@ -305,7 +305,11 @@ N_{\mathrm{target}}
 = N_{\mathrm{prompt}} + N_{\text{accepted output}} + N_{\mathrm{spec}}
 $$
 
-$N_{\mathrm{target}}$ 为便于推导引入的教学符号，在源码中即为 `request.num_tokens_with_spec`（即 `len(prompt_token_ids) + len(output_token_ids) + len(spec_token_ids)`）。
+$N_{\mathrm{target}}$ 是教学符号，对应 `request.num_tokens_with_spec`。源码实际返回
+`len(request._all_token_ids) + len(request.spec_token_ids)`；在本章的普通文本生成路径中，
+前一项由 prompt 和已接受输出组成。不能把 `prompt_token_ids` 一定非空当作所有输入模式的契约。
+
+[源码] `vllm/v1/request.py` - `Request.num_tokens_with_spec`、`Request.num_tokens`
 
 忽略异步 placeholder 时，本轮需要追赶的差额为：
 
@@ -780,7 +784,16 @@ Scheduler 与 KV manager 的资源协议。
 
 ## 4.13 Preemption：释放、重置、回队
 
-vLLM V1 放弃了旧版 V0 将 KV Cache 换出到 CPU 内存（Swap）的机制，当前的默认抢占语义是彻底的**丢弃与重算（Recomputation）**：被抢占请求释放所有本地执行与 KV 状态，之后按 prompt 重新计算。
+固定 revision 的 `Scheduler._preempt_request()` 采用**释放缓存引用、重置计算进度、重新调度**
+的语义。它保留请求对象及已接受的输出 token，恢复时需要重建的是已有 token 序列的计算状态，
+不是只重算原始 prompt，更不是重新生成已经交付的文本。
+
+释放引用也不等于立即抹掉物理 KV：前缀缓存可能保留可复用的 block，在途执行还可能要求延迟
+释放。后续准入会重新查询本地或远端缓存，命中的部分可以跳过重算；不能把这一路径概括为
+“丢弃所有状态”。
+
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler._preempt_request`、
+`_free_request_blocks`、`schedule`
 
 `_preempt_request()` 的关键动作是：
 
@@ -806,7 +819,9 @@ stateDiagram-v2
     RECOMPUTE --> RUNNING: 进度重新建立
 ```
 
-> **读图方法：** 这是“Preemption：释放、重置、回队”的状态图。先找初始状态，再沿箭头观察触发条件和状态变化；重点不是背状态名，而是弄清谁触发转换、转换后哪些资源需要更新。
+> **读图方法：** 从 RUNNING 追到重新准入，注意归零的是 computed 计数，已接受 token 仍保留。
+> PRESSURE、VICTIM、FREE、RESET、RECOMPUTE 是教学步骤，只有 RUNNING 与 PREEMPTED 对应
+> `RequestStatus` 枚举；释放步骤还可能受在途工作约束。
 
 ### 4.13.1 为什么重置为 0
 

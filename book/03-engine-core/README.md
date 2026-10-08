@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-08
+verified_at: 2026-10-08
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
-pedagogy_reviewed_at: 2026-09-08
+pedagogy_reviewed_at: 2026-10-08
 scope: "V1 Engine 前后端边界、EngineCore 生命周期、主循环、批队列与 IPC"
 prerequisites:
   - 第02章
@@ -130,8 +130,9 @@ core 侧？它是在提交工作、推进工作，还是接收结果？这次调
 
 把 Scheduler 循环放进 `asyncio.create_task()`，并不会自动让其中的同步 CPU 工作
 让出事件循环。将前端请求处理与 EngineCore 主循环分开，可以让两侧独立推进；常见
-启用 GIL 的 CPython 部署也可减少解释器锁竞争。这是出于架构解耦与规避 Python GIL
-争用的工程设计；实际吞吐与延迟收益取决于具体的请求工作负载、模型大小及硬件环境。离线还保留显式关闭多进程的 InprocClient。
+启用 GIL 的 CPython 部署也可减少两侧对同一解释器锁的竞争。**推断：** 这是对上述
+进程分工的工程解释；仅凭分工不能证明具体收益，吞吐与延迟仍需实测。离线还保留
+显式关闭多进程的 `InprocClient`。
 
 进程隔离也提供故障检测边界，但**不等于自动恢复服务**。当前
 `MPClient.start_engine_core_monitor` 发现 core 意外退出后标记 `engine_dead` 并清理，

@@ -15,8 +15,9 @@
 - 分支：`main`
 - Commit：`5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`
 - 基线日期：2026-09-07
-- 文档状态：第 01 至 10 章正文、图解、教学代码和实验模板均已完成
-- 本轮全书复核：2026-09-08；修正源码语义、图示和教学示例，增加分层路线与小练习。
+- 文档状态：第 01 至 10 章已有正文、图解、11 个教学程序和实验模板，均保持 `draft`
+- 最近文档复核：2026-10-08；修正抢占、采样、显存估算、UVA、并行回复与 Pareto 解释，
+  同步检查实验记录、网页说明与 EPUB。见[本轮问题与验证记录](meta/full-document-review-2026-10-08.md)。
 - [首次逐章检查记录](meta/full-book-review-2026-09-08.md)与[再次复核记录](meta/final-source-review-2026-09-08.md)：问题、证据、验证结果及未运行范围。
 
 正式章节必须绑定自己的源码 commit。上游更新后，不得假设旧结论仍然有效。
@@ -51,9 +52,12 @@ Source 设为 `Deploy from a branch`，选择 `main` 和 `/docs` 目录即可发
 项目将 Mermaid 图和 LaTeX 公式渲染为自包含 SVG，再由 Pandoc 生成 EPUB3：
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 python3 scripts/build_epub.py
 ```
+
+构建还需要 Python 3、Pandoc、Node.js，以及 `epub/puppeteer-config.json` 中指定的浏览器。
+默认浏览器路径适用于 macOS 上的 Google Chrome；在其他机器上需改为本机可执行文件路径。
 
 封面使用 `epub/cover-imagegen.png`，由 imagegen 生成并作为 EPUB3 封面图片嵌入。
 默认产物为 `dist/vllm-source-guide.epub`。构建结束时会自动运行

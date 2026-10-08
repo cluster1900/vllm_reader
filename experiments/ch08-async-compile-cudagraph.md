@@ -1,5 +1,9 @@
 # 第 08 章实验：异步执行、编译与 CUDA Graph
 
+2026-10-08 复跑：本章 CPU 教学程序与测试结果见
+[全项目文档复核记录](../meta/full-document-review-2026-10-08.md)。以下历史观察保留原日期；
+待执行的 GPU 步骤仍是实验方案，不表示已经运行。
+
 2026-09-08 全书复核补记：本地 CPU 重跑的版本、环境、命令与结果统一记录在
 [全书检查报告](../meta/full-book-review-2026-09-08.md)。下文历史输出保留原日期；GPU
 实验表格是待执行模板，空白不代表零值或测试通过。
@@ -20,6 +24,7 @@ python3 -m unittest tests.test_ch08_async_compile_graph -v
 
 ```text
 source commit:
+reader commit / dirty diff:
 date:
 GPU / driver / CUDA / PyTorch / vLLM:
 model revision / dtype / quantization:
@@ -51,6 +56,7 @@ C3: VLLM_COMPILE, cudagraph FULL_AND_PIECEWISE
 ```text
 startup total / compile / capture
 graph memory / KV blocks / peak memory
+VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS / applied estimate
 request throughput / output token throughput
 TTFT p50/p95/p99
 TPOT p50/p95/p99

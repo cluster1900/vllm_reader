@@ -11,14 +11,18 @@ EngineCore、Scheduler、KV Cache、PagedAttention、模型执行、CUDA Graph �
 
 ## 源码基线
 
-- Repository: `vllm-project/vllm`
+- 源码仓库：`vllm-project/vllm`
 - Commit: `5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`
-- Branch: `main`
-- Static review: `2026-09-08`
-- Runtime GPU verification: not completed
+- 源码分支：`main`（工作区无未提交修改）
+- 最近文档与重点源码复核：`2026-10-08`
+- 真实 GPU 运行验证：尚未完成
 
 章节中的“源码事实”均绑定上述 revision。标为 `draft` 的章节表示正文已经形成，但真实
 NVIDIA GPU 动态实验或独立人工复核尚未全部完成。
+
+正文中 `verified_at` 记录最近的静态核对日期，应与 `status`、`runtime_verified` 一起看，
+不能单靠这个日期判断已经通过运行验证。教学程序只验证本书的简化模型，不能替代
+真实 vLLM 的模型、设备与服务端实验。
 
 ## 阅读方法
 

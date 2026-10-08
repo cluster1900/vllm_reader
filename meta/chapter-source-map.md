@@ -59,7 +59,8 @@
 14. 明确 PCP 与 DCP 不是同一功能：PCP 增加 worker 并切 prefill chunks；DCP 复用 ranks 切
     decode context，partial attention 必须用 LSE 权重合并，不能直接平均。
 15. 修正“TTFT 包含客户端并发队列”的表述：当前 `bench serve` 在获得 semaphore 后才记录
-    request `start_time`，TTFT/E2EL 从真实 HTTP send 计算；semaphore 等待单独写入
+    request `start_time`，TTFT/E2EL 从请求函数内 HTTP 调用前的计时点计算，不能当作网卡实际
+    发包时刻；semaphore 等待单独写入
     `client_queue_time`，但仍影响整个 benchmark duration 与完成吞吐。
 16. 修正“ITL 与 TPOT 是同一指标”的表述：ITL 是流式事件间隔样本，长请求贡献更多样本；
     TPOT 是每请求的 `(E2EL-TTFT)/(output_tokens-1)`，二者权重和 backend chunk 语义不同。
@@ -86,3 +87,18 @@ python3 scripts/check_book.py
 - 07/08：`vllm/v1/worker/gpu/buffer_utils.py` 的 `UvaBuffer`、`UvaBufferPool.copy_to_uva` 与 `StagedWriteTensor` 区分映射访问和 H2D 拷贝。
 
 - 08：将泛称 `test_profile_cudagraph_memory` 替换为实际测试 `test_profile_cudagraph_memory_samples_and_extrapolates` 与 `test_profile_cudagraph_memory_frees_throwaway_pool`，位于 `tests/v1/worker/test_gpu_model_runner_v2_cudagraph_profiling.py`。定义引用由 AST 按完整名称检查，不再仅匹配前缀。
+
+## 2026-10-08 核对补充
+
+- 01：`vllm/v1/kv_cache_interface.py` 的 `AttentionSpec`、`MLAAttentionSpec` 区分普通 K/V
+  容量公式与 MLA 的实际缓存表示。
+- 06：`vllm/v1/worker/gpu/buffer_utils.py` 的 `StagedWriteTensor.apply_write` 区分通过
+  UVA 读取写入元数据与通过 H2D 搬运写入内容；多 group 时由 `FusedStagedWriter.apply`
+  合并写入，入口见 `BlockTables.apply_staged_writes`。
+- 07/08：`vllm/envs.py` 的 `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` 默认值为 `1`，
+  与 `Worker.determine_available_memory` 中是否应用估算的分支一起阅读。
+- 09：`vllm/v1/worker/gpu/model_runner.py` 的 `GPUModelRunner.sample` 包含 TP batch-sharded
+  sampling；Executor 的唯一回复 rank 不等于唯一计算 rank。
+
+这些补充不改变各章范围。完整问题、证据与验证记录见
+[全项目文档复核](full-document-review-2026-10-08.md)。

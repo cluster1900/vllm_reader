@@ -27,7 +27,7 @@
 | Prefix caching | 复用不同请求间相同前缀对应的已计算 KV blocks。 |
 | Continuous batching | 每个执行 step 都允许请求加入、退出或推进的动态批处理方式。 |
 | Chunked prefill | 将长 prompt 的 prefill 拆成多个 token chunk，避免独占一个 batch。 |
-| Preemption | 资源不足时暂停或移出请求，并在后续重新调度。 |
+| Preemption | 资源不足时移出运行集合并重新调度；本书固定 revision 保留已接受 token、重置计算进度并释放缓存引用，恢复时可重新命中前缀。 |
 | Scheduler | 根据请求状态、token budget 和缓存容量决定当前 step 执行内容的组件。 |
 | EngineCore | V1 中拥有 Scheduler、KV Cache 管理并协调模型执行的后端核心。 |
 | Executor | 将模型执行操作派发到一个或多个 Worker 的抽象层。 |
@@ -90,12 +90,12 @@
 | PCP / DCP | Prefill / Decode Context Parallel；PCP 增加 worker 维度，DCP 复用已有 ranks，合法组合须查配置。 |
 | LSE | Log-Sum-Exp，$\log\sum_j\exp(s_j)$；保留局部 softmax 的归一化总量，供跨分块或 rank 合并。 |
 | SLO / goodput | 预先规定的服务目标 / 每秒同时满足所配置目标的成功请求数。 |
-| TPOT / E2EL | 首事件后平均每输出 token 时间 / 从发送到适配器规定末事件的端到端延迟。 |
+| TPOT / E2EL | 对 `N>1` 的请求，TPOT 为 `(E2EL-TTFT)/(N-1)`；E2EL 从请求函数内 HTTP 调用前的计时点到适配器规定的末事件。一个事件不保证等于一个 token。 |
 | Percentile / p99 | 对样本排序后的百分位；p99 不是最大值，计算需明确插值方法与样本量。 |
 | CV | 标准差除以均值，表示相对波动；均值为零时不能直接作此除法。 |
 | RPS / TPS | 每秒请求数 / 每秒 token 数；TPS 必须指明输入、输出或两者总和。 |
 | Benchmark / profiler | 测量性能的实验 / 解释执行时间和资源消耗的诊断工具。 |
-| Pareto frontier | 没有被其他方案同时在所有目标上压过的候选集合，不自动选出唯一最佳项。 |
+| Pareto frontier | 帕累托前沿；若另一方案在全部目标上都不差、且至少一项严格更好，当前方案就被支配。前沿保留未被支配的候选，不自动选出唯一最佳项。 |
 | Arithmetic intensity | 算术强度，每搬运一字节数据对应的浮点运算量；prefill/decode 的瓶颈还取决于 batch、模型、设备和实现。 |
 | Static memory pool | 启动时按预算预分配、运行时复用的内存池；KV 池不等于全部可用显存，请求 free 通常只释放池内引用。 |
 | Capture / replay | 记录操作及依赖 / 重放可执行图；只作用于已捕获且满足条件的区域，不等于整个 step 只需一次提交。 |

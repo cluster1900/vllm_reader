@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-08
+verified_at: 2026-10-08
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
-pedagogy_reviewed_at: 2026-09-08
+pedagogy_reviewed_at: 2026-10-08
 scope: "分页 KV 寻址、block table、slot mapping、attention metadata、backend 选择和当前 FlashAttention 路径"
 prerequisites:
   - 第01章
@@ -166,7 +166,7 @@ flowchart TD
 
 > **读图方法：** 阅读“操作系统分页类比：哪里像，哪里不像”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
-**设计含义：**“像虚拟内存”只用于建立地址翻译直觉。调试时仍应回到 vLLM 自己的对象、
+**设计含义：** “像虚拟内存”只用于建立地址翻译直觉。调试时仍应回到 vLLM 自己的对象、
 tensor shape 和 kernel 参数。
 
 ## 6.3 六种容易混淆的 block
@@ -328,7 +328,7 @@ flowchart LR
 
 > **读图方法：** 这张图用于压缩“Allocation Block 与 Kernel Block 不一定相等”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
-**源码事实：**Model Runner V1（MRV1，对应 `vllm/v1/worker/gpu_model_runner.py`）的 `BlockTable.map_to_kernel_blocks()` 与 Model Runner V2（MRV2，对应 `vllm/v1/worker/gpu/model_runner.py`）的
+**源码事实：** MRV1 的 `BlockTable.map_to_kernel_blocks()` 与 MRV2 的
 `BlockTables.append_block_ids()` 都执行这种展开；上游测试验证 manager ID `10,11` 在
 `32 -> 16` 时变成 `20,21,22,23`。
 
@@ -396,7 +396,18 @@ flowchart LR
 
 > **读图方法：** 这张图用于压缩“从状态行 gather 成本轮批次行”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
-MRV1 路径使用 `commit_block_table()` 把 CPU buffer 的有效请求行复制到设备；MRV2 则通过统一虚拟寻址（UVA，允许 GPU 直接访问 Host 端锁定内存）维护暂存写入（staged write），并在 GPU 端执行行收集（gather）。两条路径对象名相近，但不要把实现细节混写。
+MRV1 路径使用 `commit_block_table()` 把 CPU buffer 的有效请求行复制到设备。MRV2 的
+单 cache group 路径调用 `StagedWriteTensor.apply_write()`，把写入内容通过 H2D 复制到设备，让 GPU 通过 UVA
+访问映射后的主机端索引、起点与长度，再更新 GPU block table，最后按本轮请求顺序 gather。
+UVA 不是所有数据都免拷贝的保证；两条路径对象名相近，数据搬运方式却不同。
+
+多 cache group 时，`BlockTables.apply_staged_writes()` 改用 `FusedStagedWriter.apply()`，
+汇总各组写入并用一个 kernel 应用。该分支同样区分 H2D 内容与 UVA 元数据，不能把它
+画成每组都独立调用一次 `apply_write()`。
+
+[源码] `vllm/v1/worker/gpu/buffer_utils.py` - `StagedWriteTensor.apply_write`、`FusedStagedWriter.apply`
+
+[源码] `vllm/v1/worker/gpu/block_table.py` - `BlockTables.apply_staged_writes`、`gather_block_tables`
 
 ### 6.6.3 为什么 dummy 行必须清零
 
@@ -570,7 +581,7 @@ flowchart TB
 
 > **读图方法：** 这是“Ragged Batch：两个边界数组胜过 padding 矩阵”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
-**源码事实：**`CommonAttentionMetadata.naive_query_lens()` 计算 start location 的相邻差；
+**源码事实：** `CommonAttentionMetadata.naive_query_lens()` 计算 start location 的相邻差；
 `compute_num_computed_tokens()` 在 device 上执行 `seq_lens - query_lens`。源码还弃用了隐式生成
 CPU `seq_lens` 的便捷路径，因为 H-D 同步会破坏全异步调度。
 
@@ -730,7 +741,7 @@ flowchart TD
 
 > **读图方法：** 阅读“Model Runner 构造 metadata 的真实顺序”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
-**设计含义：**metadata build 位于每轮热路径。任何隐式 CPU-GPU 同步、临时 tensor 分配或过多
+**设计含义：** metadata build 位于每轮热路径。任何隐式 CPU-GPU 同步、临时 tensor 分配或过多
 Python 分支都可能影响 decode 延迟。因此源码中的持久 buffer、device-side 长度和 update 快速
 路径不是“工程杂项”，而是 attention 性能接口的一部分。
 

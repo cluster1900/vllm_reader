@@ -4,6 +4,7 @@
   "source_commit": "5893426b88f7b3cd21101d194eb1c6f0a6f0e27b",
   "chapters": {
     "01-transformer-inference": [
+      {"path": "vllm/v1/kv_cache_interface.py", "symbols": ["class AttentionSpec", "class MLAAttentionSpec"]},
       {"path": "vllm/model_executor/models/llama.py", "symbols": ["class LlamaModel", "class LlamaForCausalLM"]},
       {"path": "vllm/model_executor/layers/attention/attention.py", "symbols": ["class Attention", "def forward"]},
       {"path": "vllm/model_executor/layers/logits_processor.py", "symbols": ["class LogitsProcessor"]},
@@ -68,6 +69,7 @@
       {"path": "tests/v1/core/test_reset_prefix_cache_e2e.py", "symbols": ["def test_reset_prefix_cache_e2e"]}
     ],
     "06-paged-attention": [
+      {"path": "vllm/v1/worker/gpu/buffer_utils.py", "symbols": ["class StagedWriteTensor", "def apply_write", "class FusedStagedWriter", "def apply"]},
       {"path": "vllm/model_executor/layers/attention/attention.py", "symbols": ["class Attention", "def get_attention_context", "def unified_kv_cache_update", "def unified_attention_with_output"]},
       {"path": "vllm/v1/attention/backend.py", "symbols": ["class AttentionBackend", "class CommonAttentionMetadata", "class AttentionMetadata", "class AttentionMetadataBuilder", "class AttentionImpl"]},
       {"path": "vllm/v1/attention/selector.py", "symbols": ["class AttentionSelectorConfig", "def get_attn_spec_kind", "def get_attn_backend"]},
@@ -85,6 +87,7 @@
       {"path": "tests/v1/attention/test_cuda_backend_probe_errors.py", "symbols": ["def test_get_valid_backends_records_environment_failure", "def test_selected_backend_probe_failure_raises_value_error_with_cause"]}
     ],
     "07-model-execution": [
+      {"path": "vllm/envs.py", "symbols": ["VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"]},
       {"path": "vllm/v1/executor/abstract.py", "symbols": ["class Executor", "def get_class", "def execute_model", "def sample_tokens"]},
       {"path": "vllm/v1/executor/uniproc_executor.py", "symbols": ["class AsyncOutputFuture", "class UniProcExecutor", "class ExecutorWithExternalLauncher", "def collective_rpc"]},
       {"path": "vllm/v1/executor/multiproc_executor.py", "symbols": ["class MultiprocExecutor", "def collective_rpc", "class WorkerProc", "def worker_busy_loop", "def _execute_worker_rpc", "def async_output_busy_loop"]},
@@ -110,6 +113,7 @@
       {"path": "tests/test_config.py", "symbols": ["VLLM_USE_V2_MODEL_RUNNER"]}
     ],
     "08-compile-cuda-graph": [
+      {"path": "vllm/envs.py", "symbols": ["VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"]},
       {"path": "vllm/config/vllm.py", "symbols": ["OPTIMIZATION_LEVEL_TO_CONFIG", "def max_concurrent_batches", "def _maybe_override_dynamic_sd_cudagraph_mode"]},
       {"path": "vllm/config/scheduler.py", "symbols": ["class SchedulerConfig", "async_scheduling", "def get_scheduler_cls"]},
       {"path": "vllm/config/compilation.py", "symbols": ["class CompilationMode", "class CUDAGraphMode", "class CompilationConfig", "def compute_hash", "def set_splitting_ops_for_v1", "def resolve_cudagraph_mode_and_sizes"]},

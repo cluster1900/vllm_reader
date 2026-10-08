@@ -1,5 +1,9 @@
 # 第 06 章实验：分页寻址与 Attention Backend
 
+2026-10-08 复跑：本章 CPU 教学程序与测试结果见
+[全项目文档复核记录](../meta/full-document-review-2026-10-08.md)。以下历史观察保留原日期；
+待执行的 GPU 步骤仍是实验方案，不表示已经运行。
+
 2026-09-08 全书复核补记：本地 CPU 重跑的版本、环境、命令与结果统一记录在
 [全书检查报告](../meta/full-book-review-2026-09-08.md)。下文历史输出保留原日期；GPU
 实验表格是待执行模板，空白不代表零值或测试通过。
@@ -15,7 +19,7 @@ verified date: 2026-09-07
 ```
 
 ```bash
-git -C /Users/hawk_wu/Desktop/vllm rev-parse HEAD
+git -C "${VLLM_SOURCE_DIR:-../vllm}" rev-parse HEAD
 python3 --version
 nvidia-smi
 ```
@@ -26,7 +30,7 @@ nvidia-smi
 ## 2. CPU 教学模型
 
 ```bash
-cd /Users/hawk_wu/Desktop/vllm_reader
+# 在 vllm_reader 仓库根目录运行
 python3 examples/ch06_paged_addressing.py
 python3 -m unittest tests.test_ch06_paged_addressing -v
 ```

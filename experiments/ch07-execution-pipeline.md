@@ -1,5 +1,9 @@
 # 第 07 章实验：从 SchedulerOutput 到 ModelRunnerOutput
 
+2026-10-08 复跑：本章 CPU 教学程序与测试结果见
+[全项目文档复核记录](../meta/full-document-review-2026-10-08.md)。以下历史观察保留原日期；
+待执行的 GPU 步骤仍是实验方案，不表示已经运行。
+
 2026-09-08 全书复核补记：本地 CPU 重跑的版本、环境、命令与结果统一记录在
 [全书检查报告](../meta/full-book-review-2026-09-08.md)。下文历史输出保留原日期；GPU
 实验表格是待执行模板，空白不代表零值或测试通过。
@@ -45,9 +49,14 @@ actual graph pool memory after capture
 用相同模型、prompt、seed 和其余参数分别运行：
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=0 <same command>
-VLLM_USE_V2_MODEL_RUNNER=1 <same command>
+# MODEL 指向两种 Runner 都支持的同一模型；两组均完成相同预热。
+MODEL=/path/to/model
+VLLM_USE_V2_MODEL_RUNNER=0 vllm bench latency --model "$MODEL" --input-len 128 --output-len 32 --batch-size 1
+VLLM_USE_V2_MODEL_RUNNER=1 vllm bench latency --model "$MODEL" --input-len 128 --output-len 32 --batch-size 1
 ```
+
+以上是待在 GPU 上运行的延迟对照命令。`bench latency` 不会替你导出逐 token 的
+正确性对照；下面的 token/logprobs 检查需要另行保存生成结果。
 
 先用 greedy 比 token/logprobs，再增加 temperature/top-k/top-p。分开记录 prepare、forward、sample、
 D2H、峰值显存与 block 数。若强制 MRV2 因不支持组合报错，应记录能力边界，不能删参数后宣称原组合

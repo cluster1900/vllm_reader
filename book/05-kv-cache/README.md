@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-08
+verified_at: 2026-10-08
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
-pedagogy_reviewed_at: 2026-09-08
+pedagogy_reviewed_at: 2026-10-08
 scope: "KV Cache 规格、显存初始化、block 生命周期、prefix caching 与基础 offload 边界"
 prerequisites:
   - 第01章
@@ -950,7 +950,8 @@ request.num_tokens - 1
 因为模型仍需对最后一个 prompt token 执行计算以得到下一 token 的 logits。当前
 `allocate_slots()` 又要求常规 computed token 边界满足 block 对齐，所以一个 8-token prompt、
 block size 4，即使两个 block 都缓存，实际常规命中可能只取前 4 token，重算最后一整个
-block，而不只是 token 7。这是当前分配器要求已计算 token 边界必须保持 block 对齐的工程权衡，用少量的局部重算换取全局分块索引的简洁性；如果未来支持非对齐的局部尾块计算，则仅需重算单个末尾 token。
+block，而不只是 token 7。这里描述的是常规完整 block 命中路径；5.15 节的条件化
+partial-tail 命中可能到达更细的 hash 边界，但也不保证只需重算一个 token。
 
 ```mermaid
 flowchart LR
@@ -962,8 +963,13 @@ flowchart LR
 
 > **读图方法：** 这张图用于压缩“为什么全 prompt 命中仍重算最后 token”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
-这是一项当前实现边界，不是“理论上 KV Cache 必须如此”。源码注释也说明未来解除对齐
-限制后可能略微改善。
+这是一项实现边界，不是 KV Cache 的数学要求。`get_computed_blocks()` 的注释提出解除
+对齐限制可能减少重算，这是**设计意图**；该注释没有覆盖同 revision 中所有 partial-tail 分支。
+
+[源码] `vllm/v1/core/kv_cache_manager.py` - `KVCacheManager.get_computed_blocks`
+
+[测试] `tests/v1/core/prefix_cache/test_partial_prefix_cache_hits.py` -
+`test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue`
 
 ### 5.12.3 命中后的共享
 

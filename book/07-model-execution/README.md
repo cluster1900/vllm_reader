@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-08
+verified_at: 2026-10-08
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
-pedagogy_reviewed_at: 2026-09-08
+pedagogy_reviewed_at: 2026-10-08
 scope: "SchedulerOutput 到 Worker 广播、GPU 输入准备、模型 forward、sampling、异步输出与 ModelRunnerOutput 的完整执行栈"
 prerequisites:
   - 第03章
@@ -136,7 +136,7 @@ flowchart TB
 
 > **读图方法：** 这张图用于压缩“Model 与 Sampler”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
-**设计含义：**所有 rank 没收到 step 是 Executor/RPC 问题；device 选错是 Worker 问题；position 或
+**设计含义：** 所有 rank 没收到 step 是 Executor/RPC 问题；device 选错是 Worker 问题；position 或
 block table 错是 Runner 问题；层数值错是 Model/backend 问题；token 分布错才进入 Sampler。
 
 ### 执行栈所有权与职责矩阵
@@ -178,7 +178,7 @@ flowchart TD
     W --> R2["Model Runner V2 / MRV2"]
 ```
 
-> **读图方法：** 这是“两个V1不是同一个版本维度”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
+> **读图方法：** 先看顶层的 V1 Engine，再看 Worker 下方的两种 Runner。分叉表示配置选择：一次 Worker 实例使用其中一种 Runner，不是先后执行两代 Runner。
 
 所以“用了 V1 Engine，因此一定使用 `vllm/v1/worker/gpu_model_runner.py`”是错误的。GPU Worker 根据
 `VllmConfig.use_v2_model_runner` 选择 MRV1 或 MRV2。两者实现同一上层协议，但内部状态布局、
@@ -481,7 +481,7 @@ flowchart TB
 offload 会改变 I/O 和搬运方式；可靠结论是**最终本地参数由分片感知 loader 填充**，不能无条件
 断言所有格式只从磁盘读取精确 shard 字节。
 
-## 7.9 显存 Profiling：KV Cache 预算的余量划拨机制
+## 7.9 显存 Profiling：怎样算出 KV Cache 预算
 
 用户未显式指定 `kv_cache_memory_bytes` 时，Worker profile 非 KV 峰值并计算：
 
@@ -493,9 +493,17 @@ $$
 - `M_requested = total_memory * gpu_memory_utilization`，不是 free memory 乘利用率；
   启动还会检查 free memory 是否足以满足 requested；
 - `M_nonKV` 包含权重及 profile 期间非 KV 消耗；
-- `M_graph,applied` 是启用相应估算时预留的 CUDA Graph memory。在当前实现中，环境变量 `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` 默认关闭；未显式启用时该项计为 0。
+- `M_graph,applied` 是实际扣除的 CUDA Graph 内存估算。固定 revision 中，环境变量
+  `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` 默认值为 `1`，即默认应用估算；显式设为 `0`
+  才不扣此项。估算本身还要求 CUDA/ROCm 平台和非 `NONE` 的 graph mode，不能把开关开启
+  等同于必有非零预留。
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`
+
+[源码] `vllm/envs.py` - `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS`
+
+Worker 内仍保留“opt-in”措辞的注释，但环境变量的实际默认值已经是 `1`。默认行为应以
+`vllm/envs.py` 的取值和这里的分支为准，不能仅依据注释推断。
 
 ```mermaid
 flowchart TB
@@ -633,10 +641,15 @@ UVA（统一虚拟寻址）帮助设备访问映射后的地址，不表示主�
 每个 step 都重新分配一块内存。类本身还允许 `uva_instead_of_gpu=True`，此时名为
 `gpu` 的成员实际是主机内存的设备视图，字段名不决定物理驻留位置。
 
+这是单 cache group 写入的路径；多个 group 的 block table 使用 `FusedStagedWriter.apply`
+合并写入，仍保持相同的数据与元数据搬运边界。
+
 [源码] `vllm/v1/worker/gpu/buffer_utils.py` - `UvaBuffer`、`UvaBufferPool.copy_to_uva`、
 `StagedWriteTensor.__init__`、`apply_write`
 
-[源码] `vllm/v1/worker/gpu/block_table.py` - `BlockTables.__init__`
+[源码] `vllm/v1/worker/gpu/block_table.py` - `BlockTables.__init__`、`apply_staged_writes`
+
+[源码] `vllm/v1/worker/gpu/buffer_utils.py` - `FusedStagedWriter.apply`
 
 ```mermaid
 flowchart TD
@@ -652,7 +665,7 @@ flowchart TD
 
 > **读图方法：** 阅读“StagedWriteTensor 与 async-first”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
-**边界：**设计文档明确保留 feature-complete 与开放设计警告。运行事实仍需看当前配置与源码选择。
+**边界：** 设计文档明确保留 feature-complete 与开放设计警告。运行事实仍需看当前配置与源码选择。
 
 ## 7.13 输入准备：request slices 变成 flat batch
 
@@ -802,7 +815,13 @@ request count、scheduled token count、logits position count 与 generated toke
 
 ## 7.18 Sampling 的准确处理顺序
 
-MRV1 的采样主干依次执行：首先按配置留存原始 logits 与 logprobs 并转为 float32；接着应用允许词表（allowed tokens）、违禁词（bad words）及影响 argmax 的处理器；随后计算惩罚项（penalties）并生成 greedy 候选；再依次完成温度缩放（temperature）、不改变 argmax 的后处理、top-k/top-p 过滤并采样随机候选；最后针对各请求分别在 greedy 与 random 间择优并提取输出概率。
+MRV1 先按配置保存 raw logits 或 raw logprobs，再将待处理 logits 转为 float32，应用
+允许 token 集合、禁用词序列、影响 argmax 的处理器和惩罚项。随后得到 greedy 候选；需要
+随机采样的路径再做温度缩放、不改变 argmax 的处理、top-k/top-p 过滤和随机抽样。
+
+混合 batch 按每个请求的 temperature 选择 greedy 或 random 结果，**没有比较两个候选再
+“择优”的步骤**。全 greedy 的 batch 会提前返回；logprobs 是否返回、表示原始还是处理后的
+分布，由对应配置决定，不能统一叫作“输出概率”。
 
 [源码] `vllm/v1/sample/sampler.py` - `Sampler.forward`
 
@@ -821,7 +840,8 @@ flowchart TD
     RAND --> MIX
 ```
 
-> **读图方法：** 这是“Sampling 的准确处理顺序”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
+> **读图方法：** 从 logits 追到两条候选路径，再看底部按请求参数合并的节点。它表示按
+> temperature 选择，不是按分数择优；第二遍检查全 greedy 提前返回与混合 batch 的区别。
 
 MRV2 模块化采样的执行顺序依次是：logit bias → penalties → bad words → thinking budget（思考预算掩码，用于控制长思考链 token 预算）→ temperature → min-p → top-k/top-p，随后根据配置选择 FlashInfer 或 Triton Gumbel sampling 路径。
 

@@ -1,10 +1,14 @@
 # 第10章性能实验与优化报告
 
+2026-10-08 复跑：本章 CPU 教学程序与测试结果见
+[全项目文档复核记录](../meta/full-document-review-2026-10-08.md)。以下历史观察保留原日期；
+待执行的 GPU 步骤仍是实验方案，不表示已经运行。
+
 2026-09-08 全书复核补记：本地 CPU 重跑的版本、环境、命令与结果统一记录在
 [全书检查报告](../meta/full-book-review-2026-09-08.md)。下文历史输出保留原日期；GPU
 实验表格是待执行模板，空白不代表零值或测试通过。
 
-> 这是可复现实验记录，不是结论先行的调参日志。每个 treatment 只改变已声明的因素，
+> 这是待填写的性能实验模板。每个 treatment 只改变已声明的因素，
 > 所有结果同时经过性能与正确性门槛。
 
 ## 1. 问题与假设
@@ -23,6 +27,7 @@
 | 项目 | 记录 |
 |---|---|
 | 日期 | |
+| Reader commit / dirty diff | |
 | vLLM commit / dirty diff | `5893426b88f7b3cd21101d194eb1c6f0a6f0e27b` / |
 | 模型 revision | |
 | tokenizer revision | |
@@ -65,8 +70,8 @@
 | compile cache 状态 | |
 | CUDA Graph capture 状态 | |
 | 是否包含 detokenize | |
-| TTFT 起止点 | HTTP send -> first valid streamed chunk |
-| E2EL 起止点 | HTTP send -> endpoint-specific final measured event（记录是否含 usage-only） |
+| TTFT 起止点 | 请求函数内 `session.post` 调用前计时点 → 首个被适配器计入的事件 |
+| E2EL 起止点 | 同一计时起点 → 适配器规定的末事件（记录是否含 usage-only） |
 | client queue 是否单列 | |
 | profiler 是否开启 | |
 

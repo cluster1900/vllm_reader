@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-08
+verified_at: 2026-10-08
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
-pedagogy_reviewed_at: 2026-09-08
+pedagogy_reviewed_at: 2026-10-08
 scope: "TP、PP、DP、EP、PCP、DCP 的进程拓扑、通信语义、执行器、负载均衡与多机排障"
 prerequisites:
   - 第03章
@@ -601,7 +601,8 @@ sequenceDiagram
 
 对在发送侧 TP ranks 上重复的完整 tensor，启用张量分片传输与对端聚合优化（`_should_use_all_gather`）后，各 rank **先切片并发送
 自己的片段**；下一个 PP stage 的对应 peer 收到片段，等待接收完成后，再在接收侧
-TP group 内 all-gather 恢复完整 tensor，从而大幅降低跨 stage 通信带宽占用。已经分片的 tensor（例如特定 SP residual）
+TP group 内 all-gather 恢复完整 tensor。这减少了跨 stage 重复发送完整张量的字节数，
+同时增加接收侧 TP group 的通信；端到端收益需要结合互连拓扑测量。已经分片的 tensor（例如特定 SP residual）
 需要关闭该 gather 优化，不能重复切分。
 
 [源码] `vllm/distributed/parallel_state.py` - `GroupCoordinator.isend_tensor_dict`、
@@ -633,7 +634,18 @@ sequenceDiagram
 
 一次 PP+TP forward 需要全部 ranks 参与，然而最终 sampling 结果只需从输出 rank 返回
 EngineCore。MultiprocExecutor 当前计算的输出 rank 与末 PP stage、TP/PCP 布局有关，公式
-为 `world_size - tensor_parallel_size * prefill_context_parallel_size`。该公式定位的是全局拓扑中最后一个流水线阶段（末 stage）的第一个张量并行 Worker（TP rank = 0，并在有 PCP 时对齐基准 rank）。这是因为只有末 stage 才包含 LM head 并执行采样，而同一 TP 组内 rank 0 已聚合了该结果，因此只需此 rank 回传响应即可。不要把“只有一个 response”误解为“只有一个 worker 执行”。
+为 `world_size - tensor_parallel_size * prefill_context_parallel_size`，定位末 PP stage 中
+PCP rank 0、TP rank 0 的 Worker。普通执行路径选择它向 EngineCore 回复，是 Executor 的
+输出路由约定，不表示只有它计算 logits、采样或持有结果。
+
+例如 MRV2 启用 batch-sharded sampling 时，会让不同 TP ranks 为各自负责的请求采样，
+再通过 `gather_sampler_output` 汇合结果。KV/encoder connector 的输出聚合器还可能要求
+Executor 收集多个 rank 的回复；不能把“一份最终响应”写成所有配置下只收一个 rank。
+
+[源码] `vllm/v1/executor/multiproc_executor.py` - `MultiprocExecutor._get_output_rank`、
+`collective_rpc`
+
+[源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.sample`
 
 ### 9.6.7 PP 的气泡
 

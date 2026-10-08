@@ -2,6 +2,9 @@ body {
   font-family: "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
   line-height: 1.7;
   color: #17202a;
+  /* Long source paths must wrap in prose and table cells on small readers. */
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
 }
 
 h1, h2, h3, h4 {
@@ -32,11 +35,26 @@ code {
 }
 
 pre {
+  box-sizing: border-box;
+  max-width: 100%;
   padding: 0.8em;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   background: #f2f3f4;
   border: 1px solid #d5d8dc;
+}
+
+/* Override Pandoc's highlighted-code white-space rule without changing code text. */
+pre > code.sourceCode {
+  white-space: pre-wrap;
+}
+
+pre > code.sourceCode > span {
+  display: inline;
+}
+
+div.sourceCode {
+  overflow: visible;
 }
 
 table {

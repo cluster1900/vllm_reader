@@ -6,11 +6,11 @@ source_path: ../vllm
 source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
 source_branch: main
 source_dirty: false
-verified_at: 2026-09-08
+verified_at: 2026-10-08
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
-pedagogy_reviewed_at: 2026-09-08
+pedagogy_reviewed_at: 2026-10-08
 scope: "decoder-only 文本生成的最小知识闭环；不讲训练与反向传播"
 prerequisites:
   - Python 基础
@@ -121,7 +121,7 @@ flowchart TD
     G --> H[vLLM 源码映射]
 ```
 
-> **读图方法：** 这张图用于压缩“本章阅读路线”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
+> **读图方法：** 从上向下看本章的学习顺序：先理解 token 和模型计算，再引入时间维度与缓存。箭头表示知识铺垫，不是函数调用；第二遍按末尾的源码映射回查实现。
 
 第一次阅读时，先抓住每节开头的图和结论；第二次再手算数值例子并运行代码；第三次
 进入第 1.9 节，逐跳对照 vLLM 源码。不要一开始就在 CUDA kernel 中寻找完整的
@@ -831,8 +831,16 @@ $$
 B_{\mathrm{token}} = 2LH_{\mathrm{kv}}D_h B_{\mathrm{dtype}}
 $$
 
-当前通用 `Attention` 接口已经允许 `head_size_v` 与 `head_size` 不同，因此更一般的
-公式不仅形式上更为严谨，在阅读 MLA（Multi-head Latent Attention）等注意力变体时也是必不可少的；不能继续机械套用前面的 `2×` 简式。
+上述两式都以逐层保存普通 K/V 张量为前提。通用 `Attention` 接口允许 `head_size_v`
+与 `head_size` 不同，此时应使用第一式，不能机械套用 `2×` 简式。
+
+MLA（多头潜在注意力）需要另看实际缓存表示：当前 `MLAAttentionSpec` 使用单份潜在
+状态，并将 `head_size_v` 设为 0；还可能包含量化和对齐开销。不能把模型的 Query/Key/Value
+维度直接代入普通 K/V 公式来估算 MLA 显存，应读取实际 spec 的 `page_size_bytes`。
+
+[源码] `vllm/model_executor/layers/attention/attention.py` - `Attention.__init__`
+
+[源码] `vllm/v1/kv_cache_interface.py` - `AttentionSpec`、`MLAAttentionSpec`
 
 例：32 层、32 个 KV heads、head size 128、FP16/BF16（2 bytes）：
 
@@ -883,7 +891,7 @@ flowchart LR
     LN --> Memory
 ```
 
-> **读图方法：** 阅读“KV Cache 容量公式”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
+> **读图方法：** 从左到右看一个 token 在各层留下的 K/V，再把各层字节数相加。箭头表示容量的组成关系，不表示函数调用；第二遍对照公式检查层数、KV head 数与元素字节数。
 
 这解释了为什么并发请求和长上下文会迅速消耗显存。实际 vLLM 容量还受 block 对齐、
 pipeline/tensor parallel、KV dtype、滑动窗口、MLA、Mamba、prefix sharing 和运行时
