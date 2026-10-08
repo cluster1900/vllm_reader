@@ -133,8 +133,8 @@ flowchart TD
 是 vLLM 已建立可复用的 KV 池，请求释放的是池内 block 的持有关系，物理池仍保留。
 
 自动容量路径先用 `设备总显存 × gpu_memory_utilization` 确定预算，再扣非 KV
-占用和实际应用的 graph 预留；并不是把所有剩余显存都给 KV。显式设置
-`kv_cache_memory_bytes` 时又走手工容量路径。池化减少反复申请物理内存的需求，
+占用和实际应用的 graph 预留；并不是把所有剩余显存都给 KV。显式配置
+`kv_cache_memory_bytes` 时则进入手动显存指定路径。池化减少反复申请物理内存的需求，
 但运行时还有张量写入、拷贝、元数据更新等操作，不能概括为“系统只改 CPU 标志位”。
 
 正常请求 free 不会释放整个 KV backing allocation；只有引用降到零、且没有额外
@@ -166,7 +166,7 @@ KV Cache 的动态性正是分页管理存在的原因。
 TP rank 上每个 token 的 KV 字节数可写为：
 
 $$
-B_{\mathrm{token}}=2\times L\times H_{\mathrm{kv,local}}\times D_{\mathrm{head}}\times B_{\mathrm{dtype}}
+B_{\mathrm{token}}=2\times L\times H_{\mathrm{kv},\mathrm{local}}\times D_{\mathrm{head}}\times B_{\mathrm{dtype}}
 $$
 
 其中：
@@ -387,7 +387,7 @@ offset + l * layer_stride + b * block_stride
 ```
 
 同一 allocation 可以采用 layer-outer 或 block-outer 布局。不同 cache group 还可从同一偏移
-开始发生 alias，因为一个物理 block ID 在同一时刻由一个 group 的逻辑位置占用。
+通过显存别名（alias）机制从 backing allocation 的相同起始偏移处共享底层显存，因为分配器保证一个物理 block ID 在同一时刻仅归属于特定 group 的逻辑位置。
 
 ### 5.4.2 `KVCacheBlock`：Scheduler 侧的小元数据对象
 
@@ -640,10 +640,10 @@ flowchart TB
 `FreeKVCacheBlockQueue` 是侵入式双向链表。block 自己保存前后指针，因此 cache hit 时可以
 O(1) 从链表中间移除，而不是在线性容器中搜索。
 
-队头是下一次分配、必要时也就是下一次 eviction 的候选。它同时编码两类优先级：
+队头是下一次分配、必要时也就是下一次 eviction 的候选。通过双向链表头尾不同的入队策略兼顾两类分配目标：
 
-- 未缓存 block 放到前部，优先快速复用；
-- 已缓存且 `ref_cnt=0` 的 block 放到尾部，形成 LRU 风格淘汰顺序。
+- 未缓存的 block 通过头插法（prepend）置于队首，优先进行 LIFO 快速复用；
+- 已缓存且 `ref_cnt=0` 的 block 则通过尾插法（append）置于队尾，形成近似 LRU 的淘汰顺序。
 
 ### 5.8.3 hash 到 block 的映射
 
@@ -950,7 +950,7 @@ request.num_tokens - 1
 因为模型仍需对最后一个 prompt token 执行计算以得到下一 token 的 logits。当前
 `allocate_slots()` 又要求常规 computed token 边界满足 block 对齐，所以一个 8-token prompt、
 block size 4，即使两个 block 都缓存，实际常规命中可能只取前 4 token，重算最后一整个
-block，而不只是 token 7。
+block，而不只是 token 7。这是当前分配器要求已计算 token 边界必须保持 block 对齐的工程权衡，用少量的局部重算换取全局分块索引的简洁性；如果未来支持非对齐的局部尾块计算，则仅需重算单个末尾 token。
 
 ```mermaid
 flowchart LR

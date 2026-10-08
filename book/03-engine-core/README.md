@@ -130,8 +130,8 @@ core 侧？它是在提交工作、推进工作，还是接收结果？这次调
 
 把 Scheduler 循环放进 `asyncio.create_task()`，并不会自动让其中的同步 CPU 工作
 让出事件循环。将前端请求处理与 EngineCore 主循环分开，可以让两侧独立推进；常见
-启用 GIL 的 CPython 部署也可减少解释器锁竞争。这是对源码分工的工程解释，不是
-未经测量就断言必有某个毫秒数的改善。离线还保留显式关闭多进程的 InprocClient。
+启用 GIL 的 CPython 部署也可减少解释器锁竞争。这是出于架构解耦与规避 Python GIL
+争用的工程设计；实际吞吐与延迟收益取决于具体的请求工作负载、模型大小及硬件环境。离线还保留显式关闭多进程的 InprocClient。
 
 进程隔离也提供故障检测边界，但**不等于自动恢复服务**。当前
 `MPClient.start_engine_core_monitor` 发现 core 意外退出后标记 `engine_dead` 并清理，
@@ -774,7 +774,7 @@ Pause 是 Scheduler 状态，不等于进程退出。
 客户端都已消费完终止消息。DP 另有跨 rank 的暂停协调。
 
 `clear_cache=True` 时，`_finish_pause` 调用的 `_reset_caches` 默认会重置 running
-请求：它们可能被抢占、释放 KV 并归零计算进度。要暂停后保留原 KV 继续计算，应明确
+请求：它们可能被抢占、释放 KV 并将其已计算 token 进度重置为零。要暂停后保留原 KV 继续计算，应明确
 讨论 `keep` 配合 `clear_cache=False`；单看 `keep` 不能推断缓存一定保留。
 
 [源码] `vllm/v1/engine/core.py` - `EngineCoreProc._pause_complete`、`has_work`、
@@ -913,8 +913,8 @@ classDiagram
       +process_output_sockets()
     }
     class EngineCoreActorMixin {
-      +set visible devices
-      +perform handshakes()
+      +_set_visible_devices()
+      +_perform_handshakes()
       +run()
     }
     class EngineCoreActor

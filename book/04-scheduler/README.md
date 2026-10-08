@@ -142,8 +142,7 @@ D 在第 8 轮仍运行；中间省略的轮次没有画出。
 
 ## 4.2 Continuous Batching 的本质
 
-Continuous Batching 更准确的中文是“连续重组批次”：每个 engine step 都允许批次成员
-变化。
+Continuous Batching 通常被译为“连续批处理”或“动态批处理”。在系统实现层面上，它更准确的本质是“逐 step 连续重组批次”：每个 engine step 都允许批次成员与工作量动态变化。
 
 ```mermaid
 sequenceDiagram
@@ -250,8 +249,7 @@ detokenize 和 PagedAttention 的物理寻址实现。
 | `RUNNING` | 已进入运行集合并持有执行侧状态 |
 | `PREEMPTED` | 被抢占后回到等待队列，之后需要恢复 |
 
-枚举中 `PREEMPTED` 之后的状态都被视为 finished，包括 stopped、length capped、aborted、
-ignored、error 和 repetition。
+枚举中 `PREEMPTED` 之后的状态都被视为 finished，包括正常停止（stopped）、达到最大长度（length capped）、客户端中止（aborted）、忽略未处理（ignored）、运行异常（error）以及重复生成触发停止（repetition，对应 `FINISHED_REPETITION`）。
 
 ```mermaid
 stateDiagram-v2
@@ -304,8 +302,10 @@ Scheduler 源码在 `schedule()` 开头明确说明：调度器内部没有必�
 
 $$
 N_{\mathrm{target}}
-= N_{\mathrm{prompt}} + N_{\mathrm{accepted\ output}} + N_{\mathrm{spec}}
+= N_{\mathrm{prompt}} + N_{\text{accepted output}} + N_{\mathrm{spec}}
 $$
+
+$N_{\mathrm{target}}$ 为便于推导引入的教学符号，在源码中即为 `request.num_tokens_with_spec`（即 `len(prompt_token_ids) + len(output_token_ids) + len(spec_token_ids)`）。
 
 忽略异步 placeholder 时，本轮需要追赶的差额为：
 
@@ -317,7 +317,7 @@ $$
 
 $$
 \begin{aligned}
-N_{\mathrm{new}}={}&N_{\mathrm{tokens\ with\ spec}}+N_{\mathrm{placeholders}}\\
+N_{\mathrm{new}}={}&N_{\text{tokens with spec}}+N_{\mathrm{placeholders}}\\
 &-N_{\mathrm{computed}}.
 \end{aligned}
 $$
@@ -574,8 +574,7 @@ flowchart TB
 ### 4.9.1 Skip 与 break 的区别
 
 当前会阻塞 waiting 准入的状态包括：structured-output grammar 尚未就绪、远端 KV 尚未
-接收完成，以及 streaming request 正在等待下一段输入。除此之外，可交付的 stale output
-仍在途（`drop_stale_output=false`）、LoRA 数量限制、connector 暂时无法确定命中长度或
+接收完成，以及 streaming request 正在等待下一段输入。此外，当该请求仍在途且需向客户端交付的过时输出（`drop_stale_output=False`）尚未排空、LoRA 数量限制、connector 暂时无法确定命中长度或
 encoder-cache transfer 尚未完成，也都可能只影响当前请求。源码会把这类请求临时移到
 step-skipped queue，然后继续检查其他请求。若配置为丢弃 stale output，则不需要等待旧
 输出排空，不能把所有 stale 情况都概括为同一条阻塞规则。
@@ -781,7 +780,7 @@ Scheduler 与 KV manager 的资源协议。
 
 ## 4.13 Preemption：释放、重置、回队
 
-当前默认抢占语义接近 recompute：被抢占请求释放本地执行状态，之后重新计算。
+vLLM V1 放弃了旧版 V0 将 KV Cache 换出到 CPU 内存（Swap）的机制，当前的默认抢占语义是彻底的**丢弃与重算（Recomputation）**：被抢占请求释放所有本地执行与 KV 状态，之后按 prompt 重新计算。
 
 `_preempt_request()` 的关键动作是：
 
@@ -998,6 +997,8 @@ request.num_computed_tokens += num_scheduled_token
 request.num_in_flight_tokens += num_scheduled_token
 ```
 
+（注：此处变量名沿用源码在 `_update_after_schedule` 与 `update_from_output` 两处实现中的单复数命名：前者使用 `num_scheduled_token`，后者使用 `num_tokens_scheduled`。）
+
 然后更新 `is_prefill_chunk`。
 
 ```mermaid
@@ -1112,9 +1113,9 @@ sequenceDiagram
 
 否则，新请求或远端 KV load 可能重用一个仍被旧 GPU 工作写入的 block，形成数据竞争。
 
-## 4.21 Pause、Prefill Cadence 与“还有工作”
+## 4.21 系统暂停、Prefill 节拍控制与存活请求判定（has_requests）
 
-> **本节先看：** 本节要回答：**Pause、Prefill Cadence 与还有工作**。下面的小节会逐层拆开概念、运行过程和源码落点；第一次阅读先抓对象之间的关系，第二次再记类名、字段和分支。
+> **本节先看：** 本节要回答：**系统暂停、Prefill 节拍控制与存活请求判定（has_requests）**。下面的小节会逐层拆开概念、运行过程和源码落点；第一次阅读先抓对象之间的关系，第二次再记类名、字段和分支。
 
 ### 4.21.1 Pause
 

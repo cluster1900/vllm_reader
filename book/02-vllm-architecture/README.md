@@ -70,8 +70,7 @@ structured output、speculative decoding 和分离式 prefill/decode 只在它�
 
 **先分清三种并发对象。** 进程拥有自己的内存空间；线程共享所在进程的内存；
 asyncio task 是事件循环调度的一段协程，在 `await` 等待时允许其他 task 继续。
-IPC 是进程间通信，ZMQ 是这里传递消息的库，SSE 是服务器持续向 HTTP 客户端发送事件
-的格式。它们都不会自动让 Transformer 层并行计算。
+ZMQ 负责进程间 IPC 消息传递，SSE 负责向前端 HTTP 客户端持续推送事件；它们解决的是系统层通信与异步并发，不参与模型内部张量的数值并行计算。
 
 **第一遍走法：** 读 2.1–2.4、2.6–2.12，再运行 2.17 的模拟器；用 2.14 检查取消路径。
 **停下来追：** token ID 已从 GPU 返回，为什么用户还没看到文字？先查 OutputProcessor
@@ -173,7 +172,7 @@ KV Cache、attention、sampling 以及必要的 collective。
 | **调料库管员** | `KVCacheManager` | **控制面**：管理公用酱料与已腌制好的半成品（KV Block），告诉总管还能不能接新菜、哪些桌可以复用老汤（Prefix Cache） |
 | **各灶台大厨工位** | `Executor` & `Worker` | **数据面**：管理特定的一台或多台燃气灶（GPU），负责提前把锅烧热、准备设备执行环境 |
 | **炒锅与装盘托盘** | `GPUModelRunner` | **数据面**：把总管派来的单子倒进锅里，装配成火候所需的数据结构（Tensor），驱动锅内翻炒（Model Forward） |
-| **出菜检验打包装盒员** | `OutputProcessor` | **协议面返回端**：从后厨接过刚出锅的菜，核对是否上齐，把 token 逐个转换回人类可读的文字，流式端给顾客（SSE 响应） |
+| **出菜检验打包装盒员** | `OutputProcessor` | **协议面交付层**：从后厨接过刚出锅的菜，核对是否上齐，把 token 逐个转换回人类可读的文字，流式交付给顾客（SSE 响应） |
 
 类比说明职责，不代表真实对象一一对应进程：Model Runner 负责组织计算，模型与 GPU
 算子负责数值运算；OutputProcessor 生成用户层输出，SSE 格式由 API 层包装。
@@ -796,10 +795,11 @@ EngineCore 内部的可变状态对象。它增加：
 执行侧返回的模型级结果，主要包含采样 token、logprobs、pooling output、KV/encoder
 connector metadata、draft token 等。它还不是用户文本。
 
-### `EngineCoreOutput`
+### `EngineCoreOutputs` 与 `EngineCoreOutput`
 
-Scheduler 把模型结果按 request 切分、应用停止条件和状态更新后，形成面向前端的增量
-输出：`new_token_ids`、finish reason、stop reason、事件、prefill stats 等。
+需要注意两者的从属关系：
+- `EngineCoreOutputs` 是跨进程 ZMQ 传输给指定 client 的批次外壳，包含本轮该 client 所有请求的增量输出以及 utility 结果。
+- `EngineCoreOutput` 则是其 `outputs` 列表中的单个请求输出单元：包含该请求本 step 新生成的 `new_token_ids`、finish reason、stop reason、事件及 prefill stats 等。
 
 ### `RequestOutput`
 
@@ -1026,7 +1026,7 @@ sequenceDiagram
     participant EC as EngineCore
     participant S as Scheduler
 
-    User-xG: disconnect / cancel
+    User -x G: disconnect / cancel
     G->>OP: abort_requests(internal id)
     OP-->>G: final abort output + ids to clean
     G->>C: abort_requests_async(ids)

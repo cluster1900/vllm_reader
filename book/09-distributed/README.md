@@ -38,8 +38,8 @@ prerequisites:
 | PP | Transformer layers | 是 | point-to-point send/recv | 单卡放不下全部层 |
 | DP | 请求与整套执行状态 | 否，普通 dense 场景 | 控制面统计或 MoE collective | 扩展总吞吐 |
 | EP | MoE experts | 是 | all-to-all、combine | 分布专家权重和计算 |
-| PCP | prefill token/chunk | 是 | gather、重排 | 分摊长 prompt 的 prefill |
-| DCP | decode KV token/context | 是 | all-gather/reduce-scatter 或 all-to-all | 分摊长上下文 decode attention |
+| PCP | 预填上下文并行（PCP）：切分 prefill token 块 | 是 | gather、重排 | 分摊长 prompt 的 prefill |
+| DCP | 解码上下文并行（DCP）：切分 decode KV 历史 | 是 | all-gather/reduce-scatter 或 all-to-all | 分摊长上下文 decode attention |
 
 这里的“同一请求是否跨 rank”描述主要数据路径。即使普通 DP 中一个请求只进入一个 DP
 engine，控制面仍可能汇总各 engine 的队列和 KV 使用率；启用 MoE wide EP 后，不同 DP
@@ -221,7 +221,7 @@ W_{\mathrm{engine}}=\mathrm{TP}\times \mathrm{PP}\times \mathrm{PCP}
 $$
 
 $$
-W_{\text{all DP}}=\mathrm{TP}\times \mathrm{PP}\times \mathrm{PCP}\times \mathrm{DP}
+W_{\mathrm{all\_dp}}=\mathrm{TP}\times \mathrm{PP}\times \mathrm{PCP}\times \mathrm{DP}
 $$
 
 源码字段附近仍有把 `world_size` 简写成 “TPxPP” 的旧说明，但真实赋值已经包含 PCP。
@@ -599,9 +599,9 @@ sequenceDiagram
 
 > **读图方法：** 这是“Worker 如何传 intermediate tensors”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
-对在发送侧 TP ranks 上重复的完整 tensor，启用该优化后，各 rank **先切片并发送
+对在发送侧 TP ranks 上重复的完整 tensor，启用张量分片传输与对端聚合优化（`_should_use_all_gather`）后，各 rank **先切片并发送
 自己的片段**；下一个 PP stage 的对应 peer 收到片段，等待接收完成后，再在接收侧
-TP group 内 all-gather 恢复完整 tensor。已经分片的 tensor（例如特定 SP residual）
+TP group 内 all-gather 恢复完整 tensor，从而大幅降低跨 stage 通信带宽占用。已经分片的 tensor（例如特定 SP residual）
 需要关闭该 gather 优化，不能重复切分。
 
 [源码] `vllm/distributed/parallel_state.py` - `GroupCoordinator.isend_tensor_dict`、
@@ -633,8 +633,7 @@ sequenceDiagram
 
 一次 PP+TP forward 需要全部 ranks 参与，然而最终 sampling 结果只需从输出 rank 返回
 EngineCore。MultiprocExecutor 当前计算的输出 rank 与末 PP stage、TP/PCP 布局有关，公式
-为 `world_size - tensor_parallel_size * prefill_context_parallel_size`。不要把“只有一个
-response”误解为“只有一个 worker 执行”。
+为 `world_size - tensor_parallel_size * prefill_context_parallel_size`。该公式定位的是全局拓扑中最后一个流水线阶段（末 stage）的第一个张量并行 Worker（TP rank = 0，并在有 PCP 时对齐基准 rank）。这是因为只有末 stage 才包含 LM head 并执行采样，而同一 TP 组内 rank 0 已聚合了该结果，因此只需此 rank 回传响应即可。不要把“只有一个 response”误解为“只有一个 worker 执行”。
 
 ### 9.6.7 PP 的气泡
 
@@ -933,8 +932,7 @@ flowchart TB
 20。全局应为 $\frac14\times10+\frac34\times20=17.5$，不是平均值 15。下面的对数公式只是
 用不容易溢出的方式保存这两个总量。
 
-每个 DCP rank 只看一部分 keys/values。对同一个 Query/head，设其局部 softmax
-分母的自然对数为标量 `L_i`，局部输出为长度 `[D_v]` 的向量 `O_i`。全局归一化量是：
+每个 DCP rank 只看一部分 keys/values。对同一个 Query/head，设其局部注意力打分的对数配分和（Log-Sum-Exp，$\operatorname{LSE} = \log \sum_j \exp(s_{ij})$）为标量 `L_i`，局部输出为长度 `[D_v]` 的向量 `O_i`。全局归一化量是：
 
 $$
 L=\log\sum_i e^{L_i}

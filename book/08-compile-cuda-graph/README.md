@@ -22,7 +22,7 @@ prerequisites:
 
 > 当一次模型 forward 已经缩短到几毫秒，性能问题往往不再只是“GPU 算得够不够快”，
 > 而是 CPU 能否及时准备下一批输入、Python 能否少做重复工作，以及成百上千个 kernel
-> 能否少交一次启动指令。
+> 能否减少每次前向传播的内核发射与提交开销（kernel launch/dispatch overhead）。
 
 ## 本章定位
 
@@ -149,7 +149,7 @@ flowchart TB
 **设计含义：**CUDA Graph 对短小、重复、shape 可覆盖的 decode batch 往往更有吸引力；但这不是
 “decode 一定更快”的无条件结论。实际收益仍取决于模型、硬件、batch、attention backend 和命中率。
 
-### 生活化类比：预先定义的连招宏
+### 生活化类比：硬件级指令流录制与重放宏（Recorded Command Stream / Macro）
 
 CUDA Graph 可以类比预先定义的一组操作及依赖：CPU 不必每轮重新逐项安排其中的
 GPU 工作，而是启动已经准备好的可执行图。它记录的是操作和地址关系，不是缓存
@@ -1006,7 +1006,7 @@ flowchart TB
 
 > **读图方法：** 这张图用于压缩“四种执行层级”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
-“compiled but no CUDA Graph”是合法组合；“FULL CUDA Graph but no torch.compile”也可以成立。默认
+“已编译但无 CUDA Graph（compiled but no CUDA Graph）”是合法组合；“全图 CUDA Graph 但不开启 torch.compile”也可以成立。默认
 piecewise 路径通常依赖 vLLM compile，当前还有 breakable CUDA Graph 的替代路径。
 
 ## 8.11 MRV1 `CudagraphDispatcher`
@@ -1289,7 +1289,7 @@ classDiagram
 
 > **读图方法：** 这是“MRV2 descriptor 更细”的类型关系图。先分清接口、实现和持有关系，再结合正文确认运行时真正实例化的是哪个类；类图说明结构，不等同于调用先后。
 
-这比 MRV1 `BatchDescriptor` 显式表达了 dynamic speculative decode、varlen decode 与 DBO microbatch 的
+这比 MRV1 `BatchDescriptor` 显式表达了 dynamic speculative decode、varlen decode 与 Dual-Batch Overlap (DBO，双批次重叠微批次机制) 的
 兼容条件。
 
 ### 8.14.2 compatibility 不是简单相等
@@ -1697,7 +1697,7 @@ flowchart TD
 - 不同 stream 是否建立 wait/event 关系。
 - profiling graph 是否被错误复用。
 
-### 8.19.4 async 下偶发 token 重复或计数下溢
+### 8.19.4 异步调度下偶发 token 重复或计数下溢
 
 检查：
 

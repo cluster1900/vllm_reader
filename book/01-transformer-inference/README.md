@@ -143,7 +143,7 @@ attention 是按相关性翻阅历史笔记，KV Cache 是保存已经整理好�
 则根据模型给出的候选分数做最后选择。类比只帮助入门，进入源码时仍以张量、位置和
 缓存所有权为准。
 
-**先补两个读图工具。** Tensor（张量）可以先当作多维数组，shape 是各维的长度；
+**先明确四个核心前置概念。** Tensor（张量）可以先当作多维数组，shape 是各维的长度；
 `[3,4]` 就是 3 行、每行 4 个数。forward 是一次从输入算到输出的前向计算，不包含训练。
 prompt 是用户交给模型的已有文本；上下文是预测时允许参考的 token 序列。
 
@@ -575,7 +575,7 @@ Top-k 与 top-p 最终都通过 mask 排除候选，并对保留项重新归一�
 | repetition penalty | prompt 与输出中的已有 token | 按 logit 符号和倍率改变重复倾向 |
 | logit bias | 指定 token IDs | 人工提高或降低候选分数 |
 | allowed token IDs | 候选集合 | 只允许白名单 token |
-| bad words | token 序列 | 防止生成能够完成禁用序列的最后 token |
+| bad words | token 序列 | 在即将拼成禁用词时，屏蔽该序列的末尾 token |
 | structured output mask | 语法允许集合 | 只保留当前语法状态允许的 token |
 
 presence/frequency 的计数范围是输出；repetition 还会考虑 prompt。一个 token
@@ -605,15 +605,13 @@ flowchart TD
 
 > **读图方法：** 这是“Penalty、Bias 与约束”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
-这张图只展示 MRV1 的基础采样依赖，省略 logprobs 和批内混合 greedy/random 请求的
-合并操作。greedy 在影响 argmax 的约束和 penalty 之后取最大值，绕过温度缩放与随机
-过滤；不要把图当作 MRV2 的逐函数顺序。固定 revision 下：
+这张图主要展示第一代 Model Runner（Model Runner V1，简称 MRV1，位于 `vllm/v1/worker/gpu_model_runner.py`）的基础采样依赖，省略 logprobs 和批内混合 greedy/random 请求的合并操作。greedy 在影响 argmax 的约束和 penalty 之后取最大值，绕过温度缩放与随机过滤；不要把图当作 MRV2 的逐函数顺序。固定 revision 下：
 
 - MRV1 `vllm/v1/sample/sampler.py::Sampler.forward`、`sample` 和
   `apply_logits_processors` 实际执行上述分支，类注释可辅助阅读。
-- MRV2 把 sampling state、penalty、bad words、logprob 等拆到
+- 第二代 Model Runner（Model Runner V2，简称 MRV2，位于 `vllm/v1/worker/gpu/model_runner.py`）把 sampling state、penalty、bad words、logprob 等拆到
   `vllm/v1/worker/gpu/sample/`，并大量使用 Triton 实现。其 `Sampler.apply_sampling_params`
-  实际按 bias → penalties → bad words → thinking budget → temperature → min-p 处理，
+  实际按 bias → penalties → bad words → thinking budget（思考预算掩码，用于控制长思考链 token 预算）→ temperature → min-p 处理，
   随后在采样路径应用 top-k/top-p；不能把 MRV1 的顺序原样套过去。
 - MRV2 可以使用 Gumbel sampling 等方法避免简单地“先物化完整 softmax 再抽样”。
 
@@ -681,7 +679,7 @@ sequenceDiagram
   token 复用。但短 chunk、特定 attention、通信或 CPU 准备仍可能成为瓶颈。
 - **小 batch decode 常更偏带宽或启动开销受限**：每请求本轮通常只有一个新 token，
   相对数据搬运量，计算量较小。不过多个请求合批后依然可以做矩阵乘法，并非整个
-  GPU batch 永远只有一个向量。大 batch、量化、MoE、TP/DCP 和上下文长度都会改变瓶颈。
+  GPU batch 永远只有一个向量。大 batch、量化、MoE、TP/CP（张量并行与上下文并行）和上下文长度都会改变瓶颈。
 
 权重与 KV 按层和 tile 读取，不会把几十 GB 数据同时完整搬入片上 SRAM。滑动窗口、
 稀疏注意力等路径也不一定读取全部历史。这里是分析直觉，不能替代指定配置的 profile。
@@ -834,7 +832,7 @@ B_{\mathrm{token}} = 2LH_{\mathrm{kv}}D_h B_{\mathrm{dtype}}
 $$
 
 当前通用 `Attention` 接口已经允许 `head_size_v` 与 `head_size` 不同，因此更一般的
-公式不是纯理论洁癖；阅读 MLA 或其他变体时不能继续机械套用前面的 `2×` 简式。
+公式不仅形式上更为严谨，在阅读 MLA（Multi-head Latent Attention）等注意力变体时也是必不可少的；不能继续机械套用前面的 `2×` 简式。
 
 例：32 层、32 个 KV heads、head size 128、FP16/BF16（2 bytes）：
 

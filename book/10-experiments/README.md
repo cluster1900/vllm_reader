@@ -100,7 +100,7 @@ benchmark 测性能，profiler 解释耗时所在。先保留原始样本，再�
 | 批量离线生成 | total/output tokens/s、成本 | 接受较高单请求延迟 |
 | API 平台 | goodput、错误率、尾延迟 | 在 SLO 内最大化容量 |
 | 长文档处理 | prefill latency、KV 容量 | 较慢 decode 可能可接受 |
-| 实时语音 | RTFx、稳定 ITL | 输出吞吐必须跟上音频时长 |
+| 实时语音 | 实时率倍率（RTFx）、稳定 ITL | 输出吞吐必须跟上音频时长 |
 | 模型开发者 | kernel latency、数值误差 | 暂不包含完整 serving 开销 |
 
 同一个配置可以让离线吞吐上升，同时让交互 p99 TTFT 变差。没有目标用户与 SLO，“更快”
@@ -672,19 +672,19 @@ flowchart LR
 wall-clock，EngineCore events 是 monotonic。`IterationStats` 最终形成：
 
 $$
-T_{\mathrm{queue}}=t_{\mathrm{scheduled,first}}-t_{\mathrm{queued,first}}
+T_{\mathrm{queue}}=t_{\mathrm{scheduled},\mathrm{first}}-t_{\mathrm{queued},\mathrm{first}}
 $$
 
 $$
-T_{\mathrm{prefill}}=t_{\mathrm{token,first}}-t_{\mathrm{scheduled,first}}
+T_{\mathrm{prefill}}=t_{\mathrm{token},\mathrm{first}}-t_{\mathrm{scheduled},\mathrm{first}}
 $$
 
 $$
-T_{\mathrm{decode}}=t_{\mathrm{token,last}}-t_{\mathrm{token,first}}
+T_{\mathrm{decode}}=t_{\mathrm{token},\mathrm{last}}-t_{\mathrm{token},\mathrm{first}}
 $$
 
 $$
-T_{\mathrm{inference}}=t_{\mathrm{token,last}}-t_{\mathrm{scheduled,first}}
+T_{\mathrm{inference}}=t_{\mathrm{token},\mathrm{last}}-t_{\mathrm{scheduled},\mathrm{first}}
 $$
 
 preemption 发生在 prefill 或 decode 时，其等待会包含在对应区间内。`scheduled_ts` 只记录
@@ -819,7 +819,7 @@ xychart-beta
 左侧，而不是选择峰值 throughput 对应的过载点。
 
 **排队论直觉：Little’s Law 是平均量之间的关系。** 在相应长期平均存在、观察边界
-一致等条件下，$L=\lambda W$：`L` 是系统中平均请求数，`λ` 是有效到达率（request/s），
+一致等条件下，利特尔法则（Little's Law）成立：$L=\lambda W$。`L` 是系统中平均请求数，`λ` 是有效到达率（request/s），
 `W` 是请求在系统中的平均停留时间（秒，包含等待与服务）。若只讨论排队部分，
 应使用对应的 $L_q=\lambda W_q$，不能把系统在途数与纯排队等待时间混用。
 
@@ -1057,8 +1057,7 @@ flowchart LR
 
 ### 10.17.1 `benchmarks/benchmark_block_pool.py`
 
-该微基准反复调用 `BlockPool.get_new_blocks` 和 `free_blocks`，每组前执行 GC，报告平均/最大
-微秒。它能回答 Python block allocator 在指定 pool/allocate size 下的成本，不能说明完整 KV
+该微基准反复调用 `BlockPool.get_new_blocks` 和 `free_blocks`，每组前执行 GC，输出内存分配的平均耗时与最大耗时（微秒）。它能回答 Python block allocator 在指定 pool/allocate size 下的成本，不能说明完整 KV
 Cache 或 GPU attention 性能。
 
 ### 10.17.2 prefix cache benchmark
@@ -1238,18 +1237,12 @@ trace 显示最长 prefill step 从 D ms 降至 E ms，GPU idle 增加 F%。所�
 Pareto frontier 保留那些没有被另一配置同时在所有目标上击败的点。
 
 ```mermaid
-quadrantChart
-    title Throughput and p99 latency tradeoff
-    x-axis Lower throughput --> Higher throughput
-    y-axis Lower latency --> Higher latency
-    quadrant-1 Fast but high latency
-    quadrant-2 Dominated region
-    quadrant-3 Low load
-    quadrant-4 Preferred frontier
-    A: [0.35, 0.25]
-    B: [0.62, 0.35]
-    C: [0.78, 0.55]
-    D: [0.55, 0.72]
+flowchart TD
+    subgraph Pareto["吞吐量与 P99 延迟权衡（Pareto Frontier）"]
+        direction TB
+        Q2["【被支配区 Dominated】<br/>低吞吐 / 高延迟 (淘汰劣质配置)"] --- Q1["【高吞吐高延迟区】<br/>吞吐极高但排队加剧 / P99 尾延迟劣化"]
+        Q3["【轻载区 Low Load】<br/>低延迟但吞吐受限 (算力未充分利用)"] --- Q4["【最优前沿 Preferred Frontier】<br/>高吞吐 / 低延迟 (推荐的帕累托平衡点)"]
+    end
 ```
 
 > **读图方法：** 这是“为什么不选分数最高的一行”的二维权衡图。先确认两个坐标轴越大分别意味着什么，再看方案落在哪个象限；位置表达相对取舍，不表示未经实验验证的精确性能。

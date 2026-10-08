@@ -481,19 +481,19 @@ flowchart TB
 offload 会改变 I/O 和搬运方式；可靠结论是**最终本地参数由分片感知 loader 填充**，不能无条件
 断言所有格式只从磁盘读取精确 shard 字节。
 
-## 7.9 显存 Profiling：KV Cache 只能拿剩下的
+## 7.9 显存 Profiling：KV Cache 预算的余量划拨机制
 
 用户未显式指定 `kv_cache_memory_bytes` 时，Worker profile 非 KV 峰值并计算：
 
 $$
-M_{\mathrm{KV}}=M_{\mathrm{requested}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph,applied}}
+M_{\mathrm{KV}}=M_{\mathrm{requested}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph},\mathrm{applied}}
 $$
 
 - 所有 `M` 的单位都是 byte（换成 GiB 时所有项一起换）；
 - `M_requested = total_memory * gpu_memory_utilization`，不是 free memory 乘利用率；
   启动还会检查 free memory 是否足以满足 requested；
 - `M_nonKV` 包含权重及 profile 期间非 KV 消耗；
-- `M_graph,applied` 是启用相应估算时预留的 CUDA Graph memory。
+- `M_graph,applied` 是启用相应估算时预留的 CUDA Graph memory。在当前实现中，环境变量 `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` 默认关闭；未显式启用时该项计为 0。
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`
 
@@ -802,9 +802,7 @@ request count、scheduled token count、logits position count 与 generated toke
 
 ## 7.18 Sampling 的准确处理顺序
 
-MRV1 主干是：保存配置要求的 raw logits/logprobs、转 float32、allowed tokens/bad words/会影响 argmax
-的 processors、penalties、greedy candidate、temperature、argmax-invariant processors、top-k/top-p、
-随机 candidate，最后按请求选择 greedy/random 并提取 logprobs。
+MRV1 的采样主干依次执行：首先按配置留存原始 logits 与 logprobs 并转为 float32；接着应用允许词表（allowed tokens）、违禁词（bad words）及影响 argmax 的处理器；随后计算惩罚项（penalties）并生成 greedy 候选；再依次完成温度缩放（temperature）、不改变 argmax 的后处理、top-k/top-p 过滤并采样随机候选；最后针对各请求分别在 greedy 与 random 间择优并提取输出概率。
 
 [源码] `vllm/v1/sample/sampler.py` - `Sampler.forward`
 
@@ -825,8 +823,7 @@ flowchart TD
 
 > **读图方法：** 这是“Sampling 的准确处理顺序”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
-MRV2 的 modular sampler 顺序是 logit bias、penalties、bad words、thinking budget、temperature、min-p、
-top-k/top-p，随后选择 FlashInfer 或 Triton Gumbel sampling。
+MRV2 模块化采样的执行顺序依次是：logit bias → penalties → bad words → thinking budget（思考预算掩码，用于控制长思考链 token 预算）→ temperature → min-p → top-k/top-p，随后根据配置选择 FlashInfer 或 Triton Gumbel sampling 路径。
 
 [源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.apply_sampling_params`
 
@@ -1059,9 +1056,7 @@ python3 examples/ch07_execution_pipeline.py
 python3 -m unittest tests.test_ch07_execution_pipeline -v
 ```
 
-`examples/ch07_execution_pipeline.py` 保留 Executor/loader/registry 选择、全 Worker 广播、unique output
-rank、permanent request row、preemption/re-add、ragged inputs、execute/sample state、PP intermediate、
-sampling pipeline 和二维输出。
+`examples/ch07_execution_pipeline.py` 保留了核心执行机制：包含执行器与加载器的选择分发、跨 Worker 广播与唯一回复 rank、持久化请求槽位、抢占重入、非齐整（ragged）张量打平、execute 与 sample 临时状态交接、流水线并行中间张量传递，以及多维采样流水线。
 
 ```mermaid
 flowchart LR
@@ -1237,12 +1232,12 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    C4["Chapter 4: schedule"] --> C7["Chapter 7: execute"]
-    C5["Chapter 5: own KV"] --> C7
-    C6["Chapter 6: address KV"] --> C7
-    C7 --> C8["Chapter 8: compile and graph"]
-    C7 --> C9["Chapter 9: distributed"]
-    C8 --> C10["Chapter 10: optimize"]
+    C4["第04章：调度决策 schedule"] --> C7["第07章：模型执行栈 execute"]
+    C5["第05章：KV 所有权 own KV"] --> C7
+    C6["第06章：KV 寻址 address KV"] --> C7
+    C7 --> C8["第08章：编译与 CUDA Graph"]
+    C7 --> C9["第09章：多卡分布式"]
+    C8 --> C10["第10章：实验与优化"]
     C9 --> C10
 ```
 

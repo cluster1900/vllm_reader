@@ -197,7 +197,7 @@ logical block 2 = positions 8,9,10,11
 
 ### 6.3.4 kernel block
 
-attention kernel 消费的分页粒度。多数普通情况与 allocation block 相同；hybrid blocks
+attention kernel 读取与计算时所采用的分页粒度。在大多数普通情况下与 allocation block 相同；hybrid blocks
 允许 allocation block 更大，再在表中虚拟拆成多个 kernel block。
 
 ### 6.3.5 block table
@@ -328,7 +328,7 @@ flowchart LR
 
 > **读图方法：** 这张图用于压缩“Allocation Block 与 Kernel Block 不一定相等”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
-**源码事实：**MRV1 `BlockTable.map_to_kernel_blocks()` 与 MRV2
+**源码事实：**Model Runner V1（MRV1，对应 `vllm/v1/worker/gpu_model_runner.py`）的 `BlockTable.map_to_kernel_blocks()` 与 Model Runner V2（MRV2，对应 `vllm/v1/worker/gpu/model_runner.py`）的
 `BlockTables.append_block_ids()` 都执行这种展开；上游测试验证 manager ID `10,11` 在
 `32 -> 16` 时变成 `20,21,22,23`。
 
@@ -396,8 +396,7 @@ flowchart LR
 
 > **读图方法：** 这张图用于压缩“从状态行 gather 成本轮批次行”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
-MRV1 路径使用 `commit_block_table()` 把 CPU buffer 的有效请求行复制到设备；MRV2 则维护
-UVA/staged write 和 GPU gather。两条路径对象名相近，但不要把实现细节混写。
+MRV1 路径使用 `commit_block_table()` 把 CPU buffer 的有效请求行复制到设备；MRV2 则通过统一虚拟寻址（UVA，允许 GPU 直接访问 Host 端锁定内存）维护暂存写入（staged write），并在 GPU 端执行行收集（gather）。两条路径对象名相近，但不要把实现细节混写。
 
 ### 6.6.3 为什么 dummy 行必须清零
 
@@ -1239,7 +1238,7 @@ $$
 $$
 
 `m_tile` 是新片段的最大分数；变量 $m$、$\ell$、$m_{\mathrm{tile}}$ 都是标量。分母 $\ell$ 保存的是
-$\sum_j \exp(s_j-m)$，换用更大的最大值 `m′` 后，要把旧分母乘 `exp(m-m′)`，
+$\sum_j \exp(s_j-m)$，换用更大的最大值 $m'$ 后，要把旧分母乘 $\exp(m - m')$，
 才能和新片段相加。加权输出摘要是长度为 Value 维度的向量，也必须使用相同缩放。
 LSE 指 `log(sum(exp(score)))`，可由 $m+\log\ell$ 得到。DCP 或 split-K 最终合并的正是这类 `(output, LSE)` 状态，而不是
 直接平均各分区输出。
