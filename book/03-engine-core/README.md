@@ -3,10 +3,10 @@ title: "第03章 Engine 与 EngineCore"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
-source_branch: main
+source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
+source_branch: v0.31.0
 source_dirty: false
-verified_at: 2026-10-08
+verified_at: 2026-10-18
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -36,7 +36,7 @@ LLMEngine / AsyncLLM
 执行期间到达的 abort 怎样生效、多个 batch 如何保持在途，以及进程退出或 worker
 故障如何被前端看见。
 
-本章绑定源码 revision `5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`。文中区分：
+本章绑定源码 revision `db9527a46873454610df6dbedf79a36d6bf1a7f6`。文中区分：
 
 - **源码事实**：可在固定 revision 的实现或测试中直接定位。
 - **设计含义**：由多个源码事实推导出的工程解释。
@@ -206,6 +206,16 @@ flowchart TB
 `max_model_len`、`num_gpu_blocks`、`block_size`、dtype 和并行大小回传给 client；client
 再同步前端配置。因此“配置对象已构造”不等于“所有运行时容量已定值”。
 
+本 revision 还回传 `effective_attention_block_size`。它来自 Scheduler 创建后实际
+full-attention cache manager 的 block size：只有集合中恰好一种大小才给出整数，
+否则为 `None`。MPClient 汇总各 READY response 时也只在值一致时保留该值。
+它不是简单复制 CLI 的 `block_size`，也不能把 `None` 读成“没有 KV cache”。
+
+[源码] `vllm/v1/engine/core.py` - `EngineCore._initialize_effective_attention_block_size`、
+`EngineCoreProc._make_ready_response`
+
+[源码] `vllm/v1/engine/core_client.py` - `MPClient._apply_ready_response`
+
 ```mermaid
 sequenceDiagram
     participant F as Frontend
@@ -335,6 +345,12 @@ get_output  -> EngineCore.step_fn -> post_step
 它没有后台 core busy loop，也没有 ZMQ 序列化。调用者不调用 `get_output()`，内核就不会
 前进一步。这条路径容易调试，但不能代表在线服务的进程拓扑。
 
+同进程不表示资源会自动及时释放。当前 `InprocClient` 用 `weakref.finalize` 注册
+`EngineCore.shutdown`，显式 `shutdown()` 则先 detach finalizer 再清理，避免两条
+清理路径重复执行。不要把对象失去引用的时机当作确定的 GPU 内存释放期限。
+
+[源码] `vllm/v1/engine/core_client.py` - `InprocClient.__init__`、`shutdown`
+
 ### 3.4.2 `SyncMPClient`
 
 它启动或连接 EngineCore 后台进程，输入用 ZMQ 发送，输出由独立线程接收并放进
@@ -440,7 +456,8 @@ flowchart TD
     K5 --> W[compile / warmup]
     W --> SO[StructuredOutputManager]
     SO --> S[创建 Scheduler]
-    S --> B[配置 batch queue]
+    S --> BS[确定 effective_attention_block_size]
+    BS --> B[配置 batch queue]
     B --> H[配置 block hasher]
     H --> SF[选择 step_fn]
 ```
@@ -816,17 +833,38 @@ stateDiagram-v2
 [源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`、`get_num_unfinished_requests`
 
 `_finish_pause()` 先调用 executor collective RPC `synchronize_device`，再按需 reset cache。
-否则调用者收到“pause 完成”时 GPU 仍可能访问即将释放的 KV。上游测试固定顺序为：
+否则调用者收到“pause 完成”时 GPU 仍可能访问即将释放的 KV。成功路径的上游测试固定顺序为：
 
 ```text
 synchronize_device -> reset_caches -> Future complete
 ```
 
+成功并非无条件：当前 `_reset_caches` 检查 `reset_prefix_cache` 的返回值，失败时抛出
+`RuntimeError`，不会继续假装多模态与 encoder cache 全部清理成功。延迟完成的 pause
+在 idle callback 中捕获 `_finish_pause` 异常并调用 `future.set_exception`，经 utility
+RPC 把失败返回调用者；同步完成分支则直接传播异常。收到失败不能据此认为 pause
+没有改变任何状态，更不能把失败当作“设备已安全清空”的确认。
+
+[源码] `vllm/v1/engine/core.py` - `EngineCore._reset_caches`、
+`EngineCoreProc.pause_scheduler`
+
 Sleep 在 pause 之上增加设备内存管理：level 0 只暂停调度；level 1 offload 权重并丢弃
 KV；level 2 不保留 sleep backend 管理的权重/KV 内容，Worker 会另存必要的模型
 buffers。它不保证进程所有 GPU 占用降到零；源码日志仍会报告残余占用。wake up
 只有在 executor 已不 sleeping 时才恢复
-Scheduler，避免权重尚未驻留就调度请求。
+Scheduler，避免权重尚未驻留就调度请求。`wake_up` 现在返回 `fully_awake`，前端
+据此更新 sleep 指标；一次部分唤醒不等于全部资源已恢复。
+
+### 只释放 KV 物理内存的边界
+
+`release_kv_cache_memory()` 与释放某个请求的 block 引用不同：它要求 pause 已完成、
+Scheduler 无可推进工作、batch queue 已排空，而且 Executor 的内存当前全部驻留。
+满足条件后先 `_reset_caches()`，再 `model_executor.discard(("kv_cache",))`，丢弃 KV
+物理内存。`keep` 保留的逻辑请求在唤醒后需重算，不能继续读取已丢弃的 KV。
+这也不是一般的 `sleep(level=...)` 替代品：前置条件不满足就抛 `RuntimeError`，不会
+替调用者自动等待 pause 完成。
+
+[源码] `vllm/v1/engine/core.py` - `EngineCore.release_kv_cache_memory`、`wake_up`
 
 ## 3.13 Shutdown：立即 abort 与优雅 drain
 

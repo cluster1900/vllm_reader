@@ -3,10 +3,10 @@ title: "第02章 vLLM 全景与一次请求的生命周期"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
-source_branch: main
+source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
+source_branch: v0.31.0
 source_dirty: false
-verified_at: 2026-10-08
+verified_at: 2026-10-18
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -381,12 +381,13 @@ render_prompts
 
 `InputProcessor.process_inputs()` 处理靠近 EngineCore 契约的工作：
 
-1. 校验 `SamplingParams` 或 `PoolingParams`。
+1. 校验 `SamplingParams` 或 `PoolingParams`，并按实际 Runner 校验 custom logits processors。
 2. 校验 LoRA 与 data-parallel rank。
 3. 必要时兼容旧的 raw prompt 路径。
 4. 拆分 encoder/decoder input。
 5. 检查 prompt 长度、token ID 范围和平台限制。
-6. clone 并补全 request-local 参数，例如默认 `max_tokens` 和 EOS。
+6. clone 并补全 request-local 参数，例如默认 `max_tokens` 和 EOS；默认最大输出长度
+   按 `max_model_len - prompt_len` 得到后，还要检查 `min_tokens` 是否超过这一余量。
 7. 整理多模态 feature。
 8. 构造可跨 client 边界传输的 `EngineCoreRequest`。
 
@@ -445,6 +446,13 @@ internal_req_id -> RequestState
 
 当 `n > 1` 时，一个父请求还会 fan out 成多个 child request。这说明“一次 HTTP
 请求”“一个外部 request ID”“一个 Scheduler request”并不总是一一对应。
+
+在线 `AsyncLLM.add_request` 在本章 revision 下先准备全部 child，按 `n` 检查准入，
+然后在第一次跨进程 `await` 前把全部 child 注册到 OutputProcessor，才逐个发送。
+这样，即使发送中途被取消，本地仍知道整个父请求包含哪些 child；异常分支用父请求
+的内部 ID 执行 `abort` 并重新抛出。这个顺序不是把每个 child 当独立请求重复准入。
+
+[源码] `vllm/v1/engine/async_llm.py` - `AsyncLLM.add_request` 的 fan-out 与异常清理分支
 
 [源码] `vllm/v1/engine/input_processor.py` - `InputProcessor.assign_request_id`
 
@@ -760,6 +768,7 @@ Renderer 的输出，已经完成模板化和 tokenization。它可能表示纯 
 - arrival time、priority、LoRA
 - client index、DP rank
 - 多模态 feature、trace header、session 信息
+- 可选 `kv_hints`：随请求传入后端的 KV 提示，不等于已经命中或拥有 cache blocks
 
 它使用 `msgspec.Struct`，适合 msgpack 序列化。它不是 Scheduler 的完整运行状态。
 
@@ -1070,7 +1079,14 @@ sequenceDiagram
 | Scheduler waiting/running | EngineCore | 决定请求何时获得 token/KV 预算 |
 
 API 的 admission control 通过 `max_num_queued_reqs` 和
-`max_num_queued_tokens` 在进入 EngineCore 前拒绝过量请求。`get_num_queued_tokens()` 当前
+`max_num_queued_tokens` 在进入 EngineCore 前拒绝过量请求，但两项指标的范围不同。
+当启动地址包含 `mp_admission_counters` 时，`AsyncLLM` 创建 `SharedAdmissionStats`，
+请求数检查读取共享计数；否则回退到本地 OutputProcessor 未完成请求数。
+这是近似全局上限，不是跨进程原子预留：其他 API 进程可能同时通过检查。
+
+queued-token 检查仍调用本地 `get_num_queued_tokens()`，不能因为请求数共享了就推断
+token 数也跨 API 进程共享。它在现有计数已达到阈值时拒绝，并非先把新 prompt 长度
+加入计数后进行精确预算。`get_num_queued_tokens()` 当前
 对仍在 prefill 的请求使用完整 `prompt_len`，不会减去 chunked prefill 已完成部分或
 prefix hit，因为这些进度要到 prefill 完成后才传播给 API Server。这是保守估计：可能
 更早拒绝，但有利于保护 TTFT。
@@ -1081,6 +1097,8 @@ prefix hit，因为这些进度要到 prefill 完成后才传播给 API Server�
 [源码] `vllm/v1/engine/async_llm.py` - `AsyncLLM.check_admission`
 
 [源码] `vllm/v1/engine/output_processor.py` - `get_num_queued_tokens`
+
+[源码] `vllm/v1/engine/admission_control.py` - `SharedAdmissionStats`
 
 ## 2.16 配置怎样贯穿全系统
 

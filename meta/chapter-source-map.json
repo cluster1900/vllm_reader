@@ -1,7 +1,7 @@
 {
   "source_repository": "vllm-project/vllm",
   "source_path": "../vllm",
-  "source_commit": "5893426b88f7b3cd21101d194eb1c6f0a6f0e27b",
+  "source_commit": "db9527a46873454610df6dbedf79a36d6bf1a7f6",
   "chapters": {
     "01-transformer-inference": [
       {"path": "vllm/v1/kv_cache_interface.py", "symbols": ["class AttentionSpec", "class MLAAttentionSpec"]},
@@ -13,7 +13,9 @@
       {"path": "vllm/v1/worker/gpu/sample/sampler.py", "symbols": ["class Sampler"]},
       {"path": "tests/test_sampling_params.py", "symbols": ["def test_diffusion_accepts_top_k_top_p"]},
       {"path": "tests/v1/sample/test_topk_topp_sampler.py", "symbols": ["def test_topk_impl_equivalence"]},
-      {"path": "tests/kernels/core/test_rotary_embedding.py", "symbols": ["def test_rotary_embedding_opcheck"]}
+      {"path": "tests/kernels/core/test_rotary_embedding.py", "symbols": ["def test_rotary_embedding_opcheck"]},
+      {"path": "vllm/v1/worker/gpu/sample/logits_processor/interface.py", "symbols": ["class LogitsContext", "class LogitsProcessor", "def apply"]},
+      {"path": "vllm/v1/engine/input_processor.py", "symbols": ["def _build_logits_processors_params_validator", "def _validate_params"]}
     ],
     "02-vllm-architecture": [
       {"path": "vllm/entrypoints/llm.py", "symbols": ["class LLM", "def generate"]},
@@ -30,7 +32,8 @@
       {"path": "vllm/v1/executor/uniproc_executor.py", "symbols": ["class UniProcExecutor", "def _init_executor"]},
       {"path": "tests/v1/engine/test_output_processor.py", "symbols": ["def test_abort_requests"]},
       {"path": "tests/v1/engine/test_async_llm.py", "symbols": ["async def test_abort"]},
-      {"path": "tests/v1/engine/test_abort_final_step.py", "symbols": ["async def test_abort_during_final_step"]}
+      {"path": "tests/v1/engine/test_abort_final_step.py", "symbols": ["async def test_abort_during_final_step"]},
+      {"path": "vllm/v1/engine/admission_control.py", "symbols": ["class SharedAdmissionStats"]}
     ],
     "03-engine-core": [
       {"path": "vllm/engine/arg_utils.py", "symbols": ["class EngineArgs", "def create_engine_config"]},
@@ -38,7 +41,7 @@
       {"path": "vllm/v1/engine/llm_engine.py", "symbols": ["class LLMEngine", "def from_engine_args", "def step"]},
       {"path": "vllm/v1/engine/async_llm.py", "symbols": ["class AsyncLLM", "async def generate", "def _run_output_handler"]},
       {"path": "vllm/v1/engine/core_client.py", "symbols": ["class EngineCoreClient", "def make_client", "class InprocClient", "class SyncMPClient", "class AsyncMPClient", "def start_engine_core_monitor"]},
-      {"path": "vllm/v1/engine/core.py", "symbols": ["class EngineCore", "def _initialize_kv_caches", "def step", "def step_with_batch_queue", "def _process_aborts_queue", "class EngineCoreProc", "def run_busy_loop", "def process_input_sockets", "def process_output_sockets", "def pause_scheduler", "def _pause_complete", "def has_work", "def _reset_caches", "class EngineCoreActorMixin", "class EngineCoreActor"]},
+      {"path": "vllm/v1/engine/core.py", "symbols": ["class EngineCore", "def _initialize_kv_caches", "def step", "def step_with_batch_queue", "def _process_aborts_queue", "class EngineCoreProc", "def run_busy_loop", "def process_input_sockets", "def process_output_sockets", "def pause_scheduler", "def _pause_complete", "def has_work", "def _reset_caches", "class EngineCoreActorMixin", "class EngineCoreActor", "def _initialize_effective_attention_block_size", "def release_kv_cache_memory"]},
       {"path": "vllm/v1/engine/__init__.py", "symbols": ["class EngineCoreReadyResponse", "class EngineCoreRequest", "class EngineCoreOutputs", "class EngineCoreRequestType"]},
       {"path": "tests/v1/engine/test_engine_core.py", "symbols": ["def test_pause_synchronizes_device_before_cache_reset", "step_with_batch_queue"]},
       {"path": "tests/v1/engine/test_abort_final_step.py", "symbols": ["async def test_abort_during_final_step"]},
@@ -49,7 +52,7 @@
       {"path": "vllm/v1/core/sched/output.py", "symbols": ["class NewRequestData", "class CachedRequestData", "class SchedulerOutput"]},
       {"path": "vllm/v1/core/sched/request_queue.py", "symbols": ["class SchedulingPolicy", "class RequestQueue", "class FCFSRequestQueue", "class PriorityRequestQueue"]},
       {"path": "vllm/v1/request.py", "symbols": ["class Request", "def num_tokens_with_spec", "def __lt__", "class RequestStatus"]},
-      {"path": "vllm/config/scheduler.py", "symbols": ["class SchedulerConfig", "max_num_scheduled_tokens", "scheduler_reserve_full_isl", "prefill_schedule_interval"]},
+      {"path": "vllm/config/scheduler.py", "symbols": ["class SchedulerConfig", "max_num_scheduled_tokens", "scheduler_reserve_full_isl", "prefill_schedule_interval", "max_num_active_seqs", "long_prefill_token_threshold_adaptive"]},
       {"path": "vllm/v1/core/kv_cache_manager.py", "symbols": ["class KVCacheManager", "def allocate_slots"]},
       {"path": "vllm/v1/core/sched/async_scheduler.py", "symbols": ["class AsyncScheduler"]},
       {"path": "tests/v1/core/test_scheduler.py", "symbols": ["def test_schedule_concurrent_partial_requests", "def test_schedule_order", "def test_preempt_during_execution", "def test_priority_scheduling_basic_ordering", "def test_priority_scheduling_preemption_and_resumption_when_out_of_kv"]},
@@ -60,16 +63,16 @@
       {"path": "vllm/v1/worker/gpu_worker.py", "symbols": ["class Worker", "def determine_available_memory", "def initialize_from_config"]},
       {"path": "vllm/v1/core/kv_cache_utils.py", "symbols": ["class KVCacheBlock", "class FreeKVCacheBlockQueue", "def get_request_block_hasher", "def check_enough_kv_cache_memory", "def get_kv_cache_config_from_groups", "def get_kv_cache_groups", "def get_kv_cache_configs"]},
       {"path": "vllm/v1/core/kv_cache_manager.py", "symbols": ["class KVCacheBlocks", "class KVCacheManager", "def get_computed_blocks", "def allocate_slots", "def free", "def cache_blocks"]},
-      {"path": "vllm/v1/core/kv_cache_coordinator.py", "symbols": ["class KVCacheCoordinator", "class UnitaryKVCacheCoordinator", "class HybridKVCacheCoordinator", "def find_longest_cache_hit"]},
+      {"path": "vllm/v1/core/kv_cache_coordinator.py", "symbols": ["class KVCacheCoordinator", "class UnitaryKVCacheCoordinator", "class HybridKVCacheCoordinator", "def find_longest_cache_hit", "def get_replay_boundaries", "def reset_prefix_cache"]},
       {"path": "vllm/v1/core/block_pool.py", "symbols": ["class BlockHashToBlockMap", "class BlockPool", "def cache_full_blocks", "def cache_partial_block", "def get_new_blocks", "def touch", "def free_blocks", "def evict_blocks", "def reset_prefix_cache"]},
-      {"path": "vllm/v1/core/single_type_kv_cache_manager.py", "symbols": ["class SingleTypeKVCacheManager", "def _cache_partial_tail_block", "_pending_cow_copies"]},
+      {"path": "vllm/v1/core/single_type_kv_cache_manager.py", "symbols": ["class SingleTypeKVCacheManager", "def _cache_partial_tail_block", "_pending_cow_copies", "class HiSparseSourceManager", "def bind_host_pool"]},
       {"path": "tests/v1/core/test_single_type_kv_cache_manager.py", "symbols": ["def test_evictable_cached_blocks_not_double_allocated", "def test_predictor_matches_allocator_blocks_calculation_with_admission_cap"]},
       {"path": "tests/v1/core/prefix_cache/test_partial_prefix_cache_primitives.py", "symbols": ["def test_later_request_hits_cached_partial_tail", "def test_reset_prefix_cache_clears_partial_entry_metadata", "def test_partial_block_promotes_to_direct_full_block_hash"]},
       {"path": "tests/v1/core/prefix_cache/test_partial_prefix_cache_hits.py", "symbols": ["def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue", "def test_hybrid_sliding_window_group_disables_partial_hash_hits"]},
       {"path": "tests/v1/core/test_reset_prefix_cache_e2e.py", "symbols": ["def test_reset_prefix_cache_e2e"]}
     ],
     "06-paged-attention": [
-      {"path": "vllm/v1/worker/gpu/buffer_utils.py", "symbols": ["class StagedWriteTensor", "def apply_write", "class FusedStagedWriter", "def apply"]},
+      {"path": "vllm/v1/worker/gpu/buffer_utils.py", "symbols": ["class StagedWriteTensor", "def apply_write", "class FusedStagedWriter", "def apply", "class NonUvaBuffer", "class UvaBufferPool"]},
       {"path": "vllm/model_executor/layers/attention/attention.py", "symbols": ["class Attention", "def get_attention_context", "def unified_kv_cache_update", "def unified_attention_with_output"]},
       {"path": "vllm/v1/attention/backend.py", "symbols": ["class AttentionBackend", "class CommonAttentionMetadata", "class AttentionMetadata", "class AttentionMetadataBuilder", "class AttentionImpl"]},
       {"path": "vllm/v1/attention/selector.py", "symbols": ["class AttentionSelectorConfig", "def get_attn_spec_kind", "def get_attn_backend"]},
@@ -116,7 +119,7 @@
       {"path": "vllm/envs.py", "symbols": ["VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"]},
       {"path": "vllm/config/vllm.py", "symbols": ["OPTIMIZATION_LEVEL_TO_CONFIG", "def max_concurrent_batches", "def _maybe_override_dynamic_sd_cudagraph_mode"]},
       {"path": "vllm/config/scheduler.py", "symbols": ["class SchedulerConfig", "async_scheduling", "def get_scheduler_cls"]},
-      {"path": "vllm/config/compilation.py", "symbols": ["class CompilationMode", "class CUDAGraphMode", "class CompilationConfig", "def compute_hash", "def set_splitting_ops_for_v1", "def resolve_cudagraph_mode_and_sizes"]},
+      {"path": "vllm/config/compilation.py", "symbols": ["class CompilationMode", "class CUDAGraphMode", "class CompilationConfig", "def compute_hash", "def set_splitting_ops_for_v1", "def resolve_cudagraph_mode_and_sizes", "def without_piecewise"]},
       {"path": "vllm/v1/core/sched/async_scheduler.py", "symbols": ["class AsyncScheduler", "def _update_after_schedule", "def _update_request_with_output", "num_output_placeholders"]},
       {"path": "vllm/v1/engine/core.py", "symbols": ["def step", "def step_with_batch_queue", "batch_queue_size"]},
       {"path": "vllm/v1/worker/gpu/async_utils.py", "symbols": ["class StepTimingCollector", "class AsyncOutput", "def async_copy_to_np"]},
@@ -138,7 +141,8 @@
       {"path": "tests/v1/core/test_async_scheduler.py", "symbols": ["def test_kv_pressure_preemption_with_inflight_output"]},
       {"path": "tests/v1/core/test_scheduler.py", "symbols": ["def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders", "def test_free_encoder_inputs_respects_unconfirmed_placeholders"]},
       {"path": "tests/v1/cudagraph/test_cudagraph_dispatch.py", "symbols": ["class TestCudagraphDispatcher", "def test_dispatcher"]},
-      {"path": "tests/v1/worker/test_gpu_model_runner_v2_cudagraph_profiling.py", "symbols": ["def test_profile_cudagraph_memory_samples_and_extrapolates", "def test_profile_cudagraph_memory_frees_throwaway_pool"]}
+      {"path": "tests/v1/worker/test_gpu_model_runner_v2_cudagraph_profiling.py", "symbols": ["def test_profile_cudagraph_memory_samples_and_extrapolates", "def test_profile_cudagraph_memory_frees_throwaway_pool"]},
+      {"path": "tests/test_config.py", "symbols": ["def test_resolve_cudagraph_mode_uses_loaded_piecewise_provider"]}
     ],
     "09-distributed": [
       {"path": "vllm/config/parallel.py", "symbols": ["class ParallelConfig", "def world_size_across_dp", "def local_world_size", "def use_sequence_parallel_moe", "def __post_init__"]},
@@ -162,8 +166,8 @@
       {"path": "vllm/model_executor/layers/fused_moe/runner/moe_runner.py", "symbols": ["class MoERunner", "def forward", "def _maybe_dispatch", "def _maybe_combine"]},
       {"path": "vllm/model_executor/layers/fused_moe/modular_kernel.py", "symbols": ["class FusedMoEPrepareAndFinalize", "class FusedMoEPrepareAndFinalizeModular", "def prepare", "def prepare_async", "def finalize", "def finalize_async"]},
       {"path": "vllm/model_executor/layers/fused_moe/all2all_utils.py", "symbols": ["def get_ep_all2all_manager", "def maybe_make_prepare_finalize"]},
-      {"path": "vllm/v1/worker/gpu/pcp_manager.py", "symbols": ["class PCPManager", "def _iter_rank_chunks", "def partition_batch", "def restore_hidden_states"]},
-      {"path": "vllm/v1/worker/cp_utils.py", "symbols": ["def get_kv_cache_shard_count", "def split_dcp_context_queries", "def run_split_fa2_dcp_context_attention"]},
+      {"path": "vllm/v1/worker/gpu/pcp_manager.py", "symbols": ["class PCPManager", "def _iter_rank_chunks", "def partition_batch", "def restore_hidden_states", "def replicated_requests"]},
+      {"path": "vllm/v1/worker/cp_utils.py", "symbols": ["def split_dcp_context_queries", "def run_split_fa2_dcp_context_attention", "def get_dcp_dummy_context_len", "def prepare_dcp_dummy_context_metadata"]},
       {"path": "vllm/v1/attention/ops/dcp.py", "symbols": ["def cp_lse_ag_out_rs", "def cp_lse_ag_out_ar", "def _lse_weighted_combine", "def dcp_a2a_lse_reduce", "class MLADCPManager"]},
       {"path": "vllm/v1/core/kv_cache_utils.py", "symbols": ["decode_context_parallel_size"]},
       {"path": "tests/distributed/test_pipeline_partition.py", "symbols": ["def test_custom_layer_partition", "def test_uneven_auto_partition"]},
@@ -180,7 +184,7 @@
       {"path": "vllm/benchmarks/latency.py", "symbols": ["def add_cli_args", "def run_to_completion", "def main"]},
       {"path": "vllm/benchmarks/throughput.py", "symbols": ["def run_vllm", "def _run_vllm_requests", "def filter_requests_for_dp", "def main"]},
       {"path": "vllm/benchmarks/serve.py", "symbols": ["class BenchmarkMetrics", "async def get_request", "def calculate_metrics", "async def benchmark", "def parse_goodput"]},
-      {"path": "vllm/benchmarks/lib/endpoint_request_func.py", "symbols": ["class StreamedResponseHandler", "class RequestFuncOutput", "async def async_request_openai_completions"]},
+      {"path": "vllm/benchmarks/lib/endpoint_request_func.py", "symbols": ["class StreamedResponseHandler", "class RequestFuncOutput", "async def async_request_openai_completions", "async def async_request_openai_responses"]},
       {"path": "vllm/benchmarks/datasets/datasets.py", "symbols": ["class SampleRequest", "class RandomDataset", "class ShareGPTDataset", "class TimedTrace", "class PrefixRepetitionRandomDataset", "def get_samples"]},
       {"path": "vllm/benchmarks/sweep/param_sweep.py", "symbols": ["class ParameterSweep", "class ParameterSweepItem", "def apply_to_cmd"]},
       {"path": "vllm/benchmarks/sweep/serve_workload.py", "symbols": ["def explore_comb_workloads", "def run_comb_workload"]},
@@ -190,14 +194,15 @@
       {"path": "vllm/v1/metrics/prometheus.py", "symbols": ["def setup_multiprocess_prometheus", "def get_prometheus_registry", "def shutdown_prometheus"]},
       {"path": "vllm/v1/metrics/perf.py", "symbols": ["class PerfStats", "class ExecutionContext", "class ComponentMetrics"]},
       {"path": "vllm/config/profiler.py", "symbols": ["class ProfilerConfig", "delay_iterations", "active_iterations", "capture_torch_profiler"]},
-      {"path": "vllm/v1/worker/gpu_worker.py", "symbols": ["def profile", "TorchProfilerWrapper", "CudaProfilerWrapper", "ProtonProfilerWrapper"]},
+      {"path": "vllm/v1/worker/gpu_worker.py", "symbols": ["def profile"]},
       {"path": "docs/contributing/profiling.md", "symbols": ["Profile with PyTorch Profiler", "Profile with Triton Proton", "Profile with NVIDIA Nsight Systems"]},
       {"path": "benchmarks/benchmark_block_pool.py", "symbols": ["def main", "BlockPool", "TimeCollector"]},
       {"path": "benchmarks/benchmark_prefix_caching.py", "symbols": ["def test_prefix", "def sample_requests_from_random", "def repeat_and_sort_requests"]},
       {"path": "tests/benchmarks/test_latency_cli.py", "symbols": ["def test_bench_latency"]},
       {"path": "tests/benchmarks/test_throughput_cli.py", "symbols": ["def test_bench_throughput", "def test_assign_loras_round_robin"]},
       {"path": "tests/benchmarks/test_serve_cli.py", "symbols": ["def test_bench_serve", "def test_bench_serve_chat"]},
-      {"path": "tests/benchmarks/sweep/test_param_sweep.py", "symbols": ["class TestParameterSweep", "def test_unique_benchmark_names_validation"]}
+      {"path": "tests/benchmarks/sweep/test_param_sweep.py", "symbols": ["class TestParameterSweep", "def test_unique_benchmark_names_validation"]},
+      {"path": "vllm/profiler/wrapper.py", "symbols": ["class TorchProfilerWrapper", "class CudaProfilerWrapper", "class ProtonProfilerWrapper", "def create_worker_profiler", "def create_graph_capture_profiler", "def validate_worker_profiler_config"]}
     ]
   }
 }

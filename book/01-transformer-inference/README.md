@@ -3,10 +3,10 @@ title: "第01章 从 Transformer 到大模型推理"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
-source_branch: main
+source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
+source_branch: v0.31.0
 source_dirty: false
-verified_at: 2026-10-08
+verified_at: 2026-10-18
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -54,7 +54,7 @@ prerequisites:
 > **本节先看：** 这一部分先划定结论成立的源码版本和讨论边界。超出范围的实现不能直接套用本章结论，需要重新核对源码。
 
 - 源码仓库：`vllm-project/vllm`
-- 源码 commit：`5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`
+- 源码 commit：`db9527a46873454610df6dbedf79a36d6bf1a7f6`
 - 阅读主线：decoder-only 文本生成、vLLM V1 Engine、Llama 类模型。
 - 本章使用单层、单 attention head 的教学模型建立直觉；真实模型通常有多层、
   多个 query heads，并可能使用 GQA、量化、TP 和不同 attention backend。
@@ -612,9 +612,25 @@ flowchart TD
   `apply_logits_processors` 实际执行上述分支，类注释可辅助阅读。
 - 第二代 Model Runner（Model Runner V2，简称 MRV2，位于 `vllm/v1/worker/gpu/model_runner.py`）把 sampling state、penalty、bad words、logprob 等拆到
   `vllm/v1/worker/gpu/sample/`，并大量使用 Triton 实现。其 `Sampler.apply_sampling_params`
-  实际按 bias → penalties → bad words → thinking budget（思考预算掩码，用于控制长思考链 token 预算）→ temperature → min-p 处理，
-  随后在采样路径应用 top-k/top-p；不能把 MRV1 的顺序原样套过去。
+  在本章 revision 中先构造有序 `logits_processors`：bias → penalties → bad words →
+  用户配置的 custom processors。`apply_sampling_params` 逐个调用 `processor.apply(logits, ctx)`，
+  然后应用 thinking budget（思考预算掩码）、temperature、min-p；默认在此继续应用
+  top-k/top-p，选择 fused random 路径时才通过 `skip_top_k_top_p` 留给后续 kernel。bias 与 penalty 不可随意交换：先加分再按倍率惩罚，通常不等于反过来。
+  thinking budget 放在自定义 processor 后，避免它强制的结束标记被后续自定义逻辑覆盖。
 - MRV2 可以使用 Gumbel sampling 等方法避免简单地“先物化完整 softmax 再抽样”。
+  `_sample_random` 还可走 FlashInfer 或 XPU fused sampler，但需同时满足能力门控与
+  batch 条件：例如有 greedy 请求、显式 seed 或需要 processed logprobs 时，不走该
+  fused 分支。不能把“支持某 backend”理解为每个 batch 都选择它。
+
+[源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.__init__`、
+`apply_sampling_params`、`sample`、`_sample_random`
+
+custom processor 收到的 `LogitsContext` 按 logits 行描述 batch，不保证一行就是一个
+独立请求；speculative decoding 下同一请求可占多行。持久状态按 request slot 保存，
+slot 会复用，`add_request` 必须重新初始化，不能把上一请求的状态带给下一请求。
+
+[源码] `vllm/v1/worker/gpu/sample/logits_processor/interface.py` -
+`LogitsContext`、`LogitsProcessor.add_request`、`LogitsProcessor.apply`
 
 因此源码阅读时要区分三层：参数语义、数学等价形式、实际 kernel 实现。
 
@@ -1119,12 +1135,12 @@ flowchart TD
 4. `LlamaForCausalLM.forward` 返回模型输出：最后 PP rank 是 hidden states，非最后
    rank 是供下一 stage 使用的 `IntermediateTensors`；`compute_logits` 在
    `vllm/model_executor/models/llama.py:546` 附近单独调用 `LogitsProcessor`。模型 forward 不等于 sampling。
-5. 通用 `Attention` 类在 `vllm/model_executor/layers/attention/attention.py:223` 附近声明自己的职责包括写 KV Cache、
+5. 通用 `Attention` 类在 `vllm/model_executor/layers/attention/attention.py:229` 附近声明自己的职责包括写 KV Cache、
    执行 attention 和返回输出；具体 backend 由配置和能力选择。
 6. `Attention.forward` 接收扁平 token tensor，并 reshape 为
    `[num_tokens,num_heads,head_size]` 后进入实现层。
 7. MRV1 `Sampler` 在 `vllm/v1/sample/sampler.py:21`，MRV2 `Sampler` 在
-   `vllm/v1/worker/gpu/sample/sampler.py:33`。二者不能因为同名而混为一个类。
+   `vllm/v1/worker/gpu/sample/sampler.py:42`。二者不能因为同名而混为一个类。
 
 ### 第一步：模型对象怎样组装
 
@@ -1252,8 +1268,15 @@ sampling。这是模型数学与分布式所有权结合的一个具体例子。
   再检查 greedy 条件，例如 `n` 必须为 1。
 - stop strings 需要 detokenization；空 stop string 会被拒绝。
 
-这些是 API 参数进入 kernel 前的契约。Sampler 内部仍有防御性处理，但不能把所有
+这些是基础参数契约，不等于所有校验都由 `SamplingParams` 独立完成。
+`InputProcessor._validate_params` 先调用 `params.verify`，再调用按 MRV1/MRV2 选择的
+custom logits processor 参数校验器；因此仅构造 `SamplingParams` 成功，不能证明请求
+能通过当前 Runner 的准入校验。`prompt_logprob_token_ids` 也在此检查 MRV2 要求及与
+`kv_sharing_fast_prefill` 的不兼容。Sampler 内部仍有防御性处理，但不能把所有
 非法参数都留给 GPU kernel 才发现。
+
+[源码] `vllm/v1/engine/input_processor.py` -
+`InputProcessor._build_logits_processors_params_validator`、`_validate_params`
 
 ### 源码证据矩阵
 

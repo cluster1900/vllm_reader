@@ -3,10 +3,10 @@ title: "第10章 实验、性能分析与优化"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
-source_branch: main
+source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
+source_branch: v0.31.0
 source_dirty: false
-verified_at: 2026-10-08
+verified_at: 2026-10-18
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -223,13 +223,18 @@ token 数，缺失时可能重新 tokenize 文本；ITL 列表则来自流式事
 - usage 是否返回真实 token 数；
 - tokenizer 是否与服务端一致。
 
-**当前适配器还有细微差异。** `async_request_openai_completions` 在含 choices 的
-消息上更新时间戳；chat 适配器 `async_request_openai_chat_completions` 连 usage-only
-消息也会更新末时间戳，而且含 choices 的空 content/role 消息可能触发首事件计时。
-因此 `t_last` 应解释为该适配器计入的末事件，不能无条件称为最后一个文本 token。
+**当前适配器的末事件规则。** completion 与 chat 适配器只在含 choices 的消息上
+更新末时间戳；chat 的 trailing usage-only 消息不再延长 E2EL。含 choices 的空
+content/role 消息仍可能触发首事件计时，因此这里也不保证等于第一个可见文本 token。
+与旧版对比时，这一计时修正本身就可能降低 chat 的 E2EL/TPOT，不能当作 GPU 提速。
+
+此版本还增加 `openai-responses` 适配器：文本 delta 和 reasoning delta 都参与 TTFT/ITL
+计时，仅文本 delta 累积到返回文本；usage 从终结事件取值，但终结事件不推进末时间戳。
+没有 token delta、缺少终结事件或收到错误事件均标记失败；不能直接套用 chat 的事件规则。
 
 [源码] `vllm/benchmarks/lib/endpoint_request_func.py` -
-`async_request_openai_completions`、`async_request_openai_chat_completions`
+`async_request_openai_completions`、`async_request_openai_chat_completions`、
+`async_request_openai_responses`
 
 ### 10.2.4 E2EL 不等于服务器纯推理时间
 
@@ -917,7 +922,9 @@ memory、stack 或 FLOPS 记录还会增加额外开销。因此：
 
 当前 `ProfilerConfig` 支持：
 
-- CPU 与 CUDA activities；
+- 由平台决定默认 activities，并可通过 `torch_profiler_activities` 显式选择；
+  CUDA Worker 默认 CPU+CUDA，XPU Worker 默认 CPU+XPU，CPU Worker 默认 CPU；
+  不支持的 activity 组合会在 Worker 校验时拒绝；
 - stack、shape、memory、FLOPS 选项；
 - wait/warmup/active schedule；
 - delay/max engine iterations；
@@ -931,14 +938,26 @@ vllm serve MODEL \
 vllm bench serve ... --profile --num-prompts 8
 ```
 
+Worker 通过 `vllm/profiler/wrapper.py` 的 `create_worker_profiler` 与
+`create_graph_capture_profiler` 创建 profiler，配置验证由 `validate_worker_profiler_config`
+负责；具体 wrapper 类已不在 `gpu_worker.py` 定义。
+
 多 rank 下每个 Worker 各自产生 trace。比较之前先确认 trace 文件对应的 DP/PP/TP/DCP/EP
 坐标，而不是只打开 rank 0。
 
 ### 10.15.3 Proton
 
-Proton 面向 Triton kernel，可输出 aggregate tree 或 Chrome trace。固定源码版本中 NVIDIA
-CUPTI 可用，要求 eager execution，不支持 CUDA Graph profiling；tree/trace 与输出格式有
-组合约束。它适合深入 Triton kernel，但不替代完整 CPU、IPC 和网络时间线。
+Proton 面向 Triton kernel，可输出 aggregate tree 或 Chrome trace。本版本通过 NVIDIA
+CUPTI 支持 CUDA Graph attribution，不再一律要求 eager。启用
+`proton_graph_attribution=true` 需 Triton >= 3.7、`proton_data="tree"`，且不能与
+`periodic_flushing` 同时使用；Worker 在 capture 阶段启动观察，随后分开记录 profile runs。
+Chrome trace 需 `proton_data="trace"`，因此仍须 `--enforce-eager` 禁用 CUDA Graph。
+不启用 attribution 时，有 CUDA Graph 的执行不能正确归因 replayed kernels。
+它适合深入 kernel，但不替代完整 CPU、IPC 和网络时间线。
+
+[源码] `vllm/profiler/wrapper.py` - `ProtonProfilerWrapper`、`create_graph_capture_profiler`
+
+[设计] `docs/contributing/profiling.md` - Profile with Triton Proton
 
 ### 10.15.4 Nsight Systems
 
@@ -1400,6 +1419,9 @@ run-2026-09-07T120000/
 
 ### 10.22.3 JSON 中必须携带 schema/version
 
+此版本 latency/throughput JSON 新增 `model_id`；serve 会脱敏 header 参数后打印或保存
+参数，仍须自行检查其他输出中是否含私密数据。这不改变计时边界或吞吐公式。
+
 指标字段会演进。至少保存工具 commit、命令、字段单位和 schema version，避免半年后把秒
 当毫秒、把 expected tokens 当 actual tokens。
 
@@ -1569,14 +1591,15 @@ throughput、goodput、p99 TTFT/TPOT、client queue、server queue。
 10. `vllm/v1/metrics/loggers.py`：日志与 Prometheus 指标定义和聚合。
 11. `vllm/v1/metrics/prometheus.py`：多进程 registry 生命周期。
 12. `vllm/v1/metrics/perf.py`：FLOPS/bytes 解析模型与 MFU。
-13. `vllm/config/profiler.py`、`vllm/v1/worker/gpu_worker.py`：profiler 配置与 Worker 控制。
+13. `vllm/config/profiler.py`、`vllm/profiler/wrapper.py`、
+    `vllm/v1/worker/gpu_worker.py`：profiler 配置、wrapper/factory 与 Worker 控制。
 14. `docs/contributing/profiling.md`：PyTorch、Proton、Nsight Systems 工作流。
 15. `benchmarks/benchmark_block_pool.py`、`benchmarks/benchmark_prefix_caching.py` 和
     `benchmarks/attention_benchmarks/`：组件与 kernel 层实例。
 16. `tests/benchmarks/`：CLI、dataset adapter、sweep 和参数稳定性测试。
 
-本章正文、指标分析器和 CPU 单元测试已经完成，并绑定 commit
-`5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`。当前机器没有可用的 NVIDIA GPU vLLM
+本章正文已按 v0.31.0 复核，指标教学代码的 CPU 测试通过；源码基线为 commit
+`db9527a46873454610df6dbedf79a36d6bf1a7f6`。当前机器没有可用的 NVIDIA GPU vLLM
 运行环境，因此 profiler、NCCL 与真实服务性能数据仍标记为 `runtime_verified: false`。
 本章给出的数值曲线均为教学示意，不能冒充实测结果。
 

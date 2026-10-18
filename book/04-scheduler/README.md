@@ -3,10 +3,10 @@ title: "第04章 Scheduler 与 Continuous Batching"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
-source_branch: main
+source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
+source_branch: v0.31.0
 source_dirty: false
-verified_at: 2026-10-08
+verified_at: 2026-10-18
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -41,7 +41,7 @@ Continuous Batching 不是源码中的一个独立 `ContinuousBatching` 类。�
 4. 新请求可以填补空出的 sequence slot 和 token budget；
 5. 长 prefill 可以切成多个 chunk，与 decode 工作共享一轮计算。
 
-本章绑定源码 revision `5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`。文中继续区分：
+本章绑定源码 revision `db9527a46873454610df6dbedf79a36d6bf1a7f6`。文中继续区分：
 
 - **源码事实**：固定 revision 的实现或测试可直接证明。
 - **设计含义**：由多个源码事实推导出的系统解释。
@@ -450,8 +450,14 @@ input_budget -= num_new_tokens + draft_slots
 
 ### 4.6.3 `max_num_seqs`
 
-它限制同时处于运行侧的 sequence 数量，不限制 token 总量。100 个短 decode 请求和一个
-10K prompt 会受到完全不同的瓶颈。
+`max_num_seqs` 决定 Model Runner 的请求 buffer 与 CUDA Graph 容量，并作为默认准入上限。
+v0.31.0 新增 `max_num_active_seqs`：未设置时沿用 `max_num_seqs`；设置后只降低 RUNNING
+准入上限，不缩小 Runner 容量，且必须不大于 `max_num_seqs`。两者都不是 token 总量。
+100 个短 decode 请求和一个 10K prompt 会受到不同瓶颈。
+
+[源码] `vllm/config/scheduler.py` - `SchedulerConfig`（L70–79、336–345）
+
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.__init__`（L126–132）、`schedule`（L890–895）
 
 暂停等待 streaming input 的会话虽然不在普通 running 列表中，仍可能占 Model Runner
 request slot；源码在准入时把它们计入 running 数。
@@ -480,7 +486,9 @@ flowchart TB
     KVSTEP --> RUN[遍历 RUNNING]
     RUN --> RALLOC[计算差额并申请 KV slots]
     RALLOC --> RPRE{申请失败?}
-    RPRE -->|是| VICTIM[选择并抢占 victim]
+    RPRE -->|是| SAFE{候选 blocks 可立即释放?}
+    SAFE -->|是| VICTIM[选择并抢占 victim]
+    SAFE -->|否| BUILD
     VICTIM --> RALLOC
     RPRE -->|否| RREC[记录 running 工作并扣预算]
     RREC --> WAITCOND{本轮没有抢占且未暂停?}
@@ -511,7 +519,7 @@ flowchart TB
     A[取 running request] --> B{当前可 decode?}
     B -->|否| NEXT[跳到下一个]
     B -->|是| C[计算 target-computed]
-    C --> D[应用 long prefill threshold]
+    C --> D[多请求时应用有效 prefill threshold]
     D --> E[裁剪 token/input budget]
     E --> F[裁剪 max model len]
     F --> G[Mamba / encoder / lookahead 约束]
@@ -520,7 +528,9 @@ flowchart TB
     H -->|是| I[allocate_slots]
     I --> J{成功?}
     J -->|是| K[记录并扣预算]
-    J -->|否| L[抢占 running victim]
+    J -->|否| SAFE{无 pending free 且 victim 可立即释放?}
+    SAFE -->|是| L[抢占 running victim]
+    SAFE -->|否| STOP[停止本轮 running 分配]
     L --> I
     K --> NEXT
 ```
@@ -540,7 +550,13 @@ flowchart TB
 ### 4.8.2 Running 分配失败会尝试抢占
 
 已经 running 的请求需要扩展 KV 时，如果 `allocate_slots()` 返回 `None`，Scheduler
-会从当前 running 集合中选择 victim，释放其 block，再重试当前请求。
+会尝试从当前 running 集合选择 victim。v0.31.0 在 connector 有 pending block frees，或
+`_request_blocks_can_be_freed(victim)` 为假时先停止重试，不做无助于立即分配的抢占。
+只有能即时释放时才移出 victim、回收 block 并重试；fence 尚未完成不能当作可用容量。
+
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`（L755–782）
+
+[测试] `tests/v1/core/test_deferred_block_free.py` - `test_allocation_retry_waits_for_fence_then_succeeds`
 
 如果 victim 在本 step 已经获得工作，源码还会撤销它的调度记录，并恢复 token budget、
 input budget 与 draft slots、新 block 记录、speculative token 记录和 encoder compute
@@ -690,9 +706,21 @@ chunked prefill 后，如果下一个长请求整体放不进剩余 budget，Sch
 
 ### 4.10.3 Threshold 不是总 chunk 大小
 
-`long_prefill_token_threshold` 只是一个额外上限，最终 chunk 还受当前 token/input budget、
-encoder、Mamba 对齐和 lookahead 等限制。设为 0 表示关闭该额外 cap，不表示关闭
-chunked prefill。
+`long_prefill_token_threshold` 是条件化的额外上限，不是总 chunk 大小。v0.31.0 先从
+`get_request_counts()` 取得 running + waiting（含 `kv_holding_waiting`）请求数：
+只有多于一个请求时才启用 cap；
+单独一个长请求可以使用整轮预算。若同时启用 `long_prefill_token_threshold_adaptive`，
+有效 cap 为配置阈值与本轮初始 `input_budget // num_eligible_reqs` 的较大值。
+
+例如预算 1024、阈值 400：单请求可安排 1024；同时有其他请求时仍受 400 限制。
+若两请求、阈值 100 且 adaptive=True，有效 cap 提升至 512。这是预算公平份额的下限，
+不是每个请求必得 512 的保证。最终还受剩余 token/input budget、encoder、Mamba 对齐和
+lookahead 等限制。阈值设为 0 表示关闭额外 cap，不表示关闭 chunked prefill。
+
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`（L611–626）
+
+[测试] `tests/v1/core/test_scheduler.py` - `test_long_prefill_threshold_ignored_when_alone`、
+`test_long_prefill_threshold_applies_with_other_requests`、`test_long_prefill_threshold_floored_by_fair_share`
 
 ## 4.11 Continuous Batching 的逐步例子
 
@@ -711,6 +739,10 @@ max_num_scheduled_tokens = 8
 long_prefill_token_threshold = 6
 max_num_seqs = 3
 ```
+
+以下是随书教学模型的输出，不是 v0.31.0 生产 Scheduler 的逐步 trace。
+教学模型保留无条件 threshold cap，因此只有 A 时仍算 6；上游新版单请求会绕过 cap，
+在其他约束允许时可用满 8-token 预算。示例用于说明动态成员变化，不作为新版阈值语义证据。
 
 教学模型得到：
 
@@ -1173,7 +1205,9 @@ token 输出”直接等同于“内核可以睡眠”。
 | `max_num_batched_tokens` | 更大 prefill 吞吐、更高设备利用率 | 单 step 更长，decode 延迟抖动 |
 | `max_num_scheduled_tokens` | Scheduler 每轮可发更多工作 | 受实际 batch 追加位置限制 |
 | `max_num_seqs` | 更多 decode 并发 | KV 压力、CPU 开销、graph shape 增多 |
-| `long_prefill_token_threshold` | 单个长 prefill 每轮推进更多 | 更容易挤压 decode |
+| `max_num_active_seqs` | 提高 RUNNING 准入上限 | 不改变 Runner/graph 容量，须不大于 `max_num_seqs` |
+| `long_prefill_token_threshold` | 多请求时单个长 prefill 可推进更多 | 单请求绕过；0 关闭额外 cap |
+| `long_prefill_token_threshold_adaptive` | cap 至少为初始 input budget 的请求公平份额 | 不保证均匀实际分配 |
 | `scheduler_reserve_full_isl` | 减少过度准入和 thrashing | 极端小 KV 下更保守 |
 | `watermark` | 给增长留余量，减少抢占 | 降低可立即使用的容量 |
 | `prefill_schedule_interval` | DP rank 时延更整齐 | 新请求 TTFT 可能增加 |

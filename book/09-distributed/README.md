@@ -3,10 +3,10 @@ title: "第09章 分布式与多 GPU 推理"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
-source_branch: main
+source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
+source_branch: v0.31.0
 source_dirty: false
-verified_at: 2026-10-08
+verified_at: 2026-10-18
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -136,7 +136,7 @@ PCP/DCP=多少、互联是什么、请求分布是什么`。
 | PP | 模型层段 | stage 间中间张量传输 | 每卡保留本段状态；在线与离线均可评估，需考虑气泡和负载平衡 |
 | DP | 请求 | 普通 dense 副本可较独立；跨 DP 的 EP 需要同步 | 每个逻辑副本可内部组合 TP/PP，不要求整个模型放入单卡 |
 | EP | MoE 专家 | dispatch/compute/combine 相关通信 | 非专家层仍有自己的布局；适用性取决于模型、后端和专家负载 |
-| PCP | prefill token/chunk | 收集与原序重排等 | 增加 worker 数；本版本 MRV2 有 MLA、PP、DP 等组合限制 |
+| PCP | prefill token/chunk | 收集与原序重排等 | 增加 worker 数；本版本 MRV2 有 MLA、PP、DCP 等组合限制 |
 | DCP | attention context/KV | Query 准备、局部 attention 和 LSE 合并 | 复用已有 ranks，不新增设备；实际 KV 分片与收益需看配置 |
 
 例如高速互联可能有利于 TP，但“有 NVLink”不能推出 TP 必然更快；“长上下文”
@@ -214,7 +214,7 @@ group 交换 tensor metadata，再在 device group 发送真正的 GPU tensor。
 
 ### 9.3.1 当前源码中的 world size 公式
 
-固定版本 `5893426...` 的 `ParallelConfig.__post_init__` 使用：
+固定版本 `v0.31.0 / db9527a4...` 的 `ParallelConfig.__post_init__` 使用：
 
 $$
 W_{\mathrm{engine}}=\mathrm{TP}\times \mathrm{PP}\times \mathrm{PCP}
@@ -234,10 +234,11 @@ $$
 真实进程总数。读代码时必须同时确认启动方式和字段的消费位置。
 
 所有并行度是无单位正整数，`W` 是 worker 数，不包含 API、EngineCore 等辅助进程。
-能写出乘法不代表组合可运行：当前 `ParallelConfig` 明确拒绝 `PCP>1` 与 `DP>1`
-同时开启，MRV2 PCP 还不支持 `PP>1`。先检查合法性，再算部署规模。
+能写出乘法不代表组合可运行：此版本已移除 `ParallelConfig` 中 PCP 与 DP 不能同时开启的
+通用禁令，但 MRV2 PCP 仍不支持 `PP>1`，还要满足 MLA、DCP、speculation 和 graph
+约束。移除一个校验不代表任意组合可运行。先检查合法性，再算部署规模。
 
-[源码] `vllm/config/parallel.py` - `ParallelConfig` 的 PCP/DP 与 DCP 校验、`__post_init__`
+[源码] `vllm/config/parallel.py` - `ParallelConfig` 的 PCP/DCP 校验、`__post_init__`
 
 ### 9.3.2 rank 的逻辑布局是一个多维张量
 
@@ -759,7 +760,9 @@ sequenceDiagram
 - graph 或 microbatch 场景把各 rank padding 到最大 token 数；
 - graph mode 取组内最保守的共同模式。
 
-这是 collective shape 一致性的保障，不是普通 API 负载均衡。
+这是正常跨 DP 执行路径的 collective shape 一致性保障，不是普通 API 负载均衡。
+此版本另有 `skip_dp_coordination()` 上下文：启用时不做跨 rank 规约，而以本地
+padding 数构造结果、保留本地 graph mode；不能把正常路径的同步保证推广到该显式跳过路径。
 
 ---
 
@@ -886,7 +889,10 @@ rank 3: [6,7]   + [8,9]
 
 ```mermaid
 flowchart LR
-    T[Original token order] --> C[Split into 2 x PCP chunks]
+    T[Original token order] --> K{"Decode OR (short prefill AND DCP enabled)?"}
+    K -->|no| C[Split into 2 x PCP chunks]
+    K -->|yes| REP[Replicate full query to PCP ranks]
+    REP --> G[Gather and reorder]
     C --> R0[rank 0: front 0 + back 7]
     C --> R1[rank 1: front 1 + back 6]
     C --> R2[rank 2: front 2 + back 5]
@@ -900,21 +906,29 @@ flowchart LR
 
 > **读图方法：** 阅读“PCP 的 DualChunkSwap”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
 
-Decode tokens 不按相同方式分片，而是复制到 PCP ranks；执行结束后 gathered hidden states
-还要按原 token 顺序恢复。切片只是第一步，正确重排同样属于算法契约。
+Decode tokens 不按相同方式分片，而是复制到 PCP ranks；启用 DCP 时，过短、无法填满全部
+`2×PCP` chunks 的 prefill 也会复制，避免某些 rank 缺少 chunk。具体条件是
+`(2×PCP-1)×ceil(query_len/(2×PCP)) >= query_len`。图中 rank 0–3 的双 chunk 分支以足长 prefill 为例。
+执行结束后 gathered hidden states 还要按原 token 顺序恢复；当前局部行按 decode 在前、
+prefill 在后，再按 request 与原片段起点排序。切片和正确重排共同构成算法契约。
 
 ### 9.9.3 当前 PCP 不是通用开关
 
-固定版本的 MRV2 PCP 有明确限制，包括：
+固定版本的 `PCPManager.validate_config` 有明确限制，包括：
 
-- 仅支持 MLA 路径；
-- 不与 PP 同时使用；
-- 不支持 encoder-decoder、multimodal、LoRA、speculative decode；
-- 通用并行配置还拒绝 `PCP>1` 与 `DP>1` 组合；
-- sparse MLA 不支持 CUDA Graph；
-- 普通 PCP 只允许 piecewise graph，不允许 full graph。
+- 仅支持 MLA；不与 PP、encoder-decoder、multimodal 或 LoRA 同时使用。
+- speculative decoding 允许 DSpark 或单模块 MTP，不支持其他方法或多模块 MTP。
+  DSpark 的 draft model 使用 MLA 时，还要求 DCP 为 1 或 PCP。
+- 通用配置已不再禁止 PCP 与 DP 组合，但仍需通过其他配置和后端校验。
+- PCP 与 `DCP>1` 同时使用时，仅支持 sparse MLA，且要求 `dcp_comm_backend="ag_rs"`。
+- sparse MLA 且 `DCP=1` 时，CUDA Graph 必须为 NONE。
+- full graph 仅可用于分离的 decode routine：允许 FULL_DECODE_ONLY 或
+  FULL_AND_PIECEWISE；PIECEWISE 和 NONE 仍可用，但还要满足上述 sparse MLA 约束。
 
-这些是当前源码约束，不是 PCP 理论本身的永久限制。升级 vLLM 后应重新核对配置校验。
+因此旧版本“PCP 禁用所有 speculation/full graph”的规则已不适用；也不能反过来
+说 PCP 全面支持它们。升级实验必须记录完整组合，而不只是 PCP size。
+
+[源码] `vllm/v1/worker/gpu/pcp_manager.py` - `PCPManager.validate_config`、`replicated_requests`
 
 ### 9.9.4 DCP 如何分配 KV token
 
@@ -1432,7 +1446,7 @@ Collective 改变加法顺序，TP/EP 还可能选用不同 kernel。正确比�
 ## 9.18 随章教学代码
 
 [`examples/ch09_parallel_topology.py`](../../examples/ch09_parallel_topology.py) 不依赖 PyTorch、
-CUDA 或 NCCL，复现本章的代数与拓扑契约：
+CUDA 或 NCCL，用于验证代数与基础拓扑契约，而非完整复制当前上游配置校验：
 
 - `ParallelTopology`：rank 坐标以及 TP/PP/DP/EP/PCP/DCP groups；
 - `column_parallel_linear`、`row_parallel_linear`：TP 矩阵切分；
@@ -1452,6 +1466,11 @@ python3 -m unittest tests.test_ch09_parallel_topology
 
 示例输出中的 `TP=2, PP=2, DP=2` 应得到每个 DP engine 4 个 workers、跨 DP 共 8 个
 workers，并打印与 9.3 节一致的 groups。
+
+教学模拟器已移除旧基线的 `PCP>1 && DP>1` 禁令，并测试组合后的 DP/PCP/EP groups。
+但 `pcp_dual_chunk_assignment` 只演示足长 prefill 的双 chunk 划分，不覆盖新版
+PCP+DCP 的短 prefill 复制、speculation 和 CUDA Graph 行为；它也不模拟模型/backend
+合法性校验。因此构造成功只证明拓扑可展开，不证明该配置可在真实模型上运行。
 
 ### 9.18.1 为什么教学代码不启动 NCCL
 
@@ -1529,8 +1548,8 @@ group。
 
 > **本节先看：** 下面先给出“练习题”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
 
-1. `TP=4, PP=2, PCP=2, DP=3` 的形式乘积分别是多少？为什么当前版本会在启动前
-   拒绝它？将 PCP 改为 1 后再计算可部署的 worker 数。
+1. `TP=4, PP=2, PCP=2, DP=3` 的形式乘积分别是多少？为什么 MRV2 PCP 的 PP
+   校验仍拒绝它？把 PP 改为 1 后，PCP+DP 是否仍被通用配置禁止？还需核对哪些约束？
 2. 为什么 `DCP=2` 不一定需要比 `DCP=1` 多两倍进程？
 3. 对 `TP=2, PP=2, DP=2` 手工推导 rank 5 的坐标和三个 process groups。
 4. 证明 Row Parallel Linear 的 partial outputs 必须求和，不能 concat。
@@ -1607,8 +1626,8 @@ communication contract 重新建立理解。
 14. `vllm/v1/worker/cp_utils.py`、`vllm/v1/attention/ops/dcp.py`：DCP 通信与归并。
 15. `tests/distributed/`、`tests/v1/engine/`、`tests/v1/worker/`：边界条件与回归测试。
 
-本章正文、教学模拟器和 CPU 单元测试已经完成，并绑定 commit
-`5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`。当前环境没有可用的 NVIDIA 多 GPU vLLM
+本章正文已按 v0.31.0 复核，源码基线为 commit
+`db9527a46873454610df6dbedf79a36d6bf1a7f6`。当前环境没有可用的 NVIDIA 多 GPU vLLM
 运行条件，因此真实 NCCL/Ray 多机实验仍标记为 `runtime_verified: false`，不能把静态源码
 核对和 CPU 教学测试表述成真实 GPU 验证。
 

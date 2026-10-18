@@ -3,10 +3,10 @@ title: "第06章 PagedAttention 与 Attention Backend"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
-source_branch: main
+source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
+source_branch: v0.31.0
 source_dirty: false
-verified_at: 2026-10-08
+verified_at: 2026-10-18
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -34,7 +34,7 @@ prerequisites:
 寻址与执行契约。FlashAttention、FlashInfer、Triton 和平台专用实现都可能消费分页 KV；
 仓库中的 `vllm/v1/attention/ops/paged_attn.py` 也不是所有当前 GPU 路径的统一入口。
 
-本章绑定源码 revision `5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`，继续使用三种证据标签：
+本章绑定源码 revision `db9527a46873454610df6dbedf79a36d6bf1a7f6`，继续使用三种证据标签：
 
 - **源码事实**：能在固定 revision 的实现或测试中直接定位。
 - **设计含义**：由多个源码事实共同推出的系统解释。
@@ -399,7 +399,14 @@ flowchart LR
 MRV1 路径使用 `commit_block_table()` 把 CPU buffer 的有效请求行复制到设备。MRV2 的
 单 cache group 路径调用 `StagedWriteTensor.apply_write()`，把写入内容通过 H2D 复制到设备，让 GPU 通过 UVA
 访问映射后的主机端索引、起点与长度，再更新 GPU block table，最后按本轮请求顺序 gather。
-UVA 不是所有数据都免拷贝的保证；两条路径对象名相近，数据搬运方式却不同。
+这段描述对应支持 UVA 且 block table 驻留 GPU 的常规分支。v0.31.0 的
+`UvaBufferPool` 在 UVA 不可用时选择 `NonUvaBuffer`：`uva(n)` 实际执行 CPU→device copy；
+不能从方法名断言零拷贝。对显式采用 `uva_instead_of_gpu` 的冷 tensor，
+`StagedWriteTensor` 还可通过 `write_contents.copy_to_uva` 读取内容，内容不总是单独 H2D。
+UVA 不是所有数据都免拷贝的保证；须同时检查平台能力和 tensor 驻留分支。
+
+[源码] `vllm/v1/worker/gpu/buffer_utils.py` - `NonUvaBuffer`、`UvaBufferPool`（L41–96）、
+`StagedWriteTensor.__init__`、`apply_write`（L153–175、L205–213）
 
 多 cache group 时，`BlockTables.apply_staged_writes()` 改用 `FusedStagedWriter.apply()`，
 汇总各组写入并用一个 kernel 应用。该分支同样区分 H2D 内容与 UVA 元数据，不能把它
@@ -426,7 +433,11 @@ flowchart TD
 > **读图方法：** 这是“为什么 dummy 行必须清零”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
 上游测试专门检查返回的 dummy table 与真实 forward table 拥有相同 `data_ptr()`，同时内容被
-清零。这一细节同时服务 CUDA Graph 地址稳定性和内存安全。
+清零。v0.31.0 又在 slot-mapping kernel 中检查 `idx_mapping >= 0`：dummy/padding request
+不读取负数索引对应的 block-table 行，其所有 token 直接得到 PAD。清零 table 与屏蔽 slot
+write 是互补保护，不能以“table 已清零”替代有效 request 检查。
+
+[源码] `vllm/v1/worker/gpu/block_table.py` - `_compute_slot_mappings_kernel`（L325–364）
 
 ## 6.7 Slot Mapping：本轮 K/V 写到哪里
 
@@ -501,7 +512,10 @@ flowchart LR
 
 ### 6.7.2 Context Parallelism 会先改成 local position
 
-启用 DCP 时，不是每个逻辑 token 都属于当前 rank。kernel 先根据 virtual block、interleave、
+启用 DCP 且当前 group 的 `dcp_sharded=True` 时，不是每个逻辑 token 都属于当前 rank。
+v0.31.0 将该属性逐组传入 slot-mapping kernel；复制型 group 保留原始 positions，所有 rank
+都视为 local，不能对主模型与 draft group 无条件使用同一套 DCP 地址换算。
+对分片 group，kernel 先根据 virtual block、interleave、
 rank 判断位置是否本地，再把 global position 压缩成 local position；非本地位置得到 `-1`。
 
 ```mermaid
@@ -673,12 +687,12 @@ FlashAttention builder 将该值传到自己的 metadata；forward 按它切片 
 `seq_lens` 与 slot mapping 的无效槽标记理解；不要把后端字段旁“excluding padding”的注释
 提升为所有调用路径的不变量。这里修正文档解释，不修改上游字段名或 TODO。
 
-[源码] `vllm/v1/attention/backend.py` - `CommonAttentionMetadata`（L384–388）
+[源码] `vllm/v1/attention/backend.py` - `CommonAttentionMetadata`（L403–407）
 
-[源码] `vllm/v1/worker/gpu_model_runner.py` - `CommonAttentionMetadata` 构造（L2489–2505）
+[源码] `vllm/v1/worker/gpu_model_runner.py` - `CommonAttentionMetadata` 构造（L2424–2440）
 
-[源码] `vllm/v1/attention/backends/flash_attn.py` - `FlashAttentionMetadataBuilder.build`（L556、724）、
-`FlashAttentionImpl.forward`（L998–1008）
+[源码] `vllm/v1/attention/backends/flash_attn.py` - `FlashAttentionMetadataBuilder.build`（L825、993）、
+`FlashAttentionImpl.forward`（L1286–1296）
 
 ### 6.10.1 Common 不等于最终 kernel 参数
 
@@ -929,7 +943,7 @@ head_size, dtype, kv_cache_dtype, user-specified block_size
 use_mla, has_sink, use_sparse, use_mm_prefix
 use_per_head_quant_scales, attention_type, sliding_window
 use_non_causal, batch_invariant, KV connector
-PCP, DCP, adaptive verification
+PCP, DCP, adaptive verification, R-SWA
 ```
 
 只有用户显式指定 block size 时，selector 才把它作为硬约束传入；自动 block size 不应过早
@@ -981,10 +995,15 @@ flowchart TD
 
 > **读图方法：** 这张图用于压缩“自动选择是有序候选过滤”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
-当前普通非 MLA CUDA 候选并非永远同序：在特定 major 10 且 causal 场景中，源码优先
-FlashInfer，再尝试 FlashAttention、Triton、Flex 和 TurboQuant；其他普通路径优先
-FlashAttention，再尝试 FlashInfer 等。MLA 又有按架构、KV dtype、head 数和 head size
-变化的更长候选表。
+当前普通非 MLA CUDA 候选并非永远同序：major 10 且 causal 时通常先 FlashInfer，
+但 `use_mm_prefix=True` 会把 `TRITON_FLASHINFER` 放在它之前；major 9 的其他普通路径
+在 mm-prefix 开启时优先插入 `TRITON_FLASH_ATTN`，再尝试 FlashAttention 等候选。
+没有 mm-prefix 的这些路径保留原排序；MLA 又按架构、KV dtype、head 数和 head size
+采用另一张候选表。排序仍须经过能力校验，不等于插入的候选一定可用。
+
+[源码] `vllm/platforms/cuda.py` - `_get_backend_priorities`（L154–180）
+
+[源码] `vllm/v1/attention/selector.py` - `get_attn_backend`（L170–177）：新增 `use_rswa` 能力约束
 
 因此“CUDA 上 vLLM 默认就是 FlashAttention”不是稳定结论。正确说法是：**当前平台为当前
 配置排序候选，并选择最高优先级的有效 backend。**
@@ -994,7 +1013,7 @@ FlashAttention，再尝试 FlashInfer 等。MLA 又有按架构、KV dtype、hea
 `AttentionBackend.validate_configuration()` 依次检查 head size、activation dtype、KV dtype、
 block size、multimodal prefix、MLA/非 MLA、sink、sparse、per-head scales、compute capability、
 attention type、sliding window、non-causal、batch invariance、KV connector、PCP、adaptive
-verification、DCP 组合以及 backend 自定义组合条件。
+verification、DCP、R-SWA 组合以及 backend 自定义组合条件。
 
 ```mermaid
 flowchart LR
@@ -1025,7 +1044,15 @@ flowchart LR
 - 常规 kernel block size 要求为 16 的倍数，特定 FA4 head-size-256 路径有专用 page size；
 - head size 要求为 8 的倍数，常规上限 256，满足 FA4 条件时可到 512；
 - 支持 sliding window、non-causal 和多种 attention type；
+- mm-prefix 能力要求可用 FA4；仍需通过具体组合校验，不能把类级能力表当作所有配置的保证；
 - 声明 `forward_includes_kv_cache_update=False`。
+
+v0.31.0 新增 `FA4DenseAttentionKernel` JIT warmup：只为满足设备、head dimension、
+page size、dtype、量化与并行条件的有限 compile keys 预热。它不替代后续 metadata build，
+也不是“所有 FA4 请求都已预编译”的保证；本章不把编译成功等同于运行时 kernel 正确性。
+
+[源码] `vllm/v1/attention/backends/flash_attn.py` - `FA4DenseAttentionKernel.get_warmup_keys`、
+`FlashAttentionBackend.supports_mm_prefix`（L441–442）
 
 ### 6.16.2 Builder 复制公共分页字段
 

@@ -50,9 +50,13 @@ class TopologyTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ParallelTopology(tp=3, dcp=2)
 
-    def test_pcp_with_dp_is_rejected_by_pinned_config(self):
-        with self.assertRaisesRegex(ValueError, "PCP does not support"):
-            ParallelTopology(tp=2, dp=2, pcp=2, dcp=2)
+    def test_pcp_with_dp_has_no_general_prohibition_in_v031(self):
+        topology = ParallelTopology(tp=2, dp=2, pcp=2, dcp=2)
+        self.assertEqual(topology.worker_world_size, 4)
+        self.assertEqual(topology.world_size_across_dp, 8)
+        self.assertEqual(topology.groups("dp"), [[0, 4], [1, 5], [2, 6], [3, 7]])
+        self.assertEqual(topology.groups("pcp"), [[0, 2], [1, 3], [4, 6], [5, 7]])
+        self.assertEqual(topology.groups("ep"), [list(range(8))])
 
 
 class TensorParallelTest(unittest.TestCase):

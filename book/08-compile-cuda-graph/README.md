@@ -3,10 +3,10 @@ title: "第08章 异步执行、torch.compile 与 CUDA Graph"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
-source_branch: main
+source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
+source_branch: v0.31.0
 source_dirty: false
-verified_at: 2026-10-08
+verified_at: 2026-10-18
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -52,7 +52,7 @@ flowchart LR
 **核心结论：** 三者可以协同，但它们不是同一个开关，也不是严格的先后版本。定位性能
 问题时，必须先确认收益来自哪一层。
 
-本章绑定源码 revision `5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`，沿用以下标签：
+本章绑定源码 revision `db9527a46873454610df6dbedf79a36d6bf1a7f6`，沿用以下标签：
 
 - **源码事实**：该 revision 下可直接定位的行为。
 - **设计意图**：源码注释或同 revision 设计文档给出的目标。
@@ -259,7 +259,8 @@ flowchart TD
 - Pipeline Parallelism 需要 `pp_size` 个并发 batch 填充 pipeline。
 - async scheduling 需要额外的并发窗口。
 - MRV2 的 async scheduling 返回 `pp_size + 1`。
-- MRV1 仅在 `pp_size <= 1` 时把 async 窗口设为 2；源码明确说明它未完整支持 async + PP。
+- MRV1 仅在 `pp_size <= 1` 时把 async 窗口设为 2；配置校验已拒绝 MRV1 + async + PP>1，
+  不能把 property 中的 fallback 分支当作该组合受支持的证据。
 
 [源码] `vllm/config/vllm.py` - `VllmConfig.max_concurrent_batches`
 
@@ -385,7 +386,13 @@ $$
 - `num_output_placeholders` 增加该数量。
 - `spec_token_ids` 暂时设为 `-1` 列表。
 - 真正 draft/spec token ID 由 Worker 后续更新。
-- MRV2 + PP 时，下一次 decode eligible step 设为 `current_step + pp_size`。
+- MRV2 把下一次 decode eligible step 设为 `current_step + decode_stagger`。默认
+  `decode_stagger=pp_size`；仅 XPU 且关闭 `VLLM_XPU_PP_MICROBATCH` 时为 1。
+- spec placeholder 列表长度随本轮 `SchedulerOutput.num_spec_tokens_to_schedule` 更新，
+  不能一律看成初始化时的固定 speculative token 数。
+
+[源码] `vllm/v1/core/sched/async_scheduler.py` - `AsyncScheduler.__init__`、
+`_update_after_schedule`（L14–60）
 
 ```mermaid
 sequenceDiagram
@@ -540,7 +547,9 @@ flowchart TB
 ### 8.5.1 MRV2 的 `AsyncOutput`
 
 MRV2 sampler 输出仍在 GPU。`AsyncOutput` 在独立 copy stream 上等待 main stream，然后把 sampled
-token、logprobs、NaN 计数、sampling mask、routed experts 等异步搬到 CPU，并记录一个 blocking event。
+token、logprobs、NaN 计数和 sampling mask 等异步搬到 CPU，并记录一个 blocking event。
+辅助输出现通过 `pending_aux_output.enqueue_cpu_copy()` 排队，待 event 完成后由
+`process_output()` 写入 `aux_output_connector_output`，不再直接搬运旧 `routed_experts` 字段。
 
 [源码] `vllm/v1/worker/gpu/async_utils.py` - `AsyncOutput.__init__`、`AsyncOutput.get_output`
 
@@ -1302,7 +1311,9 @@ classDiagram
 一个 captured descriptor 可以覆盖较小实际 batch，但必须满足：
 
 - uniform token count 相同，或 captured descriptor 未约束。
-- captured `max_query_len` 足够大。
+- captured `max_query_len` 足够大；若 captured descriptor 有此约束，调用方传入
+  `None` 会拒绝匹配。Runner 对含 prefill 的 batch 显式传 `None`，防止短 prefill
+  误入 varlen decode-only graph。
 - captured request/token capacity 不小于实际值。
 - LoRA case 完全匹配映射后的 capture case。
 - microbatch 数完全相同。
@@ -1315,7 +1326,9 @@ flowchart TD
     R -- 否 --> X
     R -- 是 --> Q{"uniform/max query compatible?"}
     Q -- 否 --> X
-    Q -- 是 --> L{"LoRA and ubatches match?"}
+    Q -- 是 --> PREFILL{"bounded decode graph with prefill / unknown max query?"}
+    PREFILL -- 是 --> X
+    PREFILL -- 否 --> L{"LoRA and ubatches match?"}
     L -- 否 --> X
     L -- 是 --> Hit["graph hit"]
 ```
@@ -1328,6 +1341,13 @@ flowchart TD
 
 初始化时 manager 为 `(actual_num_tokens, effective_lora_case)` 预展开优先候选列表。运行时先 dict lookup，
 再依次验证 compatibility，而不是遍历所有 captured graphs。
+
+满足 uniform-query、token 数和 DBO 阈值时，`_maybe_ubatch_twin()` 还会为 FULL descriptor
+生成微批次版本；DBO capture 使用微批线程对应的 capture stream，失败时会清理挂起线程。
+这不表示 PIECEWISE 也支持 DBO capture。
+
+[源码] `vllm/v1/worker/gpu/cudagraph_utils.py` - `_maybe_ubatch_twin`（L222–246）、
+`_capture_stream` / `capture`（L391–488）
 
 ```mermaid
 flowchart LR
@@ -1380,8 +1400,17 @@ flowchart LR
 ### 8.14.6 piecewise 有两种实现来源
 
 默认 `run_pw_graph()` 调用模型，让 compiled submodules 内部的 PIECEWISE wrappers 工作；若启用
-breakable CUDA Graph，则使用 `BreakableCUDAGraphWrapper`。如果请求 piecewise，但既没有 active compiled
-submodule，也未启用 breakable graph，capture 会抛错。
+breakable CUDA Graph，则使用 `BreakableCUDAGraphWrapper`。正常 MRV2 初始化已先把
+实际加载模型的 `piecewise_capture_available` 传给模式解析：若二者都不可用，
+`PIECEWISE` 降为 `NONE`，`FULL_AND_PIECEWISE` 降为 `FULL_DECODE_ONLY`。
+capture 中仍保留防御性报错，但它不再是正常配置路径发现缺少 provider 的第一站。
+
+[源码] `vllm/v1/worker/gpu/model_runner.py` - graph 初始化（L701–718）
+
+[源码] `vllm/config/compilation.py` - `CUDAGraphMode.without_piecewise`（L80–85）、
+`resolve_cudagraph_mode_and_sizes`（L1464–1477）
+
+[测试] `tests/test_config.py` - `test_resolve_cudagraph_mode_uses_loaded_piecewise_provider`（L908）
 
 [源码] `vllm/v1/worker/gpu/cudagraph_utils.py` - `has_compiled_submodule`、
 `ModelCudaGraphManager.capture`、`CudaGraphManager.run_pw_graph`
@@ -1435,6 +1464,10 @@ flowchart TD
     Mixed -- 否 --> Decode["检查 decode FULL / spec query 支持"]
     Hybrid --> Decode
     Decode --> Resolve["保留模式或降为 PIECEWISE/NONE"]
+    Resolve --> Provider{"loaded piecewise provider available?"}
+    Provider -- 否 --> Strip["without_piecewise: PW->NONE, FULL_AND_PW->FULL_DECODE_ONLY"]
+    Provider -- 是 --> Final["resolved mode"]
+    Strip --> Final
 ```
 
 > **读图方法：** 从顶部先检查会直接报错的 mixed FULL + NEVER 组合；其余路径经过 mixed 模式调整后，还要汇合到 decode/spec 检查。降级是有序检查，不是命中第一条后就返回。
@@ -1452,6 +1485,7 @@ flowchart TD
 - dynamic speculative decode 与 MRV1。
 - DeepEP high-throughput 等特定组合。
 - sequence parallelism、splitting ops 和 graph partition 的兼容关系。
+- 加载后的模型是否真的提供 piecewise capture；请求配置不等于实际 provider。
 
 ```mermaid
 flowchart LR

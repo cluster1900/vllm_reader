@@ -3,10 +3,10 @@ title: "第05章 KV Cache 内存管理"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
-source_branch: main
+source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
+source_branch: v0.31.0
 source_dirty: false
-verified_at: 2026-10-08
+verified_at: 2026-10-18
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -36,7 +36,7 @@ KV Cache 不是一个 Python 字典，也不只是一块 GPU tensor。阅读当�
 3. EngineCore 中代表物理页所有权的 `KVCacheBlock` 元数据；
 4. 每个请求按逻辑 token 顺序维护的 block table。
 
-本章绑定源码 revision `5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`。文中继续使用三种
+本章绑定源码 revision `db9527a46873454610df6dbedf79a36d6bf1a7f6`。文中继续使用三种
 证据标签：
 
 - **源码事实**：能在固定 revision 的实现或测试中直接定位。
@@ -790,7 +790,7 @@ hit、外部 KV、当前要计算的 token 和 speculative lookahead。
 
 ```mermaid
 flowchart TD
-    IN[allocate_slots inputs] --> ZERO{new=0 and ext=0}
+    IN[allocate_slots inputs] --> ZERO{new=0 and ext=0 and new_comp=0}
     ZERO -->|是| ERR[ValueError]
     ZERO -->|否| ADM{full_sequence_must_fit}
     ADM -->|否| READY[进入 step 容量检查]
@@ -1072,9 +1072,14 @@ free queue head                                      tail
 
 ### 5.14.4 reset 的安全条件
 
-`reset_prefix_cache()` 只有在已用 block 数恰好为 1 时成功；这 1 个就是 null block。存在
-活跃请求时清掉 hash 虽然不一定立即损坏其 K/V，但会破坏整个 cache 生命周期和事件语义，
-所以源码拒绝重置。
+单个 `BlockPool.reset_prefix_cache()` 仍要求已用 block 数恰好为 1，即只剩 null block。
+v0.31.0 的 `KVCacheManager.reset_prefix_cache()` 先交给 coordinator，后者对各 manager
+涉及的不同 pool 去重后逐个 reset，返回全部结果的合取。HiSparse 的 host pool 不应被漏掉。
+这不是跨 pool 原子事务：某个 pool 失败不意味着其他 pool 没有被重置。
+
+[源码] `vllm/v1/core/kv_cache_manager.py` - `KVCacheManager.reset_prefix_cache`（L669–687）
+
+[源码] `vllm/v1/core/kv_cache_coordinator.py` - `KVCacheCoordinator.reset_prefix_cache`（L380–385）
 
 ## 5.15 Partial-tail 与 Copy-on-Write
 
@@ -1097,7 +1102,11 @@ EAGLE、DCP 等路径中加入细粒度 partial hash hit。因而以下表述不
 coordinator 明确支持细粒度查找时，可在 group block 内部的 hash 边界登记 partial entry。
 ```
 
-Sliding Window group 等组合可能明确禁用这项能力，因此它不是所有模型都具备的通用保证。
+v0.31.0 只检查参与 prefix caching 的 group：若对应 manager 不支持细粒度查找，且其
+block size 不等于 hash block size，则关闭 partial hit。Sliding Window 等不兼容组合仍
+可能禁用，不能概括为每个 group 都参加缓存或所有模型都支持。
+
+[源码] `vllm/v1/core/kv_cache_coordinator.py` - `HybridKVCacheCoordinator.__init__`（L691–720）
 
 ### 5.15.2 注册的是查找元数据，不是另分一页
 
@@ -1158,6 +1167,30 @@ sequenceDiagram
 
 这组测试说明 partial-tail 不是独立的小优化，而是会穿过调度、spec decode、并行和远端
 KV 生命周期的条件化能力。初学者先掌握完整 block 主线，再读这些测试更稳妥。
+
+### 5.15.5 v0.31.0 的 checkpoint 与 cache group 边界
+
+新版 `KVCacheSpec.prefix_cacheable` 区分可命中的持久状态与只服务运行的 cache group。
+coordinator 只为允许 caching 的 manager 登记 prefix，不能把所有分配的页都当成前缀缓存。
+`dcp_sharded` 则说明该 group 是否按 DCP 分片；复制的 draft group 不应套用主模型的
+DCP 有效 block 大小。物理页、缓存资格与分片布局是三个不同维度。
+
+Mamba/EAGLE 还要保留未来真正可恢复的 checkpoint。`get_replay_boundaries()` 为相同 prompt
+重发与更长 sibling 分别计算可达边界，避免仅保留较高边界导致重发命中归零。
+`enable_mamba_shared_prefix_checkpoint` 只有同时满足 EAGLE group、partial hash hit 和
+无 reprefillable tail 等条件才激活；不是所有 Mamba 模型无条件使用的新主线。
+
+HiSparse host tier 有私有 pool：命中可能比设备 group 更长，分配时只附着本地与外部命中
+实际覆盖的部分。host CoW 不进入普通 worker GPU block-copy 通道，不能画成所有 group
+共用一个 GPU pool。这里记录接口边界，host transfer 协议不在本章展开。
+
+[源码] `vllm/v1/kv_cache_interface.py` - `KVCacheSpec.prefix_cacheable`、`KVCacheSpec.dcp_sharded`
+
+[源码] `vllm/v1/core/kv_cache_coordinator.py` - `get_replay_boundaries`（L319–338）、`cache_blocks`（L340–364）
+
+[源码] `vllm/v1/core/kv_cache_manager.py` - `__init__`（L181–202）、`allocate_slots`（L467–493）
+
+[源码] `vllm/v1/core/single_type_kv_cache_manager.py` - `HiSparseSourceManager.bind_host_pool`、`take_host_cow_copies`
 
 ## 5.16 Sliding Window：回收旧位置但保持表结构
 
@@ -1220,7 +1253,9 @@ sequenceDiagram
 
 两个细节很重要：
 
-1. 异步 load 时，即使 `num_new_tokens=0` 也允许分配，但必须有 external computed tokens；
+1. 即使 `num_new_tokens=0` 也可能合法：异步 load 可接纳 external computed tokens；
+   v0.31.0 也允许接纳 `num_new_computed_tokens>0` 的本地命中。只有三者全为 0 才报错，
+   不能把“零新计算”与“没有任何状态需附着”混为一谈；
 2. `delay_cache_blocks=True` 时不能立即把目标页注册为可命中，因为 transfer 尚未完成。
 
 `reserved_blocks` 可防止异步 load 的初始分配吃掉已有 in-flight 请求完成当前步骤依赖的

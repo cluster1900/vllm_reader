@@ -1,7 +1,7 @@
 # 章节源码映射
 
 本文件回答“十章是否与当前代码一一对应”。映射基线为
-`5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`，机器可读版本见
+`db9527a46873454610df6dbedf79a36d6bf1a7f6`，机器可读版本见
 `meta/chapter-source-map.json`。
 
 这里的“一一对应”不是指一章只能对应一个文件，而是指：每章有清楚且互不混淆的
@@ -102,3 +102,20 @@ python3 scripts/check_book.py
 
 这些补充不改变各章范围。完整问题、证据与验证记录见
 [全项目文档复核](full-document-review-2026-10-08.md)。
+
+## v0.31.0 升级锚点（2026-10-18）
+
+- 01：`vllm/v1/worker/gpu/sample/logits_processor/interface.py` 的 `LogitsContext`、`LogitsProcessor`；`vllm/v1/engine/input_processor.py` 的 Runner 专属参数校验。
+- 02：`vllm/v1/engine/admission_control.py` 的 `SharedAdmissionStats`；请求计数共享不等于 token 计数共享。
+- 03：`vllm/v1/engine/core.py` 的 `_initialize_effective_attention_block_size`、`release_kv_cache_memory` 与 pause 失败传播。
+- 04：`vllm/config/scheduler.py` 的 `max_num_active_seqs`、`long_prefill_token_threshold_adaptive`，以及 Scheduler 的单请求 cap 豁免与安全回收重试。
+- 05：`vllm/v1/core/kv_cache_coordinator.py` 的 `get_replay_boundaries`、多 pool reset；`vllm/v1/core/single_type_kv_cache_manager.py` 的 `HiSparseSourceManager`。
+- 06：`vllm/v1/worker/gpu/buffer_utils.py` 的 `NonUvaBuffer`、`UvaBufferPool`；DCP 属性逐 cache group 使用。
+
+- 07：Runner 选择与 sampling/aux-output 更新；正确性测试迁移至 `tests/basic_correctness/models/test_basic_correctness.py`。
+- 08：`vllm/config/compilation.py` 的 `CUDAGraphMode.without_piecewise` 与 loaded piecewise provider 测试。
+
+- 09：`vllm/v1/worker/cp_utils.py` 的 dummy-context helpers 取代已删除的旧 shard-count 导航；`PCPManager.replicated_requests` 标出短 prefill 分支。
+- 10：profiler 类和 factory 移至 `vllm/profiler/wrapper.py`；SSE Responses adapter 位于 `vllm/benchmarks/lib/endpoint_request_func.py`。
+
+逐章影响结论、精确源码依据与未运行范围见 [升级复核](upgrade-v0.31.0-2026-10-18/README.md)。

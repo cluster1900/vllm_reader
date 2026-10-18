@@ -3,10 +3,10 @@ title: "第07章 Executor、Worker 与 Model Runner"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 5893426b88f7b3cd21101d194eb1c6f0a6f0e27b
-source_branch: main
+source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
+source_branch: v0.31.0
 source_dirty: false
-verified_at: 2026-10-08
+verified_at: 2026-10-18
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -45,7 +45,7 @@ flowchart TD
 > **读图方法：** 阅读“本章定位”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
 这一段调用链看起来只是“跑模型”，实际上同时跨越五类边界：编排、进程、设备、并行和状态。
-本章绑定源码 revision `5893426b88f7b3cd21101d194eb1c6f0a6f0e27b`，继续使用以下标签：
+本章绑定源码 revision `db9527a46873454610df6dbedf79a36d6bf1a7f6`，继续使用以下标签：
 
 - **源码事实**：当前 revision 可直接定位的行为。
 - **设计意图**：源码注释或同 revision 设计文档表达的目标。
@@ -639,7 +639,9 @@ UVA（统一虚拟寻址）帮助设备访问映射后的地址，不表示主�
 累计长度放入轮转的 UVA 缓冲区，把实际写入内容通过 H2D 复制，再由 kernel 应用。
 因此不能把所有元数据都画成一次 H2D。轮转池复用多份 pinned 主机缓冲区，也不等于
 每个 step 都重新分配一块内存。类本身还允许 `uva_instead_of_gpu=True`，此时名为
-`gpu` 的成员实际是主机内存的设备视图，字段名不决定物理驻留位置。
+`gpu` 的成员在平台支持 UVA 时实际是主机内存的设备视图；不支持时回落 GPU。
+该模式下写入内容本身也通过 UVA pool 提供，而非一律 H2D；上图限定默认 GPU-base 路径。
+字段名不决定物理驻留位置。
 
 这是单 cache group 写入的路径；多个 group 的 block table 使用 `FusedStagedWriter.apply`
 合并写入，仍保持相同的数据与元数据搬运边界。
@@ -786,7 +788,7 @@ MRV1 在再次 execute 时显式抛出 `RuntimeError`；MRV2 的这条入口不�
 说明未来该设计可能变化，所以它是当前 revision 契约，不是永恒 API。
 
 MRV2 保存 input batch、attention metadata、slot mappings、hidden states、DP sync、finished IDs、connector
-output、routed experts 和 graph stats；MRV1 保存 scheduler output、logits、spec metadata、hidden/aux
+output、aux hidden states 和 graph stats；MRV1 保存 scheduler output、logits、spec metadata、hidden/aux
 states、connector output 与 slot mappings。`sample_tokens()` 取出后立即清空临时 state。
 
 ```mermaid
@@ -848,7 +850,14 @@ flowchart TD
 > **读图方法：** 从 logits 追到两条候选路径，再看底部按请求参数合并的节点。它表示按
 > temperature 选择，不是按分数择优；第二遍检查全 greedy 提前返回与混合 batch 的区别。
 
-MRV2 模块化采样的执行顺序依次是：logit bias → penalties → bad words → thinking budget（思考预算掩码，用于控制长思考链 token 预算）→ temperature → min-p → top-k/top-p，随后根据配置选择 FlashInfer 或 Triton Gumbel sampling 路径。
+MRV2 在构造时把 logit bias、penalties、bad words 与 custom logits processors 按顺序组成
+处理链。之后应用 thinking budget（思考预算的结束标记约束）、temperature 和 min-p。
+`sample()` 将 top-k/top-p 留给最终采样分支：满足条件时融合到 FlashInfer 或 XPU sampler，
+否则显式过滤后走 Triton Gumbel。含 greedy、显式 seed 或要求 processed logprobs 的请求
+会影响 fused sampler 的资格，不能只按平台判断。
+
+[源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.__init__`（L65–100）、
+`apply_sampling_params`（L223–273）、`sample` / `_sample_random`（L275–360）
 
 [源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.apply_sampling_params`
 
@@ -859,11 +868,12 @@ flowchart TD
     L2["logits"] --> BI["logit bias"]
     BI --> PE["penalties"]
     PE --> BW["bad words"]
-    BW --> TB["thinking budget"]
+    BW --> CUSTOM["custom logits processors"]
+    CUSTOM --> TB["thinking budget"]
     TB --> TE["temperature"]
     TE --> MP["min-p"]
     MP --> TK["top-k / top-p"]
-    TK --> GS["FlashInfer or Gumbel"]
+    TK --> GS["eligible fused FlashInfer/XPU or explicit-filter Gumbel"]
 ```
 
 > **读图方法：** 阅读“Sampling 的准确处理顺序”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
@@ -922,6 +932,13 @@ flowchart TD
 
 [源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.sample_tokens`
 
+辅助输出通过 `aux_output_connector.begin_step()` 注册，再由 `prepare_output()` 产生
+`pending_aux_output` 交给 `AsyncOutput`；不再把 `routed_experts` 放在 `ExecuteModelState` 中。
+`AsyncOutput.get_output()` 在 copy event 完成后处理辅助输出并填入结果。
+
+[源码] `vllm/v1/worker/gpu/model_runner.py` - `execute_model`（L1695–1699）、
+`sample_tokens`（L2138–2151）；`vllm/v1/worker/gpu/async_utils.py` - `AsyncOutput.get_output`（L202–205）
+
 `AsyncOutput` 在 state postprocess 前创建并记录 copy event，使 D2H 可与后续工作重叠。“返回 async
 wrapper”通常表示 CPU 可消费结构尚在复制，不表示 model forward 尚未发生。
 
@@ -939,7 +956,9 @@ NumPy-backed structures。
 | `logprobs` / `prompt_logprobs_dict` | 可选对数概率或配置指定的 logits 信息，不是归一化概率 |
 | `kv_connector_output` / `ec_connector_output` | connector 状态 |
 | `cudagraph_stats` | graph 执行统计 |
-| `routed_experts` | 可选 MoE 路由数据 |
+| `aux_output_connector_output` | 辅助输出 connector 的逐请求结果，取代旧的直接 `routed_experts` 字段 |
+| `prompt_token_id_logprobs_dict` | 指定 prompt token IDs 的逐请求分数 |
+| `sampling_masks` | 配置启用时的采样掩码 |
 
 ```mermaid
 flowchart LR
@@ -983,9 +1002,14 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    ENV{"VLLM_USE_V2_MODEL_RUNNER set?"}
+    HS{"HiSparse configured?"} -->|yes| HSC{"explicit V2=0?"}
+    HSC -->|yes| ERR["ValueError"]
+    HSC -->|no| T["MRV2"]
+    HS -->|no| WM{"watermark configured?"}
+    WM -->|yes, overrides V2=0| T
+    WM -->|no| ENV{"VLLM_USE_V2_MODEL_RUNNER set?"}
     ENV -->|yes| RET["return explicit boolean"]
-    ENV -->|no| ROCM{"ROCm arch defaults MRV1?"}
+    ENV -->|no| ROCM{"ROCm prefers MRV1 and V1 supports config?"}
     ROCM -->|yes| F1["MRV1"]
     ROCM -->|no| TRI{"Triton available?"}
     TRI -->|no| F2["MRV1"]
@@ -999,13 +1023,22 @@ flowchart TD
 [源码] `vllm/config/vllm.py` - `VllmConfig.use_v2_model_runner`
 
 自动 fallback 检查包括 stock `torch.compile`、TP sequence parallelism、external launcher + PP、部分
-spec decoding/u-batching、elastic EP、custom logits processors、KV sharing fast prefill 和特定 Mamba
-cache mode。
+spec decoding/u-batching、elastic EP 和 Mamba `all` cache mode。custom logits processors
+和 KV sharing fast prefill 已不在这份 MRV2 自动 fallback 列表中。
 
 [源码] `vllm/config/vllm.py` - `_get_v2_model_runner_unsupported_features`
 
-环境变量显式设置时 property 直接返回，所以“MRV2 不支持时总会自动回退”不严谨：默认自动选择会
-回退；显式强制可能在后续 validation 或运行时报错。
+选择先处理 HiSparse 和 watermark：HiSparse 遇到显式 `VLLM_USE_V2_MODEL_RUNNER=0`
+会报错；watermark 则覆盖该值并选择 MRV2。其他配置才直接采用显式环境变量。
+默认 ROCm 的 MRV1 性能偏好也先检查 MRV1 能力，不能把 PCP 或 async+PP 等 V2-only
+组合误送到 MRV1。因此“环境变量总优先”与“不支持总会自动回退”都不成立。
+
+[源码] `vllm/config/vllm.py` - `VllmConfig.use_v2_model_runner`（L701–763）、
+`_get_v2_model_runner_unsupported_features`（L3051–3113）、
+`_get_v1_model_runner_unsupported_features`（L3115–3163）
+
+[测试] `tests/test_config.py` - `test_v2_model_runner_supports_custom_logits_processors`、
+`test_watermarking_forces_model_runner_v2`（静态阅读，未运行上游测试）
 
 MRV2 目标是 permanent rows、async-first、GPU-native input metadata、Triton sampler、模块化和显式
 graph manager；MRV1 仍覆盖部分 V2 尚不支持组合。共存是能力迁移边界。
@@ -1108,7 +1141,7 @@ flowchart LR
 
 上游证据包括 `tests/distributed/test_multiproc_executor.py`、
 `tests/v1/worker/test_gpu_worker.py`、`tests/v1/worker/test_gpu_model_runner.py`、
-`tests/basic_correctness/test_basic_correctness.py` 与 `tests/test_config.py`。
+`tests/basic_correctness/models/test_basic_correctness.py` 与 `tests/test_config.py`。
 
 完整 GPU 实验协议见 `experiments/ch07-execution-pipeline.md`，按以下顺序逐步增加成本：
 
@@ -1147,7 +1180,7 @@ flowchart LR
 15. **Sampling 只是 argmax。** 约束、惩罚、过滤和随机数都会改变结果。
 16. **Async output 表示尚未 forward。** 常见是主机可见结果仍在 D2H。
 17. **V1 Engine 必然 MRV1。** 两者是不同版本维度。
-18. **V2 不支持总会自动回退。** 显式环境覆盖可能后续报错。
+18. **V2 不支持总会自动回退。** 显式强制可能后续报错；HiSparse/watermark 还有更高优先级规则。
 19. **MRV2 已完全替代 MRV1。** 当前仍有明确能力边界。
 20. **空 output 一定错误。** Zero-work、connector-only、非末 PP 都可合法为空。
 
