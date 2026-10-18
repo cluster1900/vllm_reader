@@ -918,7 +918,7 @@ prefill 在后，再按 request 与原片段起点排序。切片和正确重排
 
 - 仅支持 MLA；不与 PP、encoder-decoder、multimodal 或 LoRA 同时使用。
 - speculative decoding 允许 DSpark 或单模块 MTP，不支持其他方法或多模块 MTP。
-  DSpark 的 draft model 使用 MLA 时，还要求 DCP 为 1 或 PCP。
+  DSpark 的 draft model 使用 MLA 时，还要求 `DCP=1` 或 `DCP=PCP`。
 - 通用配置已不再禁止 PCP 与 DP 组合，但仍需通过其他配置和后端校验。
 - PCP 与 `DCP>1` 同时使用时，仅支持 sparse MLA，且要求 `dcp_comm_backend="ag_rs"`。
 - sparse MLA 且 `DCP=1` 时，CUDA Graph 必须为 NONE。
