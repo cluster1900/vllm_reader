@@ -966,7 +966,9 @@ while shutdown state allows running:
     maybe publish DP load stats again
 ```
 
-当没有 work 时，`_process_input_queue()` 可以阻塞等待输入；有 work 后转为持续推进。
+当没有 work 时，`_process_input_queue()` 可以阻塞等待输入；有 work 后，仍先用
+`get_nowait()` 处理队列中已到达的 ADD、ABORT、UTILITY，再推进 step。不能把忙碌
+理解为停止接单，否则无法解释 continuous batching 和运行中的取消。
 若本 step 没有实际模型执行，但 Scheduler 仍在等待远端 KV 等后台工作，代码会短暂
 sleep 1ms，让后台 transfer thread 获得进展机会。
 
@@ -980,7 +982,8 @@ flowchart TD
     C -->|否| D[阻塞读取 input_queue]
     D --> E[handle ADD/ABORT/UTILITY]
     E --> C
-    C -->|是| F[step_fn]
+    C -->|是| DRAIN[非阻塞排空已有 input_queue 消息]
+    DRAIN --> F[step_fn]
     F --> G[outputs -> output_queue]
     G --> H[post_step]
     H --> A

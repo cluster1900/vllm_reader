@@ -1418,7 +1418,9 @@ flowchart LR
 
 主要规则包括：
 
-- mixed FULL 但支持低于 `ALWAYS`：降为 `FULL_AND_PIECEWISE` 或 `FULL_DECODE_ONLY`。
+- mixed FULL 且支持为 `NEVER`：直接抛出 `ValueError`，不是静默降级。
+- mixed FULL 且支持介于 `NEVER` 与 `ALWAYS` 之间：先降为 `FULL_AND_PIECEWISE` 或
+  `FULL_DECODE_ONLY`，随后仍继续检查 decode/spec 条件。
 - decode FULL 但支持为 `NEVER`：若 piecewise 可用则降为 PIECEWISE，否则 NONE。
 - spec decode query length 大于 1，但支持低于 `UNIFORM_BATCH`：同样降为 PIECEWISE 或 NONE。
 
@@ -1426,15 +1428,16 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    Req["requested graph mode"] --> Min["minimum attention support"]
-    Min --> Mixed{"mixed FULL legal?"}
-    Mixed -- 否 --> Hybrid["FULL decode + PW/NONE mixed"]
-    Mixed -- 是 --> Decode{"decode FULL legal?"}
-    Decode -- 否 --> PW["PIECEWISE or NONE"]
-    Decode -- 是 --> Keep["keep resolved mode"]
+    Req["requested graph mode"] --> Fatal{"mixed FULL and support NEVER?"}
+    Fatal -- 是 --> Error["ValueError"]
+    Fatal -- 否 --> Mixed{"mixed FULL but below ALWAYS?"}
+    Mixed -- 是 --> Hybrid["FULL decode + PW/NONE mixed"]
+    Mixed -- 否 --> Decode["检查 decode FULL / spec query 支持"]
+    Hybrid --> Decode
+    Decode --> Resolve["保留模式或降为 PIECEWISE/NONE"]
 ```
 
-> **读图方法：** 这张图用于压缩“自动降级的方向”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
+> **读图方法：** 从顶部先检查会直接报错的 mixed FULL + NEVER 组合；其余路径经过 mixed 模式调整后，还要汇合到 decode/spec 检查。降级是有序检查，不是命中第一条后就返回。
 
 ### 8.15.3 其他会触发 NONE 或降级的条件
 

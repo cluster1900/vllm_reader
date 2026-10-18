@@ -692,16 +692,24 @@ busy loop 会 sleep 1ms，让持有 GIL 的后台传输线程获得进展机会�
 > **本节先看：** 下面先给出“三条规则”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
 
 1. queue 未满时优先 schedule 并提交新 batch。
-2. 提交后仍未满且还有工作时返回 `None`，不急着等输出。
+2. 无 grammar 依赖、Future 已入队，且队列仍未满并满足
+   `model_executed or scheduler.has_requests()` 时，返回 `None`，不急着等输出。
 3. queue 已满或没有新工作时，从另一端 pop 最老 batch，等待并结算。
 
 `appendleft()` 配合 `pop()` 形成 FIFO：新 batch 放左边，最老 batch 从右边取出。
+但等待旧 token 的 structured-output batch 不能立即进入采样队列；图中先走暂存分支，
+结算旧输出后才为新 batch 计算 grammar mask 并入队。
+
+[源码] `vllm/v1/engine/core.py` - `EngineCore.step_with_batch_queue`
 
 ```mermaid
 flowchart TD
     A[进入 batch queue step] --> B{可调度新 batch?}
     B -- 是 --> C[schedule + execute non-block]
-    C --> D[appendleft Future]
+    C --> DEP{新 batch 的采样是否等待旧 token?}
+    DEP -- 否 --> D[appendleft 执行或采样 Future]
+    DEP -- 是 --> HOLD[暂存 deferred_scheduler_output]
+    HOLD --> P
     D --> E{queue 仍未满且还有工作?}
     E -- 是 --> R[返回 None]
     E -- 否 --> P[pop 最老 Future]
@@ -710,6 +718,11 @@ flowchart TD
     P --> W[future.result]
     W --> AB[处理 aborts_queue]
     AB --> U[update_from_output]
+    U --> DEFER{有 deferred batch?}
+    DEFER -- 是 --> SAMPLE[更新草稿与 grammar mask 后 sample_tokens]
+    SAMPLE --> ENQUEUE[appendleft deferred Future]
+    DEFER -- 否 --> RET[返回旧 batch 输出]
+    ENQUEUE --> RET
 ```
 
 > **读图方法：** 这张图用于压缩“三条规则”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。

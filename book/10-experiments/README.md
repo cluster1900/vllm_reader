@@ -274,13 +274,14 @@ G=\frac{R_{\mathrm{SLO}}}{T}
 $$
 
 当前 `bench serve` 的 goodput 对已配置门槛采用 AND 关系，只计成功请求。CLI 的
-`--goodput` 阈值用毫秒，计算时转为秒；未配置门槛时结果字段为 0，不能解释为
+`--goodput` 阈值用毫秒，计算时转为秒；未配置门槛时内部 `BenchmarkMetrics.request_goodput` 为 0，
+但导出的 JSON `request_goodput` 为 `null`，且不打印 goodput 行。两者都不能解释为
 “所有请求都不达标”。吞吐 100 req/s、只有 60 req/s
 满足 SLO 时，平台可售卖容量更接近 60，而不是 100。
 
 ```mermaid
 flowchart LR
-    A[All completed requests] --> B{TTFT passes}
+    A[Successful completed requests] --> B{TTFT passes}
     B -- no --> X[Not good]
     B -- yes --> C{TPOT passes}
     C -- no --> X
@@ -809,12 +810,13 @@ xychart-beta
     title "Request rate versus latency and throughput"
     x-axis "Offered load" [10, 20, 30, 40, 50, 60]
     y-axis "Normalized metric" 0 --> 100
-    line "Throughput" [18, 35, 52, 68, 75, 76]
-    line "p99 latency" [8, 10, 14, 25, 55, 95]
+    line [18, 35, 52, 68, 75, 76]
+    line [8, 10, 14, 25, 55, 95]
 ```
 
 > **读图方法：** 这是“典型饱和曲线”的趋势图。先确认横轴控制变量和纵轴指标，再比较拐点与变化方向；示意曲线用于解释关系，不能替代在指定硬件和负载上的 benchmark。
 
+图中第一条曲线为归一化 throughput，第二条为归一化 p99 latency，数值仅为教学示意。
 曲线转折处表示 throughput 开始趋平，而 queue 与 p99 快速上升。生产容量通常应留在转折点
 左侧，而不是选择峰值 throughput 对应的过载点。
 

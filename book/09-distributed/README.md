@@ -536,7 +536,9 @@ $$
 ### 9.6.1 layer partition 的真实规则
 
 `vllm/distributed/utils.py:get_pp_indices` 负责默认层划分。它不仅做平均除法，还把余数
-分配给靠中间的 stages，避免默认把更多层堆到最后一 stage。
+从倒数第二个 stage 开始向前逐个分配，每个 stage 加一层，最后一 stage 不接收余数。
+这不是按几何中心对称分配：12 层、PP=5 的层数是 `[2,2,3,3,2]`，而非 `[2,3,3,2,2]`。
+显式设置 `VLLM_PP_LAYER_PARTITION` 时则使用校验后的自定义分配。
 
 例如 10 层、PP=3：
 

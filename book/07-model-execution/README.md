@@ -158,7 +158,7 @@ Logits 是分数，不是概率分布；单卡也不必然对应 uni executor，
 
 [源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.execute_model`、`sample_tokens`
 
-[源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.forward`
+[源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.__call__`
 
 ## 7.2 两个“V1”不是同一个版本维度
 
@@ -770,10 +770,15 @@ stateDiagram-v2
     [*] --> Ready
     Ready --> ForwardDone: execute_model
     ForwardDone --> Ready: sample_tokens consumes state
-    ForwardDone --> Error: execute_model called again
+    ForwardDone --> ProtocolViolation: execute_model called again before sample
 ```
 
 > **读图方法：** 这是“为什么 execute 与 sample 分成两个方法”的状态图。先找初始状态，再沿箭头观察触发条件和状态变化；重点不是背状态名，而是弄清谁触发转换、转换后哪些资源需要更新。
+
+图中的 `ProtocolViolation` 表示违反两阶段调用契约，不是两种 Runner 都有同名异常状态。
+MRV1 在再次 execute 时显式抛出 `RuntimeError`；MRV2 的这条入口不能据图推断有相同检查。
+
+[源码] `vllm/v1/worker/gpu_model_runner.py` - `GPUModelRunner.execute_model`
 
 [源码] `vllm/v1/worker/worker_base.py` - `WorkerBase.execute_model`
 
@@ -931,7 +936,7 @@ NumPy-backed structures。
 |---|---|
 | `req_ids` / `req_id_to_index` | 输出请求顺序及索引 |
 | `sampled_token_ids` | 每请求本 step 生成 token，数量可变 |
-| `logprobs` / `prompt_logprobs_dict` | 可选概率信息 |
+| `logprobs` / `prompt_logprobs_dict` | 可选对数概率或配置指定的 logits 信息，不是归一化概率 |
 | `kv_connector_output` / `ec_connector_output` | connector 状态 |
 | `cudagraph_stats` | graph 执行统计 |
 | `routed_experts` | 可选 MoE 路由数据 |

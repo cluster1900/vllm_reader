@@ -1236,15 +1236,17 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     K[allocate_slots] -->|blocks| OK[继续调度]
-    K -->|None| S[Scheduler]
-    S --> V[选择 victim]
-    V --> F[free victim blocks]
+    K -->|None| S{Scheduler 调用路径}
+    S -->|running 扩容| V[按策略尝试选择 victim]
+    S -->|waiting 准入| WAIT[停止本轮准入]
+    V --> F[可释放时回收 victim blocks]
     F --> K
 ```
 
 > **读图方法：** 阅读“分配失败与 Scheduler 抢占的边界”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
 
-当前重算式抢占会释放 victim 的 KV，并让它之后从较早进度恢复。KV 管理器不决定 FCFS、
+只有 running 扩容路径会尝试这条抢占循环；waiting 准入分配失败通常停止本轮接纳，
+不能把图理解成每次 `None` 都会抢占。当前重算式抢占会释放 victim 的 KV，并让它之后从较早进度恢复。KV 管理器不决定 FCFS、
 priority 或 victim 顺序，也不负责回收 token budget；这些已在第 04 章展开。
 
 相反，Scheduler 不应猜测某种 attention 类型需要多少页。它把请求进度和 lookahead 交给

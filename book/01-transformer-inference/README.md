@@ -592,7 +592,8 @@ presence/frequency 的计数范围是输出；repetition 还会考虑 prompt。�
 flowchart TD
     Raw[raw logits] --> Rules[allowed IDs, bad words, bias]
     Rules --> Penalty[repetition, frequency, presence penalties]
-    Penalty --> Mode{greedy 或随机采样}
+    Penalty --> Thinking[thinking budget mask if enabled]
+    Thinking --> Mode{greedy 或随机采样}
     Mode -->|greedy| Greedy[argmax，不除以温度]
     Greedy --> Token
     Mode -->|随机采样| Temp[temperature 大于 0]
@@ -605,7 +606,7 @@ flowchart TD
 
 > **读图方法：** 这是“Penalty、Bias 与约束”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
-这张图主要展示第一代 Model Runner（Model Runner V1，简称 MRV1，位于 `vllm/v1/worker/gpu_model_runner.py`）的基础采样依赖，省略 logprobs 和批内混合 greedy/random 请求的合并操作。greedy 在影响 argmax 的约束和 penalty 之后取最大值，绕过温度缩放与随机过滤；不要把图当作 MRV2 的逐函数顺序。固定 revision 下：
+这张图主要展示第一代 Model Runner（Model Runner V1，简称 MRV1，位于 `vllm/v1/worker/gpu_model_runner.py`）的基础采样依赖，省略 logprobs 和批内混合 greedy/random 请求的合并操作。greedy 在影响 argmax 的约束、penalty 和可选 thinking budget 掩码之后取最大值，绕过温度缩放与随机过滤；不要把图当作 MRV2 的逐函数顺序。固定 revision 下：
 
 - MRV1 `vllm/v1/sample/sampler.py::Sampler.forward`、`sample` 和
   `apply_logits_processors` 实际执行上述分支，类注释可辅助阅读。
@@ -1115,7 +1116,8 @@ flowchart TD
    MLP 与 residual 数据流。
 3. `LlamaModel.forward` 在 `vllm/model_executor/models/llama.py:406` 附近遍历当前 PP rank 所拥有的 layers，
    最后一个 PP rank 执行 final norm。
-4. `LlamaForCausalLM.forward` 只返回模型 hidden states；`compute_logits` 在
+4. `LlamaForCausalLM.forward` 返回模型输出：最后 PP rank 是 hidden states，非最后
+   rank 是供下一 stage 使用的 `IntermediateTensors`；`compute_logits` 在
    `vllm/model_executor/models/llama.py:546` 附近单独调用 `LogitsProcessor`。模型 forward 不等于 sampling。
 5. 通用 `Attention` 类在 `vllm/model_executor/layers/attention/attention.py:223` 附近声明自己的职责包括写 KV Cache、
    执行 attention 和返回输出；具体 backend 由配置和能力选择。

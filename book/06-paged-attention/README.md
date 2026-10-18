@@ -648,7 +648,7 @@ CUDA Graph 或所有 attention feature。能力验证和 metadata builder 正是
 | ragged query | `query_start_loc`、CPU 对应项 | 请求在扁平 query 中的边界 |
 | sequence | `seq_lens`、`max_query_len`、`max_seq_len` | 每请求和批次上界 |
 | paged KV | `block_table_tensor`、`slot_mapping` | 读地址目录与写地址 |
-| batch control | `num_reqs`、`num_actual_tokens`、`causal` | 有效规模和 mask 语义 |
+| batch control | `num_reqs`、`num_actual_tokens`、`causal` | metadata 覆盖规模（可能含 padding）和 mask 语义 |
 
 其余字段支持 encoder/cross attention、DCP、multimodal prefix、R-SWA、ReplaySSM 等功能。
 
@@ -663,8 +663,22 @@ flowchart TD
 
 > **读图方法：** 阅读“`CommonAttentionMetadata`：跨后端的最小公共语言”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
-注意源码中的 `num_actual_tokens` 有一个 TODO：它可能包含 padding，命名并不总是字面上的
-“actual”。阅读 backend 时要看它如何 slice output、query 和 metadata，不能只相信字段名。
+`num_actual_tokens` 不是跨 Runner 通用的“去 padding token 数”。在本章固定 revision，
+`CommonAttentionMetadata` 声明旁仍保留重命名 TODO；MRV1 构造 `cm_base` 时明确传入
+`num_tokens_padded`，`num_reqs` 同样取 padded 请求数。因而这个字段描述的是当前 metadata
+覆盖的执行规模，不能用它代替 Scheduler 的 `total_num_scheduled_tokens` 统计有效工作。
+
+FlashAttention builder 将该值传到自己的 metadata；forward 按它切片 query/output，并不会仅因
+字段名含有 actual 就自动去除全部 padding。真实请求边界还要结合 `query_start_loc`、
+`seq_lens` 与 slot mapping 的无效槽标记理解；不要把后端字段旁“excluding padding”的注释
+提升为所有调用路径的不变量。这里修正文档解释，不修改上游字段名或 TODO。
+
+[源码] `vllm/v1/attention/backend.py` - `CommonAttentionMetadata`（L384–388）
+
+[源码] `vllm/v1/worker/gpu_model_runner.py` - `CommonAttentionMetadata` 构造（L2489–2505）
+
+[源码] `vllm/v1/attention/backends/flash_attn.py` - `FlashAttentionMetadataBuilder.build`（L556、724）、
+`FlashAttentionImpl.forward`（L998–1008）
 
 ### 6.10.1 Common 不等于最终 kernel 参数
 
