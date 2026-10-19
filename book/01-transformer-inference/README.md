@@ -3,10 +3,10 @@ title: "第01章 从 Transformer 到大模型推理"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
-source_branch: v0.31.0
+source_commit: 5df63a7203cdb9328d824a27b682e77c7b9928be
+source_branch: v0.32.0
 source_dirty: false
-verified_at: 2026-10-18
+verified_at: 2026-10-19
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -54,7 +54,7 @@ prerequisites:
 > **本节先看：** 这一部分先划定结论成立的源码版本和讨论边界。超出范围的实现不能直接套用本章结论，需要重新核对源码。
 
 - 源码仓库：`vllm-project/vllm`
-- 源码 commit：`db9527a46873454610df6dbedf79a36d6bf1a7f6`
+- 源码 commit：`5df63a7203cdb9328d824a27b682e77c7b9928be`
 - 阅读主线：decoder-only 文本生成、vLLM V1 Engine、Llama 类模型。
 - 本章使用单层、单 attention head 的教学模型建立直觉；真实模型通常有多层、
   多个 query heads，并可能使用 GQA、量化、TP 和不同 attention backend。
@@ -560,7 +560,11 @@ Top-k 与 top-p 最终都通过 mask 排除候选，并对保留项重新归一�
 边界并列时要看实现。当前 PyTorch 参考路径屏蔽的是“严格小于第 k 大分数”的项；
 例如 logits 为 `[4,2,2]`、k=2，两个分数为 2 的候选都可能保留，不能据此断言
 一定只剩两个 token。随书模型按排序后截取候选，是教学简化；其他 backend 的并列
-处理需分别核对，不能只凭 top-k 名称推断。
+处理需分别核对，不能只凭 top-k 名称推断。v0.32.0 的 Triton top-k-only 路径按索引打破第 k 位并列，
+保留恰好 k 项；PyTorch 参考实现可以额外保留并列项。对应测试只要求额外项确实与第 k 位同分，
+不再要求两条实现的候选数严格相同。
+
+[测试] `tests/v1/sample/test_topk_topp_sampler.py` - `TestTritonTopkTopp`
 
 [源码] `vllm/v1/sample/ops/topk_topp_sampler.py` - `apply_top_k_top_p_pytorch`、`apply_top_k_only`
 
@@ -615,7 +619,8 @@ flowchart TD
   在本章 revision 中先构造有序 `logits_processors`：bias → penalties → bad words →
   用户配置的 custom processors。`apply_sampling_params` 逐个调用 `processor.apply(logits, ctx)`，
   然后应用 thinking budget（思考预算掩码）、temperature、min-p；默认在此继续应用
-  top-k/top-p，选择 fused random 路径时才通过 `skip_top_k_top_p` 留给后续 kernel。bias 与 penalty 不可随意交换：先加分再按倍率惩罚，通常不等于反过来。
+  top-k/top-p；但正常 `sample()` 调用始终传入 `skip_top_k_top_p=True`，先延后过滤，
+  再由 `_sample_random` 的 fused kernel 或非 fused `apply_top_k_top_p` 分支执行。bias 与 penalty 不可随意交换：先加分再按倍率惩罚，通常不等于反过来。
   thinking budget 放在自定义 processor 后，避免它强制的结束标记被后续自定义逻辑覆盖。
 - MRV2 可以使用 Gumbel sampling 等方法避免简单地“先物化完整 softmax 再抽样”。
   `_sample_random` 还可走 FlashInfer 或 XPU fused sampler，但需同时满足能力门控与
@@ -1126,21 +1131,21 @@ flowchart TD
 
 以下行号只适用于本章固定 commit，长期定位应优先使用完整路径和符号名：
 
-1. `LlamaAttention.forward` 在 `vllm/model_executor/models/llama.py:224` 附近执行 QKV projection，随后 split、
+1. `LlamaAttention.forward` 在 `vllm/model_executor/models/llama.py` 中执行 QKV projection，随后 split、
    RoPE，再调用 `self.attn(q,k,v)`。
-2. `LlamaDecoderLayer.forward` 在 `vllm/model_executor/models/llama.py:313` 附近体现两次 RMSNorm、attention、
+2. `LlamaDecoderLayer.forward` 在 `vllm/model_executor/models/llama.py` 中体现两次 RMSNorm、attention、
    MLP 与 residual 数据流。
-3. `LlamaModel.forward` 在 `vllm/model_executor/models/llama.py:406` 附近遍历当前 PP rank 所拥有的 layers，
+3. `LlamaModel.forward` 在 `vllm/model_executor/models/llama.py` 中遍历当前 PP rank 所拥有的 layers，
    最后一个 PP rank 执行 final norm。
 4. `LlamaForCausalLM.forward` 返回模型输出：最后 PP rank 是 hidden states，非最后
    rank 是供下一 stage 使用的 `IntermediateTensors`；`compute_logits` 在
-   `vllm/model_executor/models/llama.py:546` 附近单独调用 `LogitsProcessor`。模型 forward 不等于 sampling。
-5. 通用 `Attention` 类在 `vllm/model_executor/layers/attention/attention.py:229` 附近声明自己的职责包括写 KV Cache、
+   `vllm/model_executor/models/llama.py` 中单独调用 `LogitsProcessor`。模型 forward 不等于 sampling。
+5. 通用 `Attention` 类在 `vllm/model_executor/layers/attention/attention.py` 中声明自己的职责包括写 KV Cache、
    执行 attention 和返回输出；具体 backend 由配置和能力选择。
 6. `Attention.forward` 接收扁平 token tensor，并 reshape 为
    `[num_tokens,num_heads,head_size]` 后进入实现层。
-7. MRV1 `Sampler` 在 `vllm/v1/sample/sampler.py:21`，MRV2 `Sampler` 在
-   `vllm/v1/worker/gpu/sample/sampler.py:42`。二者不能因为同名而混为一个类。
+7. MRV1 `Sampler` 在 `vllm/v1/sample/sampler.py`，MRV2 `Sampler` 在
+   `vllm/v1/worker/gpu/sample/sampler.py`。二者不能因为同名而混为一个类。
 
 ### 第一步：模型对象怎样组装
 
@@ -1274,6 +1279,17 @@ custom logits processor 参数校验器；因此仅构造 `SamplingParams` 成�
 能通过当前 Runner 的准入校验。`prompt_logprob_token_ids` 也在此检查 MRV2 要求及与
 `kv_sharing_fast_prefill` 的不兼容。Sampler 内部仍有防御性处理，但不能把所有
 非法参数都留给 GPU kernel 才发现。
+
+v0.32.0 的 `prompt_logprob_token_ids` 是逐 causal prompt row 的二维整数数组或嵌套列表，
+不是一份对所有位置复用的 token ID 列表。行数必须为
+`max(prompt_len - 1 - prompt_logprob_start, 0)`，第 i 行对应预测后一个 prompt token；
+填充值 -1 的得分为负无穷。`InputProcessor.process_inputs` 在知道实际 prompt 长度后检查行数。
+另外 `watermarking=None` 表示采用默认请求意图，最终是否应用由配置与请求兼容性解析为布尔值，
+不是每个请求都必定加水印。
+
+[源码] `vllm/sampling_params.py` - `SamplingParams.prompt_logprob_token_ids`、`watermarking`
+
+[源码] `vllm/v1/engine/input_processor.py` - `resolve_watermarking`、`apply_watermarking`、`process_inputs`
 
 [源码] `vllm/v1/engine/input_processor.py` -
 `InputProcessor._build_logits_processors_params_validator`、`_validate_params`
@@ -1533,3 +1549,4 @@ sequence lengths、request ordering，以及用于 KV 寻址的 block tables 和
 本章内容已经完整，`content_complete=true`。按照本项目规则，AI 生成内容不能仅因篇章
 完成就自行标记为 `verified`；当前 `runtime_verified=false`，等待 GPU 动态验证和独立
 审阅。
+

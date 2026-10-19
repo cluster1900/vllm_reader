@@ -3,10 +3,10 @@ title: "第02章 vLLM 全景与一次请求的生命周期"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
-source_branch: v0.31.0
+source_commit: 5df63a7203cdb9328d824a27b682e77c7b9928be
+source_branch: v0.32.0
 source_dirty: false
-verified_at: 2026-10-18
+verified_at: 2026-10-19
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -268,7 +268,10 @@ LLM.generate
 
 [源码] `vllm/entrypoints/llm.py` - `LLM.generate`
 
-[源码] `vllm/entrypoints/offline_utils.py` -
+v0.32.0 将旧的 offline_utils 模块移到 `vllm/entrypoints/common/offline.py`，
+不是删除离线调用链；`LLM` 仍继承 `OfflineInferenceMixin`，上述方法仍在新模块。
+
+[源码] `vllm/entrypoints/common/offline.py` -
 `OfflineInferenceMixin._run_completion`、`_run_engine`
 
 ### 在线入口：OpenAI-compatible chat API
@@ -1179,7 +1182,7 @@ online stream:
 2. 在线结果按 token delta 交付。
 3. core 使用内部 ID，用户仍看到外部 ID。
 4. 前端 state 在 core submission 前已经存在。
-5. prompt + output 超过教学模型长度时被拒绝。
+5. prompt 必须为生成留出至少一个 token；请求输出上限不预留窗口，生成在输出上限或上下文上限先到达时停止。
 6. 重复外部 ID 不会混淆两次提交的输出顺序。
 7. `max_tokens` 大于六个 token 的初始响应计划时，不会被意外提前截断。
 8. 最后一个请求取消后，仍交付 abort 输出并清理前端状态。
@@ -1187,15 +1190,22 @@ online stream:
 教学响应计划会循环使用固定六个 token，直到达到请求上限；它只验证长度和状态推进，
 没有语言生成质量含义。提交顺序由内部 ID 对应的序号记录，而不是对用户 ID 做排序。
 
-[源码] `vllm/entrypoints/offline_utils.py` - `OfflineInferenceMixin._add_request`、`_run_engine`
+[源码] `vllm/entrypoints/common/offline.py` - `OfflineInferenceMixin._add_request`、`_run_engine`
 
 真实 `LLM.generate` 用递增数值 ID 记录输入顺序，最终按该数值排序；本项目教学程序
 允许自定义外部 ID，因此需要另记提交序号。两种实现的目标都是保持输入顺序。
 
-还有一处刻意简化：教学 `InputProcessor` 直接拒绝 prompt 加请求输出上限超过模型
-长度的组合；真实 `InputProcessor` 主要校验 prompt，并只在 `max_tokens` 未指定时
-补默认值，执行侧再通过长度停止条件限制生成。不要把教学异常当作所有在线/离线
-入口都会执行的同一校验。Core 也保留教学用终态记录，不模拟完整后台资源回收。
+v0.32.0 不再把完整 `max_tokens` 从上下文窗口中预留。必须分清三个边界：
+
+- 入口校验 prompt 本身；生成路径在 prompt 长度等于 `max_model_len` 时也拒绝，因为至少还需一个输出 token。
+- `max_tokens` 是输出数量上限，不是保证生成的数量。在线 `get_max_tokens` 会取请求/默认上限、剩余窗口、覆盖值和平台限制的最小值；离线 `InputProcessor` 只在未指定上限时补默认值。
+- 执行侧 `check_stop` 分别检查总 token 数达到 `max_model_len`，或输出 token 数达到请求上限；任一成立都会结束。
+
+例如窗口为 5、prompt 为 4、请求 `max_tokens=100`，并不因“4+100>5”拒绝，而最多生成 1 个 token。
+随书模型保留原请求上限，在 Core 的确定性响应计划中取两种停止边界的最小值；这是等价的教学简化，
+不模拟生产 tokenization、EOS 或异步停止的全部路径。Core 也保留教学用终态记录，不模拟完整后台资源回收。
+
+[源码] `vllm/entrypoints/serve/utils/api_utils.py` - `get_max_tokens`
 
 [源码] `vllm/v1/engine/input_processor.py` - `InputProcessor._validate_prompt_len`、`process_inputs`
 
@@ -1326,6 +1336,17 @@ stop 检查。
 
 一个实用规则是始终打印或记录同一个 internal request ID。外部 ID 可能映射到多个 child，
 只用外部 ID 很难区分并行 sampling 的状态。
+
+### v0.32.0：一轮多个 token 的停止边界
+
+一次 EngineCore 输出可能含多个 token，不能假定输出处理仅删除文本尾部。
+`OutputProcessor.process_outputs` 在 detokenizer 命中 stop string 后调用 `_trim_surplus_tokens`，
+同步裁剪多余 token IDs、logprobs、sampling mask 与 routed-expert 片段，再构造用户输出。
+这保持不同输出字段的长度边界一致；教学模型每步一个 token，不覆盖该多 token 回退场景。
+
+[源码] `vllm/v1/engine/output_processor.py` - `process_outputs`、`_trim_surplus_tokens`
+
+[测试] `tests/v1/engine/test_output_processor.py`
 
 ## 2.22 静态验证与运行限制
 
@@ -1488,7 +1509,7 @@ OutputProcessor 生成用户完成输出，并把内部 ID 放入 `reqs_to_abort
 
 - `vllm/entrypoints/llm.py`
   - `LLM.generate`
-- `vllm/entrypoints/offline_utils.py`
+- `vllm/entrypoints/common/offline.py`
   - `OfflineInferenceMixin._add_completion_requests`
   - `OfflineInferenceMixin._run_completion`
   - `OfflineInferenceMixin._run_engine`
@@ -1562,3 +1583,4 @@ OutputProcessor 生成用户完成输出，并把内部 ID 放入 `reqs_to_abort
 
 本章内容已经完整，`content_complete=true`。由于当前环境没有真实 vLLM GPU runtime，
 `runtime_verified=false`，按本项目规则保持 `draft`。
+

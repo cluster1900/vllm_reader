@@ -3,10 +3,10 @@ title: "第04章 Scheduler 与 Continuous Batching"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
-source_branch: v0.31.0
+source_commit: 5df63a7203cdb9328d824a27b682e77c7b9928be
+source_branch: v0.32.0
 source_dirty: false
-verified_at: 2026-10-18
+verified_at: 2026-10-19
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -41,7 +41,7 @@ Continuous Batching 不是源码中的一个独立 `ContinuousBatching` 类。�
 4. 新请求可以填补空出的 sequence slot 和 token budget；
 5. 长 prefill 可以切成多个 chunk，与 decode 工作共享一轮计算。
 
-本章绑定源码 revision `db9527a46873454610df6dbedf79a36d6bf1a7f6`。文中继续区分：
+本章绑定源码 revision `5df63a7203cdb9328d824a27b682e77c7b9928be`。文中继续区分：
 
 - **源码事实**：固定 revision 的实现或测试可直接证明。
 - **设计含义**：由多个源码事实推导出的系统解释。
@@ -431,7 +431,10 @@ $$
 \sum_r N_{\mathrm{scheduled}}(r)\le C_{\mathrm{step}}
 $$
 
-若配置为 `None`，Scheduler 初始化时回退到 `max_num_batched_tokens`。
+若配置为 `None`，Scheduler 初始化时回退到 `max_num_batched_tokens`。v0.32.0 的配置校验
+要求显式值至少为 1；不能用 `max_num_scheduled_tokens=0` 代替 pause。
+
+[源码] `vllm/config/scheduler.py` - `SchedulerConfig.max_num_scheduled_tokens`
 
 ### 4.6.2 `max_num_batched_tokens`
 
@@ -455,17 +458,23 @@ v0.31.0 新增 `max_num_active_seqs`：未设置时沿用 `max_num_seqs`；设�
 准入上限，不缩小 Runner 容量，且必须不大于 `max_num_seqs`。两者都不是 token 总量。
 100 个短 decode 请求和一个 10K prompt 会受到不同瓶颈。
 
-[源码] `vllm/config/scheduler.py` - `SchedulerConfig`（L70–79、336–345）
+[源码] `vllm/config/scheduler.py` - `SchedulerConfig`
 
-[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.__init__`（L126–132）、`schedule`（L890–895）
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.__init__`、`schedule`
 
 暂停等待 streaming input 的会话虽然不在普通 running 列表中，仍可能占 Model Runner
 request slot；源码在准入时把它们计入 running 数。
 
 ### 4.6.4 `max_model_len`
 
-即使本轮还有预算，也不能让位置越过模型最大长度。running 路径还要为本轮采样位置
-留出空间。
+即使本轮还有预算，也不能让位置越过模型最大长度。普通生成的 running 路径还要为
+本轮采样预留 1 个位置；pooling 和 diffusion 不在 prefill 后追加普通采样 token，
+`num_sampled_tokens_per_step=0`。v0.32.0 的 pooling 回归测试允许最后一个 chunk 恰好
+到达 `max_model_len`，不能把“总要少算一个位置”推广到所有 runner。
+
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.__init__`、`Scheduler.schedule`
+
+[测试] `tests/v1/core/test_scheduler.py` - `test_pooling_chunked_prefill_can_finish_at_max_model_len`
 
 ### 4.6.5 KV 与 encoder 容量
 
@@ -491,8 +500,8 @@ flowchart TB
     SAFE -->|否| BUILD
     VICTIM --> RALLOC
     RPRE -->|否| RREC[记录 running 工作并扣预算]
-    RREC --> WAITCOND{本轮没有抢占且未暂停?}
-    WAITCOND -->|是| WAIT[遍历 WAITING]
+    RREC --> WAITCOND{本轮没有抢占且非 PAUSED_ALL?}
+    WAITCOND -->|是| WAIT[先 KV-holding waiting，未暂停才看普通 waiting]
     WAIT --> PREFIX[prefix / remote KV 查询]
     PREFIX --> WALLOC[计算 chunk 并申请 KV]
     WALLOC --> ADMIT[加入 running 并扣预算]
@@ -505,7 +514,8 @@ flowchart TB
 > **读图方法：** 这张图用于压缩“一次 `schedule()` 的总体流程”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
 可以把它记成四句话：先保护已经运行的请求；必要时通过抢占解决其 KV 扩容；本轮没有
-发生抢占时再用剩余预算接纳 waiting；最后输出工作清单并乐观推进计数。
+发生抢占时再用剩余预算处理 waiting；最后输出工作清单并乐观推进计数。`PAUSED_NEW`
+仍会让已持有 KV 的等待请求继续 drain，但不接纳普通无 block 的 waiting 请求。
 
 “本轮有抢占就不接纳 waiting”是重要稳定性策略。系统刚因容量不足驱逐请求时，立即
 再加入新请求通常只会制造更多抖动。
@@ -554,7 +564,7 @@ flowchart TB
 `_request_blocks_can_be_freed(victim)` 为假时先停止重试，不做无助于立即分配的抢占。
 只有能即时释放时才移出 victim、回收 block 并重试；fence 尚未完成不能当作可用容量。
 
-[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`（L755–782）
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`
 
 [测试] `tests/v1/core/test_deferred_block_free.py` - `test_allocation_retry_waits_for_fence_then_succeeds`
 
@@ -564,8 +574,12 @@ budget。这保证最终 `SchedulerOutput` 与预算账本一致。
 
 ## 4.9 第二段：再接纳 WAITING 请求
 
-waiting 循环只有在本轮没有 preempted request、Scheduler 未暂停、预算未耗尽且 sequence
-slot 尚有空间时才开始。
+waiting 循环只有在本轮没有 preempted request、不是 `PAUSED_ALL`，且预算和 sequence
+slot 允许时才推进。v0.32.0 优先取 `kv_holding_waiting`；只有它为空且处于 `UNPAUSED`
+才取普通 `waiting`。因此 `PAUSED_NEW` 是禁止新的无 block 请求准入，不是停止所有
+WAITING 状态请求：已经占住 KV、正在等远端加载完成的请求仍需恢复执行并 drain。
+
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule` 的 request queue 选择
 
 ```mermaid
 flowchart TB
@@ -699,9 +713,13 @@ flowchart TB
 
 上游 `test_schedule_order` 用两个 800-token 长请求和两个 10-token 短请求验证：关闭
 chunked prefill 后，如果下一个长请求整体放不进剩余 budget，Scheduler 不会跳过它去
-提前执行后面的短请求。
+提前执行后面的短请求。这里描述普通生成路径；v0.32.0 对 `is_mm_encoder_only`
+豁免这个 `break`：即使 EngineCore 因无 KV 关闭 chunked prefill，encoder-only 长 prompt
+仍按 token budget 分步推进，避免请求永远留在 waiting。
 
-这样保留了 waiting queue 的顺序语义，但会让预算出现空余。开启 chunked prefill 后，
+[测试] `tests/v1/core/test_scheduler.py` - `test_encoder_only_prompt_longer_than_budget_is_chunked`
+
+这样保留了普通生成路径 waiting queue 的顺序语义，但会让预算出现空余。开启 chunked prefill 后，
 长请求可以部分进入，减少这一类空洞。
 
 ### 4.10.3 Threshold 不是总 chunk 大小
@@ -717,7 +735,7 @@ chunked prefill 后，如果下一个长请求整体放不进剩余 budget，Sch
 不是每个请求必得 512 的保证。最终还受剩余 token/input budget、encoder、Mamba 对齐和
 lookahead 等限制。阈值设为 0 表示关闭额外 cap，不表示关闭 chunked prefill。
 
-[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`（L611–626）
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`
 
 [测试] `tests/v1/core/test_scheduler.py` - `test_long_prefill_threshold_ignored_when_alone`、
 `test_long_prefill_threshold_applies_with_other_requests`、`test_long_prefill_threshold_floored_by_fair_share`
@@ -740,7 +758,7 @@ long_prefill_token_threshold = 6
 max_num_seqs = 3
 ```
 
-以下是随书教学模型的输出，不是 v0.31.0 生产 Scheduler 的逐步 trace。
+以下是随书教学模型的输出，不是 v0.32.0 生产 Scheduler 的逐步 trace。
 教学模型保留无条件 threshold cap，因此只有 A 时仍算 6；上游新版单请求会绕过 cap，
 在其他约束允许时可用满 8-token 预算。示例用于说明动态成员变化，不作为新版阈值语义证据。
 
@@ -958,6 +976,14 @@ flowchart TD
 
 同步加载则会在本轮标记 `has_sync_kv_loads`，让执行侧知道输入依赖外部 KV。
 
+v0.32.0 进一步按 connector 实际加载的 group 判断窗口是否完整恢复：DSV41 的 SWA
+bounded replay 只有在窗口未随 KV load 恢复时才回退并重算尾部；加载失败仍可能需要 replay。
+异步加载写入的 group 通过 `skip_zeroing_group_ids` 交给 KV manager，避免清零与远端写入
+竞争，不能把所有 cache group 都笼统排除在清零之外。
+
+[源码] `vllm/v1/core/sched/scheduler.py` - `_load_restores_replay_window`、`_mark_prefix_replay`、
+`_update_waiting_for_remote_kv`、`schedule`
+
 ## 4.16 多模态与 Encoder Budget
 
 对文本模型，token budget 和 KV 通常是主约束。多模态请求还需要安排图像、音频等
@@ -982,7 +1008,15 @@ flowchart TB
 
 `disable_chunked_mm_input=True` 时，一个多模态 item 不会被从中间切开。例如文本 `TTTT`
 后接图像 token `IIIIIIIIII`，预算只能容纳 `TTTTIIIII` 时，Scheduler 可以先只调度
-`TTTT`，下一轮再完整处理图像 item。
+`TTTT`，下一轮再完整处理图像 item。v0.32.0 把这个范围检查放在 encoder cache 命中与
+同 step 重复输入检测之前，所以 warm cache 或重复图像也不能绕过“不切开 item”的限制。
+`_allocate_encoder_inputs()` 为真正新输入分配缓存，再为重复输入登记持有关系，避免只编码
+一次却过早释放仍被后续 occurrence 使用的内容。
+
+[源码] `vllm/v1/core/sched/scheduler.py` - `_try_schedule_encoder_inputs`、`_allocate_encoder_inputs`
+
+[测试] `tests/v1/core/test_scheduler.py` - `test_no_mm_input_chunking`、
+`test_no_mm_input_chunking_for_same_step_duplicate`、`test_same_step_duplicate_encoder_input_stays_cached`
 
 ## 4.17 SchedulerOutput 是执行合同
 
@@ -1025,13 +1059,21 @@ V2 Model Runner 会把 resumed request 合并进 new request 路径；旧路径�
 | `total_num_scheduled_tokens` | 上述值之和，用于不变量和执行判断 |
 | `scheduled_spec_decode_tokens` | 本轮要验证的 draft token |
 | `scheduled_encoder_inputs` | 需要执行的多模态 encoder item |
-| `num_common_prefix_blocks` | running 集合共同前缀，可用于 cascade attention |
+| `num_common_prefix_blocks` | 已弃用的兼容字段，内置 Scheduler 不再填写，默认空列表 |
 | `finished_req_ids` | 两轮之间完成、需通知 worker 清理的请求 |
 | `preempted_req_ids` | 本轮抢占、需重置 worker 状态的请求 |
 | `new_block_ids_to_zero` | 新 block 使用前需要清零的 id |
 | `kv_cache_block_copies` | 本轮执行前需要完成的 CoW copy |
 | connector metadata | KV/encoder cache 传输协议数据 |
 | `num_spec_tokens_to_schedule` | 动态 speculative decoding 的 K |
+
+v0.32.0 已删除 cascade attention 的执行与公共前缀统计链；保留字段不代表该优化仍可达。
+`KVCacheManager.get_num_common_prefix_blocks()` 也只是给树外调用者保留的全零兼容接口。
+此外旧的 `block_table_updates` 字段已删除，不应再把完整行替换画成内置输出协议的一部分。
+
+[源码] `vllm/v1/core/sched/output.py` - `SchedulerOutput`
+
+[源码] `vllm/v1/core/kv_cache_manager.py` - `get_num_common_prefix_blocks`
 
 SchedulerOutput 把控制面决定转换为第 07 章 Model Runner 能消费的增量协议。
 
@@ -1166,8 +1208,16 @@ sequenceDiagram
 
 ### 4.21.1 Pause
 
-`PAUSED_ALL` 会把本轮 token budget 置 0，不调度任何请求。`PAUSED_NEW` 的行为边界在
-EngineCore 控制流中体现：已有工作可以继续 drain，但暂停新准入。
+`PAUSED_ALL` 会把本轮 token budget 置 0，不调度任何请求。`PAUSED_NEW` 则允许已有
+running 和 `kv_holding_waiting` 请求继续 drain，普通无 block 的 waiting 保持排队。
+这包含已发起但尚未完成的异步 KV load：接收结束后仍要恢复运行，不能仅因为它不在
+running 列表就宣布排空完成。等待下一段 streaming input 的闲置会话不能主动推进，
+`get_num_unfinished_requests()` 会从 drain 计数中减掉这部分。
+
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`、`get_num_unfinished_requests`
+
+[测试] `tests/v1/core/test_scheduler.py` - `test_pause_new_drains_async_kv_loads`、
+`test_pause_new_ignores_streaming_session_waiting_for_input`
 
 ### 4.21.2 DP prefill cadence
 
@@ -1360,6 +1410,12 @@ first scheduled step 和 finished step。
 请求先运行、高优先级请求后到。容量不足后，低优先级者被抢占；高优先级者完成后，旧
 请求重新入场。
 
+### 证据 6：Pause 不能漏掉已经占用 KV 的等待请求
+
+`test_pause_new_drains_async_kv_loads` 分别覆盖 load 在 pause 前后完成的情况：已加载请求
+继续输出并释放 KV，普通 queued 请求仍等待，drain 后 reset 才能成功。
+`test_pause_new_ignores_streaming_session_waiting_for_input` 则防止闲置会话把 drain 永久卡住。
+
 这些测试是章节结论的一部分，而不是附属资料。源码重构后，应先运行或重读相应测试，
 再更新本文。
 
@@ -1453,7 +1509,7 @@ token 目标，并让每个请求的 `num_computed_tokens` 追上它。
 初始化多种预算
 -> 先遍历 running
 -> 必要时为 running 抢占 KV
--> 若本轮无抢占，再接纳 waiting
+-> 若本轮无抢占，按 pause 状态处理 KV-holding / 普通 waiting
 -> 构造 SchedulerOutput
 -> 乐观推进 computed / in-flight
 -> Model Runner 执行
@@ -1680,5 +1736,9 @@ Update 发现请求不存在或已 finished 后直接跳过，不能追加 token
 - [ ] 在真实在线服务上比较 TTFT、TPOT 与 throughput。
 - [ ] 由独立审阅者复核后将状态改为 `verified`。
 
+2026-10-19 已按 v0.32.0 复核暂停排空、encoder-only 分块、pooling 长度边界与输出协议；
+静态证据和本次 CPU 教学测试记录见 [升级核对](../../meta/upgrade-v0.32.0-2026-10-19/04-scheduler.md)。
+
 本章正文已经完整，`content_complete=true`。当前机器缺少可用 vLLM GPU runtime，
 因此 `runtime_verified=false`，按项目规则保持 `draft`。
+

@@ -113,10 +113,10 @@ slot_mapping
 手算每个 token：
 
 ```text
-logical_block = position // kernel_block_size
-offset = position % kernel_block_size
-physical_block = block_table[request, logical_block]
-slot = physical_block * kernel_block_size + offset
+logical_block = position // manager_block_size
+offset = position % manager_block_size
+physical_block = manager_block_table[request, logical_block]
+slot = physical_block * manager_block_size + offset
 ```
 
 注意生产日志不要打印完整长序列块表，也不要在热路径执行 `.cpu()` 或 `.tolist()`，这会引入
@@ -159,3 +159,10 @@ slot = physical_block * kernel_block_size + offset
 
 实验结论必须绑定本节基线。切换 commit 后，重新核对候选优先级、验证条件、metadata 字段和
 具体 kernel 调用，不能沿用旧版本结论。
+
+
+## v0.32.0 更新边界（2026-10-19）
+
+持久表与写 slot 先使用 manager 坐标；AttentionGroup 在 backend metadata 边界构造 kernel read table。
+连续拆页使用 size ratio，packed view 可能使用更大的 kernel_block_stride。教学程序新增非原地转换与
+stride 回归；不模拟真实 tensor view、GPU DCP 或 kernel。旧实验记录不是本次运行证据。

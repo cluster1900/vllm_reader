@@ -3,10 +3,10 @@ title: "第08章 异步执行、torch.compile 与 CUDA Graph"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
-source_branch: v0.31.0
+source_commit: 5df63a7203cdb9328d824a27b682e77c7b9928be
+source_branch: v0.32.0
 source_dirty: false
-verified_at: 2026-10-18
+verified_at: 2026-10-19
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -52,7 +52,7 @@ flowchart LR
 **核心结论：** 三者可以协同，但它们不是同一个开关，也不是严格的先后版本。定位性能
 问题时，必须先确认收益来自哪一层。
 
-本章绑定源码 revision `db9527a46873454610df6dbedf79a36d6bf1a7f6`，沿用以下标签：
+本章绑定源码 revision `5df63a7203cdb9328d824a27b682e77c7b9928be`，沿用以下标签：
 
 - **源码事实**：该 revision 下可直接定位的行为。
 - **设计意图**：源码注释或同 revision 设计文档给出的目标。
@@ -392,7 +392,7 @@ $$
   不能一律看成初始化时的固定 speculative token 数。
 
 [源码] `vllm/v1/core/sched/async_scheduler.py` - `AsyncScheduler.__init__`、
-`_update_after_schedule`（L14–60）
+`_update_after_schedule`
 
 ```mermaid
 sequenceDiagram
@@ -1110,7 +1110,7 @@ flowchart TD
 
 > **读图方法：** 这是“dispatch 优先级”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
-FULL 比 PIECEWISE 优先；但 cascade attention、encoder output、用户 force eager、DP 协调等条件可通过
+FULL 比 PIECEWISE 优先；但 encoder output、用户 force eager、DP 协调等条件可通过
 `valid_modes` / `invalid_modes` 禁止 FULL 或只允许 NONE。
 
 [源码] `vllm/v1/cudagraph_dispatcher.py` - `CudagraphDispatcher.dispatch`
@@ -1346,8 +1346,8 @@ flowchart TD
 生成微批次版本；DBO capture 使用微批线程对应的 capture stream，失败时会清理挂起线程。
 这不表示 PIECEWISE 也支持 DBO capture。
 
-[源码] `vllm/v1/worker/gpu/cudagraph_utils.py` - `_maybe_ubatch_twin`（L222–246）、
-`_capture_stream` / `capture`（L391–488）
+[源码] `vllm/v1/worker/gpu/cudagraph_utils.py` - `_maybe_ubatch_twin`、
+`_capture_stream` / `capture`
 
 ```mermaid
 flowchart LR
@@ -1405,12 +1405,12 @@ breakable CUDA Graph，则使用 `BreakableCUDAGraphWrapper`。正常 MRV2 初�
 `PIECEWISE` 降为 `NONE`，`FULL_AND_PIECEWISE` 降为 `FULL_DECODE_ONLY`。
 capture 中仍保留防御性报错，但它不再是正常配置路径发现缺少 provider 的第一站。
 
-[源码] `vllm/v1/worker/gpu/model_runner.py` - graph 初始化（L701–718）
+[源码] `vllm/v1/worker/gpu/model_runner.py` - graph 初始化
 
-[源码] `vllm/config/compilation.py` - `CUDAGraphMode.without_piecewise`（L80–85）、
-`resolve_cudagraph_mode_and_sizes`（L1464–1477）
+[源码] `vllm/config/compilation.py` - `CUDAGraphMode.without_piecewise`、
+`resolve_cudagraph_mode_and_sizes`
 
-[测试] `tests/test_config.py` - `test_resolve_cudagraph_mode_uses_loaded_piecewise_provider`（L908）
+[测试] `tests/test_config.py` - `test_resolve_cudagraph_mode_uses_loaded_piecewise_provider`
 
 [源码] `vllm/v1/worker/gpu/cudagraph_utils.py` - `has_compiled_submodule`、
 `ModelCudaGraphManager.capture`、`CudaGraphManager.run_pw_graph`
@@ -1472,6 +1472,24 @@ flowchart TD
 
 > **读图方法：** 从顶部先检查会直接报错的 mixed FULL + NEVER 组合；其余路径经过 mixed 模式调整后，还要汇合到 decode/spec 检查。降级是有序检查，不是命中第一条后就返回。
 
+### v0.32.0：移除的优化不是当前 fallback 分支
+
+cascade attention 已移除，不能继续把它列成当前 FULL graph 禁用条件。
+同样被移除的是 torch.compile 的 sequence-parallel 与 AsyncTP fusion passes，包括旧
+`enable_sp`、`fuse_gemm_comms` 的相关配置/自动门控；不是异步调度、普通 TP 或所有模型级
+sequence parallelism 被移除。模型内部的序列切分仍应单独看，例如
+`ParallelConfig.use_sequence_parallel_moe`，不再依赖这些编译 passes。
+
+MRV2 现可使用 stock torch.compile，但 `_disable_cudagraphs_for_v2_stock_torch_compile`
+会把 graph mode 改为 NONE、最大 capture size 设为 0，并清空 capture sizes。
+“支持 stock compile”不等于“stock compile 可与 MRV2 FULL graph 组合”。
+
+[源码] `vllm/config/vllm.py` - `_disable_cudagraphs_for_v2_stock_torch_compile`、`_get_v2_model_runner_unsupported_features`
+
+[源码] `vllm/config/compilation.py` - `CompilationConfig`
+
+[源码] `vllm/config/parallel.py` - `ParallelConfig.use_sequence_parallel_moe`
+
 ### 8.15.3 其他会触发 NONE 或降级的条件
 
 当前配置和 Runner 还会考虑：
@@ -1481,10 +1499,9 @@ flowchart TD
 - pooling model。
 - encoder-decoder 的 encoder input step。
 - 某些 KV connector 的 layerwise async 操作。
-- cascade attention。
 - dynamic speculative decode 与 MRV1。
 - DeepEP high-throughput 等特定组合。
-- sequence parallelism、splitting ops 和 graph partition 的兼容关系。
+- splitting ops、graph partition 与模型提供的 piecewise capture 的兼容关系。
 - 加载后的模型是否真的提供 piecewise capture；请求配置不等于实际 provider。
 
 ```mermaid
@@ -1493,7 +1510,7 @@ flowchart LR
     Platform["platform"] --> Resolve
     Model["model type"] --> Resolve
     Attn["attention backend"] --> Resolve
-    Feature["connector/spec/cascade/SP"] --> Resolve
+    Feature["connector/spec/model-SP"] --> Resolve
     Resolve --> Final["resolved mode + runtime fallback"]
 ```
 
@@ -1609,6 +1626,17 @@ FULL graph 绑定 KV pointer，profiling 只捕获最大的少数 descriptor，�
 和 speculator graph 则完整测量。profiling graph 必须丢弃，因为它们引用 throwaway state，复用会产生
 悬空 storage 风险。
 
+### 可选 cuMem graph pool 的边界
+
+v0.32.0 可把 CUDA Graph 放入支持 sleep offload 的 cuMem pool；这不是无条件开启。
+`use_cumem_cudagraph_pool` 同时要求 sleep_mode_offload_cudagraph、enable_sleep_mode、
+sleep backend 为 cumem、graph mode 非 NONE，以及 CUDA-like 平台。
+profiling 使用 throwaway pool 并恢复原 global pool 与 wrapper pool，不能把临时捕获的指针用于正常 replay。
+
+[源码] `vllm/config/vllm.py` - `use_cumem_cudagraph_pool`
+
+[源码] `vllm/v1/worker/gpu/cudagraph_utils.py` - `profile_cudagraph_memory`
+
 ### 8.17.2 graph memory 与 KV cache 是竞争关系
 
 > **本节先看：** 下面用公式表达关系。先确认每个量的含义和单位，再沿等号或运算符检查推导。
@@ -1617,11 +1645,13 @@ $$
 M_{\mathrm{available\ KV}}\approx M_{\mathrm{requested}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph\ reserve}}
 $$
 
-各项单位均为 byte；`requested` 是设备总显存乘 `gpu_memory_utilization`，`nonKV` 是
+各项单位均为 byte；先按 `ceil(total_memory * gpu_memory_utilization)` 得到利用率预算。
+若 loader 报告外部进程持有权重，则 `requested` 还要扣除该外部权重，余量必须为正且不超过 free memory；
+普通进程内加载没有这项扣除。`nonKV` 是
 profile 得到的非 KV 占用，`graph reserve` 是实际应用的 graph 估算。该式描述自动预算路径，
 不覆盖显式 `kv_cache_memory_bytes` 的手动容量分支。固定 revision 默认启用
 `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1`；禁用该项只改变估算是否扣除，不代表 graph
-运行时不占显存。
+运行时不占显存。估算资格还检查 CUDA/ROCm 或 XPU 平台以及非 NONE graph mode。
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`
 
@@ -1731,7 +1761,7 @@ flowchart TD
     I -- 是 --> Size{"tokens <= max capture?"}
     Size -- 否 --> Shape["capture sizes"]
     Size -- 是 --> Allow{"FULL/PW allowed?"}
-    Allow -- 否 --> Feature["force eager/cascade/encoder/DP"]
+    Allow -- 否 --> Feature["force eager/encoder/DP"]
     Allow -- 是 --> Key["descriptor mismatch: req/query/LoRA/ubatch"]
 ```
 
@@ -1859,7 +1889,7 @@ uniform decode?
 query length
 active LoRA count
 microbatch count
-cascade / encoder / force eager conditions
+encoder / force eager conditions
 ```
 
 然后追到 dispatcher/manager 的 candidate 和最终 descriptor。
@@ -2023,3 +2053,4 @@ flowchart TB
 3. 不能。Future 可能已经完成，调用方也可能立即等待；重叠还要看数据依赖、stream、队列与实际时间线。
 
 </details>
+

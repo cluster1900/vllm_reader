@@ -3,10 +3,10 @@ title: "第05章 KV Cache 内存管理"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
-source_branch: v0.31.0
+source_commit: 5df63a7203cdb9328d824a27b682e77c7b9928be
+source_branch: v0.32.0
 source_dirty: false
-verified_at: 2026-10-18
+verified_at: 2026-10-19
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -36,7 +36,7 @@ KV Cache 不是一个 Python 字典，也不只是一块 GPU tensor。阅读当�
 3. EngineCore 中代表物理页所有权的 `KVCacheBlock` 元数据；
 4. 每个请求按逻辑 token 顺序维护的 block table。
 
-本章绑定源码 revision `db9527a46873454610df6dbedf79a36d6bf1a7f6`。文中继续使用三种
+本章绑定源码 revision `5df63a7203cdb9328d824a27b682e77c7b9928be`。文中继续使用三种
 证据标签：
 
 - **源码事实**：能在固定 revision 的实现或测试中直接定位。
@@ -132,8 +132,8 @@ flowchart TD
 显存没有随请求结束下降，**单凭这一现象不能判定泄漏，也不能排除泄漏**。常见原因
 是 vLLM 已建立可复用的 KV 池，请求释放的是池内 block 的持有关系，物理池仍保留。
 
-自动容量路径先用 `设备总显存 × gpu_memory_utilization` 确定预算，再扣非 KV
-占用和实际应用的 graph 预留；并不是把所有剩余显存都给 KV。显式配置
+自动容量路径先用 `ceil(设备总显存 × gpu_memory_utilization)` 确定总预算，若权重由
+外部 loader 进程持有，再扣该部分预算，随后扣非 KV 占用和实际应用的 graph 预留；并不是把所有剩余显存都给 KV。显式配置
 `kv_cache_memory_bytes` 时则进入手动显存指定路径。池化减少反复申请物理内存的需求，
 但运行时还有张量写入、拷贝、元数据更新等操作，不能概括为“系统只改 CPU 标志位”。
 
@@ -468,9 +468,16 @@ flowchart TB
 
 ### 5.5.3 多个 group 共享一个 block ID pool
 
-配置生成时，一个 pool block 的字节宽度取最宽 cache group 的每-block 字节数；
-`num_blocks = available_memory // bytes_per_block`。不同 group 的 tensor 视图按选定 layout
-映射到 backing allocation。
+配置生成时，一个 pool block 的字节宽度取最宽设备 cache group 的有效每-block 字节数；
+`num_blocks = available_memory // bytes_per_block`。v0.32.0 明确把 layout 与 stride 对齐
+计入这个有效宽度：layer-outer 布局逐层将 page 向上补齐再求和，block-outer 布局先合并
+各层 page，再按各层要求的公共对齐补齐。不能简单把原始 `page_size_bytes` 相加后就
+当成任意布局的分母。HiSparse host-resident group 由独立 host pool 处理。
+
+[源码] `vllm/v1/core/kv_cache_utils.py` - `_get_layer_block_stride`、
+`_get_kv_cache_bytes_per_block`、`_pool_bytes_per_block`、`get_kv_cache_config_from_groups`
+
+[源码] `vllm/v1/kv_cache_interface.py` - `KVCacheSpec.get_block_stride_alignment`
 
 这带来一个容易误解的结论：`num_blocks` 不是“每层各有这么多 block”，而是统一控制器
 能够分配的 block ID 数量。一个请求可能在多个 group 中各占若干 block，因此最大并发要按
@@ -505,7 +512,7 @@ flowchart TD
 
 `Worker.determine_available_memory()` 的主路径是：
 
-1. 记录初始显存快照和请求使用上限；
+1. 等外部 loader 持有的权重就绪，再记录初始显存快照与本进程预算；
 2. 运行 dummy forward，profile 权重之外的非 KV 和瞬时峰值；
 3. 如果启用并支持 CUDA Graph，估算 graph 占用；
 4. 用请求显存减去非 KV 占用和应用的 graph 估算；
@@ -513,7 +520,7 @@ flowchart TD
 
 ```text
 requested_memory
-= total_memory * gpu_memory_utilization
+= ceil(total_memory * gpu_memory_utilization) - external_weight_memory
 
 available_kv_memory
 = requested_memory
@@ -534,14 +541,20 @@ flowchart TD
 
 > **读图方法：** 这是“先确定可给 KV 的字节数”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
-这不是简单读取“当前 free memory”。profile 期间其他共享进程如果释放显存，源码会发现
-初始 free 小于 profile 后 free 的异常关系并报错，因为该变化破坏了测量假设。
+其中 `external_weight_memory` 只在 loader 报告权重由外部进程持有时扣除，普通路径为 0。
+这不是简单读取“当前 free memory”。普通 profiling 路径会核对 initial free 与 profile 后
+free 的关系；其他共享进程中途释放显存会破坏测量假设并触发断言。ROCm 另有显式
+profiling fallback，不能把这条断言说成所有平台分支都无条件执行。
+
+[源码] `vllm/v1/worker/utils.py` - `request_memory`
+
+[源码] `vllm/v1/worker/gpu_worker.py` - `Worker.init_device`、`determine_available_memory`
 
 ### 5.6.2 手动字节数是另一条路径
 
 如果配置了 `kv_cache_memory_bytes`，Worker 仍执行 `profile_run()` 以完成最大 batch token
-相关编译，但直接返回手工指定的 KV 字节数；该设置不遵守
-`gpu_memory_utilization`。它适合明确控制容量，不适合把旧机器上的数值无条件复制到显存
+相关编译，但以手工指定的 KV 字节数为基准，再经过 `reserve_mm_ipc_gpu_memory()` 的多模态 IPC
+预留处理；它不由 `gpu_memory_utilization` 推导。它适合明确控制容量，不适合把旧机器上的数值无条件复制到显存
 环境不同的进程。
 
 ### 5.6.3 从字节数到 block 数
@@ -549,7 +562,7 @@ flowchart TD
 EngineCore 汇总各 Worker 的 `KVCacheSpec`，建立 groups，然后计算：
 
 ```text
-bytes_per_pool_block = widest group's packed page bytes
+bytes_per_pool_block = widest device group's layout-aligned bytes
 num_blocks = available_memory // bytes_per_pool_block
 ```
 
@@ -1077,9 +1090,9 @@ v0.31.0 的 `KVCacheManager.reset_prefix_cache()` 先交给 coordinator，后者
 涉及的不同 pool 去重后逐个 reset，返回全部结果的合取。HiSparse 的 host pool 不应被漏掉。
 这不是跨 pool 原子事务：某个 pool 失败不意味着其他 pool 没有被重置。
 
-[源码] `vllm/v1/core/kv_cache_manager.py` - `KVCacheManager.reset_prefix_cache`（L669–687）
+[源码] `vllm/v1/core/kv_cache_manager.py` - `KVCacheManager.reset_prefix_cache`
 
-[源码] `vllm/v1/core/kv_cache_coordinator.py` - `KVCacheCoordinator.reset_prefix_cache`（L380–385）
+[源码] `vllm/v1/core/kv_cache_coordinator.py` - `KVCacheCoordinator.reset_prefix_cache`
 
 ## 5.15 Partial-tail 与 Copy-on-Write
 
@@ -1103,16 +1116,25 @@ coordinator 明确支持细粒度查找时，可在 group block 内部的 hash �
 ```
 
 v0.31.0 只检查参与 prefix caching 的 group：若对应 manager 不支持细粒度查找，且其
-block size 不等于 hash block size，则关闭 partial hit。Sliding Window 等不兼容组合仍
-可能禁用，不能概括为每个 group 都参加缓存或所有模型都支持。
+有效 block size 不等于 hash block size，则关闭 partial hit。v0.32.0 将判断抽为
+`partial_hash_hits_enabled()`，共同供 coordinator 与命中对齐解析使用。Sliding Window
+等不兼容组合仍可能禁用，不能概括为每个 group 都参加缓存或所有模型都支持。
 
-[源码] `vllm/v1/core/kv_cache_coordinator.py` - `HybridKVCacheCoordinator.__init__`（L691–720）
+[源码] `vllm/v1/core/kv_cache_coordinator.py` - `HybridKVCacheCoordinator.__init__`
+
+[源码] `vllm/v1/core/kv_cache_utils.py` - `partial_hash_hits_enabled`、`resolve_cache_hit_alignment_tokens`
 
 ### 5.15.2 注册的是查找元数据，不是另分一页
 
-`cache_partial_block()` 接收一个已经存在的物理 block，在 `num_tokens` 对齐
-`hash_block_size`、但位于实际 group block 内部时，登记该边界的链式 hash。仅为注册本身，
-它不会创建新 `KVCacheBlock`，也不会复制 GPU 内容。
+`cache_partial_block()` 接收一个已经存在的物理 block，按 hash 边界登记链式 hash。
+典型用途是 group block 内部的 partial entry；但 v0.32.0 已移除“必须严格位于物理块
+内部”的断言，Mamba checkpoint 也可在完整 block 边界通过它登记或重新登记。函数名
+不能再当作所有调用者边界的限制。仅为注册本身，它不会创建新 `KVCacheBlock`，
+也不会复制 GPU 内容。
+
+[源码] `vllm/v1/core/block_pool.py` - `BlockPool.cache_partial_block`
+
+[源码] `vllm/v1/core/single_type_kv_cache_manager.py` - `MambaManager._cache_partial_tail_block`
 
 ```mermaid
 flowchart LR
@@ -1168,17 +1190,35 @@ sequenceDiagram
 这组测试说明 partial-tail 不是独立的小优化，而是会穿过调度、spec decode、并行和远端
 KV 生命周期的条件化能力。初学者先掌握完整 block 主线，再读这些测试更稳妥。
 
-### 5.15.5 v0.31.0 的 checkpoint 与 cache group 边界
+### 5.15.5 v0.32.0 的 checkpoint 与 cache group 边界
 
 新版 `KVCacheSpec.prefix_cacheable` 区分可命中的持久状态与只服务运行的 cache group。
 coordinator 只为允许 caching 的 manager 登记 prefix，不能把所有分配的页都当成前缀缓存。
 `dcp_sharded` 则说明该 group 是否按 DCP 分片；复制的 draft group 不应套用主模型的
 DCP 有效 block 大小。物理页、缓存资格与分片布局是三个不同维度。
 
-Mamba/EAGLE 还要保留未来真正可恢复的 checkpoint。`get_replay_boundaries()` 为相同 prompt
-重发与更长 sibling 分别计算可达边界，避免仅保留较高边界导致重发命中归零。
+另一个必须共享的契约是“命中实际落在哪个边界”。EngineCore 在初始化 KV config 时
+写入 `hash_block_size` 与 `cache_hit_alignment_tokens`，供 Worker 使用。后者在不允许
+partial hit 时可以大于 hash 粒度，Mamba checkpoint 不能只看 `hash_block_size` 猜测
+恢复边界。`test_resolved_cache_hit_alignment_matches_coordinator` 用含/不含 Sliding Window
+group 的两种配置验证它与 coordinator 一致。
+
+单 KV group 且启用 prefix hashing 或 connector 时，`prefix_match_unit` 只能未设置或
+等于解析后的 block size；v0.32.0 对其他值显式报错，不再静默忽略。
+
+Mamba/EAGLE 还要保留未来真正可恢复的 checkpoint。旧 coordinator 方法
+`get_replay_boundaries()` 已删除，替换为模块级纯函数
+`replay_boundaries(num_prompt_tokens, scheduler_block_size, use_eagle)`，由
+`KVCacheCoordinator.cache_blocks()` 调用。它为相同 prompt 重发与更长 sibling 计算
+可达边界，避免仅保留较高边界导致重发命中归零；每组实际可缓存长度则交给
+`get_num_cacheable_tokens()`，Hybrid 子类实现自己的对齐与 EAGLE proof 范围。
 `enable_mamba_shared_prefix_checkpoint` 只有同时满足 EAGLE group、partial hash hit 和
 无 reprefillable tail 等条件才激活；不是所有 Mamba 模型无条件使用的新主线。
+
+checkpoint 位置也有一处容易多退一个边界的细节：非 EAGLE 先留出最后 token 再向下
+对齐；EAGLE 使用 prompt 全长作为 proof limit，再减一个对齐单位。例：长度 128、
+对齐 32，EAGLE 返回 96，而不是先减 1 后再退到 64。此为纯函数的源码算例，不是
+GPU 运行结果。
 
 HiSparse host tier 有私有 pool：命中可能比设备 group 更长，分配时只附着本地与外部命中
 实际覆盖的部分。host CoW 不进入普通 worker GPU block-copy 通道，不能画成所有 group
@@ -1186,9 +1226,19 @@ HiSparse host tier 有私有 pool：命中可能比设备 group 更长，分配�
 
 [源码] `vllm/v1/kv_cache_interface.py` - `KVCacheSpec.prefix_cacheable`、`KVCacheSpec.dcp_sharded`
 
-[源码] `vllm/v1/core/kv_cache_coordinator.py` - `get_replay_boundaries`（L319–338）、`cache_blocks`（L340–364）
+[源码] `vllm/v1/core/kv_cache_coordinator.py` - `replay_boundaries`、`cache_blocks`、`get_num_cacheable_tokens`
 
-[源码] `vllm/v1/core/kv_cache_manager.py` - `__init__`（L181–202）、`allocate_slots`（L467–493）
+[源码] `vllm/v1/engine/core.py` - `EngineCore._initialize_kv_caches`
+
+[源码] `vllm/v1/kv_cache_interface.py` - `get_mamba_prefill_checkpoint_position`
+
+[测试] `tests/v1/core/prefix_cache/test_partial_prefix_cache_hits.py` -
+`test_resolved_cache_hit_alignment_matches_coordinator`
+
+[测试] `tests/v1/core/test_single_type_kv_cache_manager.py` -
+`test_mamba_checkpoint_hash_maps_only_to_checkpoint_block`
+
+[源码] `vllm/v1/core/kv_cache_manager.py` - `__init__`、`allocate_slots`
 
 [源码] `vllm/v1/core/single_type_kv_cache_manager.py` - `HiSparseSourceManager.bind_host_pool`、`take_host_cow_copies`
 
@@ -1259,7 +1309,21 @@ sequenceDiagram
 2. `delay_cache_blocks=True` 时不能立即把目标页注册为可命中，因为 transfer 尚未完成。
 
 `reserved_blocks` 可防止异步 load 的初始分配吃掉已有 in-flight 请求完成当前步骤依赖的
-容量。
+容量。v0.32.0 还把 `skip_zeroing_group_ids` 传过 manager → coordinator → single-type
+manager：只有 connector 确认会写入的 group，其 external blocks 才不登记清零任务；
+未覆盖的组仍按自身规格处理。加载失败时仍有重新登记清零的恢复路径。
+
+这与 `prefix_replay_tokens` 是另一层问题：若成功的远端 load 恢复了所有 bounded-replay
+group 的 SWA 窗口，Scheduler 不必重算该窗口；只有前缀缓存命中或窗口缺失/加载失败
+才按相应条件回退尾部。不可把“远端命中 N token”等同于所有 group 状态都完整。
+
+[源码] `vllm/v1/core/kv_cache_manager.py` - `allocate_slots`、`record_blocks_for_zeroing`
+
+[源码] `vllm/v1/core/kv_cache_coordinator.py` - `allocate_new_computed_blocks`
+
+[源码] `vllm/v1/core/single_type_kv_cache_manager.py` - `allocate_external_computed_blocks`
+
+[源码] `vllm/v1/core/sched/scheduler.py` - `_load_restores_replay_window`、`_update_waiting_for_remote_kv`
 
 本章只解释本地 block 生命周期与 connector 的接口。第 09 章补充分布式拓扑；具体 P/D 传输协议仍是本书主线之外的扩展专题。
 
@@ -1566,6 +1630,8 @@ block 被 append 到 free queue、但未调用 `_remove_cached_block_hashes()` �
   - `get_kv_cache_config_from_groups`
   - `get_kv_cache_configs`
   - `get_request_block_hasher`
+  - `partial_hash_hits_enabled`
+  - `resolve_cache_hit_alignment_tokens`
 
 ### 运行时管理
 
@@ -1580,6 +1646,8 @@ block 被 append 到 free queue、但未调用 `_remove_cached_block_hashes()` �
   - `KVCacheCoordinator`
   - `UnitaryKVCacheCoordinator`
   - `HybridKVCacheCoordinator`
+  - `replay_boundaries`
+  - `get_num_cacheable_tokens`
 - `vllm/v1/core/single_type_kv_cache_manager.py`
   - `SingleTypeKVCacheManager`
   - type-specific `find_longest_cache_hit`
@@ -1631,6 +1699,10 @@ KV Cache 管理的核心不是“保存一个 tensor”，而是维护动态服�
 9. partial-tail 是条件化的细粒度能力，继续写必须维护 CoW 一致性；
 10. Scheduler 负责抢占策略，PagedAttention 负责消费 block table，它们都不等于本层。
 
+2026-10-19 的 v0.32.0 静态复核与 CPU 教学测试记录见
+[升级核对](../../meta/upgrade-v0.32.0-2026-10-19/05-kv-cache.md)；重点是对齐容量、
+checkpoint 可恢复边界以及按 group 防止异步写入与清零竞争。
+
 本章正文、图示、教学模型和 CPU 测试已经完成，`content_complete=true`。当前机器没有可用
 的 vLLM NVIDIA GPU runtime，无法核对真实显存 profiling、GPU copy 和 attention 执行，
 因此 `runtime_verified=false`，状态保持 `draft`。
@@ -1652,3 +1724,4 @@ KV Cache 管理的核心不是“保存一个 tensor”，而是维护动态服�
 3. 先看请求引用和 KV usage 是否回落，以及相同负载重复运行后是否持续增长；预分配池保留本身不能证明或排除泄漏。
 
 </details>
+

@@ -3,7 +3,8 @@
 
 This is not a performance model and does not reproduce a CUDA kernel. It keeps
 the contracts that matter for reading vLLM V1: allocation blocks may expand to
-smaller kernel blocks, a request block table maps logical blocks to physical
+smaller kernel blocks at the backend metadata boundary (not in the persistent
+manager table), a request block table maps logical blocks to physical
 blocks, slot mappings drive KV writes, and the attention read path follows the
 block table instead of requiring a contiguous per-request cache.
 """
@@ -23,36 +24,45 @@ def expand_manager_blocks(
     block_ids: Sequence[int],
     manager_block_size: int,
     kernel_block_size: int,
+    *,
+    kernel_block_stride: int = 0,
 ) -> list[int]:
-    """Expand allocation-level IDs into the IDs consumed by a kernel."""
+    """Build a backend read table without mutating manager IDs.
+
+    Zero stride selects contiguous pages; packed views may have a larger stride.
+    This models only ID mapping, not validation/construction of tensor views.
+    """
 
     if manager_block_size < 1 or kernel_block_size < 1:
         raise ValueError("block sizes must be positive")
     if manager_block_size % kernel_block_size:
         raise ValueError("kernel_block_size must divide manager_block_size")
     blocks_per_manager_block = manager_block_size // kernel_block_size
+    if kernel_block_stride < 0:
+        raise ValueError("kernel_block_stride must be non-negative")
+    stride = kernel_block_stride or blocks_per_manager_block
     return [
-        block_id * blocks_per_manager_block + offset
+        block_id * stride + offset
         for block_id in block_ids
         for offset in range(blocks_per_manager_block)
     ]
 
 
 def slot_for_position(
-    block_table: Sequence[int], position: int, kernel_block_size: int
+    block_table: Sequence[int], position: int, block_size: int
 ) -> int:
     """Translate one logical token position into a flat physical cache slot."""
 
     if position < 0:
         raise ValueError("position must be non-negative")
-    if kernel_block_size < 1:
-        raise ValueError("kernel_block_size must be positive")
-    logical_block = position // kernel_block_size
+    if block_size < 1:
+        raise ValueError("block_size must be positive")
+    logical_block = position // block_size
     if logical_block >= len(block_table):
         raise IndexError("block table does not cover this position")
-    block_offset = position % kernel_block_size
+    block_offset = position % block_size
     physical_block = block_table[logical_block]
-    return physical_block * kernel_block_size + block_offset
+    return physical_block * block_size + block_offset
 
 
 def build_query_start_loc(query_lengths: Sequence[int]) -> list[int]:
@@ -69,7 +79,7 @@ def build_query_start_loc(query_lengths: Sequence[int]) -> list[int]:
 def build_slot_mapping(
     block_tables: Sequence[Sequence[int]],
     positions_by_request: Sequence[Sequence[int]],
-    kernel_block_size: int,
+    block_size: int,
     *,
     padded_tokens: int | None = None,
     enabled: bool = True,
@@ -85,7 +95,7 @@ def build_slot_mapping(
     for block_table, positions in zip(block_tables, positions_by_request):
         for position in positions:
             mappings.append(
-                slot_for_position(block_table, position, kernel_block_size)
+                slot_for_position(block_table, position, block_size)
                 if enabled
                 else PAD_SLOT_ID
             )
@@ -282,3 +292,4 @@ def demo() -> None:
 
 if __name__ == "__main__":
     demo()
+

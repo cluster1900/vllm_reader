@@ -12,11 +12,12 @@
 ## 当前基线
 
 - 上游仓库：`vllm-project/vllm`
-- 发布标签：`v0.31.0`
-- Commit：`db9527a46873454610df6dbedf79a36d6bf1a7f6`
+- 发布标签：`v0.32.0`
+- 上游 Python 要求：`>=3.11,<3.15`（本 tag 已移除 Python 3.10 支持）
+- Commit：`5df63a7203cdb9328d824a27b682e77c7b9928be`
 - 基线静态复核日期：2026-10-18
 - 文档状态：第 01 至 10 章已有正文、图解、11 个教学程序和实验模板，均保持 `draft`
-- 最近基线升级：[v0.31.0 静态复核](meta/upgrade-v0.31.0-2026-10-18/README.md)；未运行真实 GPU/多机实验，章节仍为 draft。
+- 最近基线升级：[v0.32.0 静态复核](meta/upgrade-v0.32.0-2026-10-19/README.md)；未运行真实 GPU/多机实验，章节仍为 draft。
 - 旧基线历史复核：2026-10-08；修正抢占、采样、显存估算、UVA、并行回复与 Pareto 解释，
   同步检查实验记录、网页说明与 EPUB。见[本轮问题与验证记录](meta/full-document-review-2026-10-08.md)。
 - [首次逐章检查记录](meta/full-book-review-2026-09-08.md)与[再次复核记录](meta/final-source-review-2026-09-08.md)：问题、证据、验证结果及未运行范围。
@@ -106,3 +107,4 @@ python3 scripts/check_book.py
 该命令检查十章文件、frontmatter、内部链接、Markdown 代码围栏，以及
 `meta/chapter-source-map.json` 中的源码路径、关键符号和上游 commit；函数与类引用通过 AST 核对完整定义。它不替代对
 控制流、边界条件和实验结果的人工复核。
+

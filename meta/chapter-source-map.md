@@ -1,7 +1,7 @@
 # 章节源码映射
 
 本文件回答“十章是否与当前代码一一对应”。映射基线为
-`db9527a46873454610df6dbedf79a36d6bf1a7f6`，机器可读版本见
+`5df63a7203cdb9328d824a27b682e77c7b9928be`，机器可读版本见
 `meta/chapter-source-map.json`。
 
 这里的“一一对应”不是指一章只能对应一个文件，而是指：每章有清楚且互不混淆的
@@ -82,7 +82,7 @@ python3 scripts/check_book.py
 
 ## 本轮复核补充
 
-- 02：`vllm/entrypoints/offline_utils.py` 的 `_add_request` 与 `_run_engine` 共同解释提交顺序。
+- 02：`vllm/entrypoints/common/offline.py` 的 `_add_request` 与 `_run_engine` 共同解释提交顺序。
 - 03：`vllm/v1/engine/core.py` 的 `_pause_complete`、`has_work`、`_reset_caches` 解释暂停、通信和保留 KV 的不同边界。
 - 07/08：`vllm/v1/worker/gpu/buffer_utils.py` 的 `UvaBuffer`、`UvaBufferPool.copy_to_uva` 与 `StagedWriteTensor` 区分映射访问和 H2D 拷贝。
 
@@ -119,3 +119,15 @@ python3 scripts/check_book.py
 - 10：profiler 类和 factory 移至 `vllm/profiler/wrapper.py`；SSE Responses adapter 位于 `vllm/benchmarks/lib/endpoint_request_func.py`。
 
 逐章影响结论、精确源码依据与未运行范围见 [升级复核](upgrade-v0.31.0-2026-10-18/README.md)。
+
+
+## v0.32.0 升级锚点（2026-10-19）
+
+- 01：`SamplingParams.prompt_logprob_token_ids` 改为逐行二维输入；Triton 与 PyTorch 的 top-k 并列边界分别解释。
+- 02：OfflineInferenceMixin 移至 `vllm/entrypoints/common/offline.py`，不是删除 API；`get_max_tokens` 与 `check_stop` 分别说明入口上限和执行停止；输出多 token stop 裁剪保持字段对齐。
+- 03：初始化期间 shutdown 标志、all/consensus utility、bind endpoint 与可选 tensor arena；源码默认 False 与发布摘要差异明确记录。
+- 04–06：重新核对暂停 drain、KV replay、manager/kernel block 坐标，以及移除 cascade 后的兼容字段；不保留已经消失的符号锚点。
+- 07–09：compile SP/AsyncTP pass 移除不等于 model-level SP 移除；MRV2 stock compile、GPU n-gram、Elastic EP 与 PCP+PP 门控重新核对。
+- 10：sweep warmup 与失败结果分离；profile session 迭代边界与前端 CPU trace 分开；KV fetch stage/cache source 指标说明。
+
+十章结论、逐文件差异和本次验证范围见[升级复核](upgrade-v0.32.0-2026-10-19/README.md)。

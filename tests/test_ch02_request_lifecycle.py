@@ -68,6 +68,32 @@ class RequestLifecycleTest(unittest.TestCase):
         self.assertIn(internal_id, demo.output_processor.states)
         self.assertIn(internal_id, demo.core.requests)
 
+    def test_requested_output_is_not_reserved_from_context(self):
+        demo = LifecycleDemo()
+        demo.input_processor.max_model_len = 5
+        internal = demo.submit("long-prompt", "请 介绍 vLLM", max_tokens=100)
+        self.assertEqual(demo.core.requests[internal].request.max_tokens, 100)
+        output = demo.run_offline()[0]
+        self.assertEqual(len(output.token_ids), 1)
+        self.assertEqual(output.finish_reason, "length")
+
+    def test_output_cap_below_context_remainder_is_preserved(self):
+        demo = LifecycleDemo()
+        demo.input_processor.max_model_len = 8
+        demo.submit("short-output", "请 介绍 vLLM", max_tokens=2)
+        self.assertEqual(len(demo.run_offline()[0].token_ids), 2)
+
+    def test_prompt_over_context_is_rejected(self):
+        demo = LifecycleDemo()
+        demo.input_processor.max_model_len = 3
+        with self.assertRaisesRegex(ValueError, "exceeds max_model_len"):
+            demo.submit("too-long", "请 介绍 vLLM", max_tokens=1)
+
+    def test_nonpositive_output_cap_is_rejected(self):
+        for cap in (0, -1):
+            with self.subTest(cap=cap), self.assertRaisesRegex(ValueError, "at least 1"):
+                LifecycleDemo().submit("invalid", "介绍 vLLM", max_tokens=cap)
+
     def test_input_length_validation(self):
         demo = LifecycleDemo()
         demo.input_processor.max_model_len = 4
@@ -78,3 +104,4 @@ class RequestLifecycleTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -4,6 +4,8 @@
 The model intentionally keeps only the control-flow contracts discussed in
 Chapter 3: client selection, schedule/execute/update, the concurrent batch
 queue, abort ordering, pause modes, shutdown, and executor failure.
+max_tokens is only the output-work cap here; this model has no prompt/context
+window. Chapter 2 demonstrates the separate context-length stop bound.
 """
 
 from __future__ import annotations
@@ -376,3 +378,4 @@ def demo() -> None:
 
 if __name__ == "__main__":
     demo()
+

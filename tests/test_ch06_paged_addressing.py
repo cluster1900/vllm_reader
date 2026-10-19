@@ -21,6 +21,18 @@ class AddressingTest(unittest.TestCase):
     def test_manager_blocks_expand_for_smaller_kernel_pages(self):
         self.assertEqual(expand_manager_blocks([0, 3], 32, 16), [0, 1, 6, 7])
 
+    def test_backend_mapping_does_not_mutate_manager_table(self):
+        manager = [3, 5]
+        self.assertEqual(expand_manager_blocks(manager, 32, 16), [6, 7, 10, 11])
+        self.assertEqual(manager, [3, 5])
+        self.assertEqual(slot_for_position(manager, 20, 32), 116)
+        self.assertEqual(slot_for_position([6, 7, 10, 11], 20, 16), 116)
+
+    def test_packed_kernel_stride_is_not_always_size_ratio(self):
+        self.assertEqual(expand_manager_blocks([3], 32, 16, kernel_block_stride=5), [15, 16])
+        with self.assertRaises(ValueError):
+            expand_manager_blocks([3], 32, 16, kernel_block_stride=-1)
+
     def test_kernel_block_must_divide_manager_block(self):
         with self.assertRaises(ValueError):
             expand_manager_blocks([1], 24, 16)
@@ -127,3 +139,4 @@ class BackendSelectionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

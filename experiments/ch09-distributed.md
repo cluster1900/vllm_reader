@@ -159,3 +159,10 @@ DCP 必须额外记录 partial output、LSE 和合并路径，确认不是简单
 - 适用的 workload 和硬件范围：
 - 尚未解释的异常：
 - 后续实验：
+
+
+## v0.32.0 教学更新（2026-10-19）
+
+新增 PCP-only decode 请求 owner 与 PCP+DCP 查询复制的纯 Python 对照，并测试 PCP+PP 的形式拓扑。
+无 GPU/PP/DCP 集成运行，拓扑算式不证明模型组合受支持；仍需逐项检查 PCPManager.validate_config。
+旧实验记录保留原基线；本次实际测试结果见新版升级报告。

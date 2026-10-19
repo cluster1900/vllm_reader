@@ -34,6 +34,7 @@ class EngineCoreRequest:
     external_request_id: str
     prompt_token_ids: tuple[int, ...]
     max_tokens: int
+    max_model_len: int
 
 
 @dataclass(frozen=True)
@@ -115,8 +116,8 @@ class InputProcessor:
     ) -> EngineCoreRequest:
         if max_tokens < 1:
             raise ValueError("max_tokens must be at least 1")
-        if len(engine_input.prompt_token_ids) + max_tokens > self.max_model_len:
-            raise ValueError("prompt plus output exceeds max_model_len")
+        if len(engine_input.prompt_token_ids) >= self.max_model_len:
+            raise ValueError("prompt leaves no output space or exceeds max_model_len")
         self._sequence += 1
         internal_id = f"{external_request_id}-internal-{self._sequence:02d}"
         return EngineCoreRequest(
@@ -124,6 +125,7 @@ class InputProcessor:
             external_request_id=external_request_id,
             prompt_token_ids=engine_input.prompt_token_ids,
             max_tokens=max_tokens,
+            max_model_len=self.max_model_len,
         )
 
 
@@ -150,7 +152,12 @@ class EngineCore:
             request=request,
             planned_token_ids=tuple(
                 self.response_plan[i % len(self.response_plan)]
-                for i in range(request.max_tokens)
+                # max_tokens is an output cap, not a context reservation.
+                # Precompute the equivalent of the two production stop bounds.
+                for i in range(min(
+                    request.max_tokens,
+                    request.max_model_len - len(request.prompt_token_ids),
+                ))
             ),
         )
 
@@ -332,3 +339,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
