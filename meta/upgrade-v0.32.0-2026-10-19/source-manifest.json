@@ -1,0 +1,694 @@
+{
+  "source_commit": "5df63a7203cdb9328d824a27b682e77c7b9928be",
+  "tree_truncated": false,
+  "files": [
+    {
+      "path": "benchmarks/benchmark_block_pool.py",
+      "blob_sha": "20cd26bdddf513c21f31853380d62583ac51980d"
+    },
+    {
+      "path": "benchmarks/benchmark_prefix_caching.py",
+      "blob_sha": "5abdd65b2aaf1637b1c03fd1457611d91437e587"
+    },
+    {
+      "path": "docs/contributing/profiling.md",
+      "blob_sha": "5e5e27026372c6d4fc06b6c666c4cf930d81a610"
+    },
+    {
+      "path": "docs/design/arch_overview.md",
+      "blob_sha": "711e9a2668eb44ae6999cce30aae6472698c734f"
+    },
+    {
+      "path": "docs/design/attention_backends.md",
+      "blob_sha": "d175add40b84a66f345f78630e28bece7b8ca776"
+    },
+    {
+      "path": "docs/design/metrics.md",
+      "blob_sha": "5d9fa42c11c33ed98bcd0d65736a953210d544b6"
+    },
+    {
+      "path": "docs/design/model_runner_v2.md",
+      "blob_sha": "cabc3526b19e6cd7df4f7ad4b51e3ea29925feb5"
+    },
+    {
+      "path": "docs/design/paged_attention.md",
+      "blob_sha": "f4742c7faaa45697c9d1fd45743814f1b114932b"
+    },
+    {
+      "path": "examples/basic/offline_inference/basic.py",
+      "blob_sha": "78bfda9bcf4e3c5b8fbe7843e4be8b5b10dcec24"
+    },
+    {
+      "path": "pyproject.toml",
+      "blob_sha": "bc924440fa5935ea3ed6a2117b001c960a6e1a80"
+    },
+    {
+      "path": "tests/basic_correctness/models/test_basic_correctness.py",
+      "blob_sha": "47777d6740f485b29c18b979e4e5bb20e706af34"
+    },
+    {
+      "path": "tests/benchmarks/sweep/test_param_sweep.py",
+      "blob_sha": "749d5a995b0e27bc9cb4c401dda6da0437ea9dd5"
+    },
+    {
+      "path": "tests/benchmarks/test_latency_cli.py",
+      "blob_sha": "54075a3a15e638c4177a16282835c04da9e80b5e"
+    },
+    {
+      "path": "tests/benchmarks/test_sampling_params.py",
+      "blob_sha": "d009b4db6c308c6e55e1e912228b0f09a7c96183"
+    },
+    {
+      "path": "tests/benchmarks/test_serve_cli.py",
+      "blob_sha": "8aa17b7ef842ad117d1accc2c146e47939ad3732"
+    },
+    {
+      "path": "tests/benchmarks/test_throughput_cli.py",
+      "blob_sha": "37ced49838c37cc721b5f2343234a4870394e81c"
+    },
+    {
+      "path": "tests/compile/test_config.py",
+      "blob_sha": "4e7a756f8cbe21234ea26df571056f805bc4de89"
+    },
+    {
+      "path": "tests/compile/test_decorator.py",
+      "blob_sha": "6763a6dffe215ce3e8bfefafbc8333df70e217aa"
+    },
+    {
+      "path": "tests/distributed/test_context_parallel.py",
+      "blob_sha": "6d5d454b4a8d3fe8aa95bdc6586f4110365deedd"
+    },
+    {
+      "path": "tests/distributed/test_dcp_a2a.py",
+      "blob_sha": "596fec5d776c3c509c2a7b5d4b0221c3b94b0222"
+    },
+    {
+      "path": "tests/distributed/test_expert_placement.py",
+      "blob_sha": "4174b5c6ccff4e5de5d869b7b84da004d51fa107"
+    },
+    {
+      "path": "tests/distributed/test_multiproc_executor.py",
+      "blob_sha": "cd9413865465384de794c5953afba78d9f1a67ce"
+    },
+    {
+      "path": "tests/distributed/test_pipeline_parallel.py",
+      "blob_sha": "8ba93df4f504a329f777f5cf5bd8cd300d36d6ab"
+    },
+    {
+      "path": "tests/distributed/test_pipeline_partition.py",
+      "blob_sha": "4df6f43970d70a0cf4d6150e2ef1dffd335aac10"
+    },
+    {
+      "path": "tests/distributed/test_torchrun_example.py",
+      "blob_sha": "670df2759b0ac9929f9549da1037571196da5d90"
+    },
+    {
+      "path": "tests/kernels/attention/test_attention_selector.py",
+      "blob_sha": "c6f4094eb669b9b344996e3c602477ae98934b4f"
+    },
+    {
+      "path": "tests/kernels/core/test_rotary_embedding.py",
+      "blob_sha": "353aefa11aae3055d783a36ee74b4dda54556065"
+    },
+    {
+      "path": "tests/test_config.py",
+      "blob_sha": "a7e36ada6259e2c6825d46fc3eedff1072e5c5e1"
+    },
+    {
+      "path": "tests/test_sampling_params.py",
+      "blob_sha": "f32a3d4c367f9c17f1c44bfb3110e366e0a5d452"
+    },
+    {
+      "path": "tests/v1/attention/test_attention_backends_selection.py",
+      "blob_sha": "1d8902731747c6d022ecdbba6d136d0e772b73cb"
+    },
+    {
+      "path": "tests/v1/attention/test_backend_per_kind.py",
+      "blob_sha": "53dedf3d6bce23e5fa3861329a9d5b1056de0821"
+    },
+    {
+      "path": "tests/v1/attention/test_cuda_backend_probe_errors.py",
+      "blob_sha": "f60430f855fa57fc7ddb1d0bffffe7d48ae813e3"
+    },
+    {
+      "path": "tests/v1/core/prefix_cache/test_partial_prefix_cache_hits.py",
+      "blob_sha": "4bffe91a65349c4cc79641ce5e1be37561dd8ca4"
+    },
+    {
+      "path": "tests/v1/core/prefix_cache/test_partial_prefix_cache_primitives.py",
+      "blob_sha": "5b43e2c5610602b4463f6347dad1dc8a91b5d4a3"
+    },
+    {
+      "path": "tests/v1/core/test_async_scheduler.py",
+      "blob_sha": "65f38cdedfb2ebc7d33a886beeb247ae17e2ea37"
+    },
+    {
+      "path": "tests/v1/core/test_deferred_block_free.py",
+      "blob_sha": "44cdf567f7c972677fef0dcd44459ab5f76bd7b9"
+    },
+    {
+      "path": "tests/v1/core/test_reset_prefix_cache_e2e.py",
+      "blob_sha": "b80789945d2fc26409fb04c1b8297fd3df48c46c"
+    },
+    {
+      "path": "tests/v1/core/test_scheduler.py",
+      "blob_sha": "107a37dc91c0c4b6902c09e967bbec644dbf0e7d"
+    },
+    {
+      "path": "tests/v1/core/test_single_type_kv_cache_manager.py",
+      "blob_sha": "cd4581dcefce77c64d8f2c336a481977d41e1176"
+    },
+    {
+      "path": "tests/v1/cudagraph/test_cudagraph_dispatch.py",
+      "blob_sha": "c24c48c377c4e3ba581ee50999fb72ba139ec8ab"
+    },
+    {
+      "path": "tests/v1/distributed/test_async_llm_dp.py",
+      "blob_sha": "f4b4ca2a7902ad60e8bb9310c6dcff8dc8dd3418"
+    },
+    {
+      "path": "tests/v1/e2e/general/test_attention_backend_per_kind.py",
+      "blob_sha": "3281247b1c4ab7f281584ce47d869615f3e27207"
+    },
+    {
+      "path": "tests/v1/engine/test_abort_final_step.py",
+      "blob_sha": "c97e1f743637bdca7e32351e6f67537c2bfae7da"
+    },
+    {
+      "path": "tests/v1/engine/test_async_llm.py",
+      "blob_sha": "3ac687c918f1c16eba08ac97c701845cc633da75"
+    },
+    {
+      "path": "tests/v1/engine/test_engine_core.py",
+      "blob_sha": "2d9f7e8632d76122ecc35ad90aecf1acd64b5791"
+    },
+    {
+      "path": "tests/v1/engine/test_engine_core_client.py",
+      "blob_sha": "9bcc9d91eb97f3dea598f114879898b0108652a2"
+    },
+    {
+      "path": "tests/v1/engine/test_output_processor.py",
+      "blob_sha": "3c186a4e738d4760f77dcd4d921ef52b6c39b576"
+    },
+    {
+      "path": "tests/v1/engine/test_startup_watch_processes.py",
+      "blob_sha": "19b2d7bca8404732b162dedea95c4d7c53d97e69"
+    },
+    {
+      "path": "tests/v1/sample/test_sampler.py",
+      "blob_sha": "c23fe6c0ce84456150e818b8b5c77a1bf07cfd6c"
+    },
+    {
+      "path": "tests/v1/sample/test_topk_topp_sampler.py",
+      "blob_sha": "190a4e3fcaf0b97c193b6fb56e9d5038580f4ef6"
+    },
+    {
+      "path": "tests/v1/worker/test_gpu_block_table.py",
+      "blob_sha": "dac9f12ae69a2c9fb3afb425c0daec99176f2690"
+    },
+    {
+      "path": "tests/v1/worker/test_gpu_model_runner.py",
+      "blob_sha": "1247bf193a76e55b5044cf8ec94c28353750fc26"
+    },
+    {
+      "path": "tests/v1/worker/test_gpu_model_runner_v2_cudagraph_profiling.py",
+      "blob_sha": "74191206d363c703b688178433c5ff30583381fe"
+    },
+    {
+      "path": "tests/v1/worker/test_gpu_pcp_manager.py",
+      "blob_sha": "fcf171a89ca3359f54839e2e4383543613eae022"
+    },
+    {
+      "path": "tests/v1/worker/test_gpu_worker.py",
+      "blob_sha": "a34133e2f8d3dc4d3dd6495367c32f4423b14d10"
+    },
+    {
+      "path": "tests/v1/worker/test_worker_memory_snapshot.py",
+      "blob_sha": "3232d3abcf8ed4fe32f89e739d03ac5464820ae6"
+    },
+    {
+      "path": "vllm/benchmarks/datasets/datasets.py",
+      "blob_sha": "3746ac727e0f6da859d250ad52882ece820e5e39"
+    },
+    {
+      "path": "vllm/benchmarks/latency.py",
+      "blob_sha": "0c75c04563b496829921bdb04002442e314a0d1b"
+    },
+    {
+      "path": "vllm/benchmarks/lib/endpoint_request_func.py",
+      "blob_sha": "778a4e50d334752bff5be389e60899ad7fba3c8b"
+    },
+    {
+      "path": "vllm/benchmarks/serve.py",
+      "blob_sha": "01a0f62aeee2569597696745073a3552d8dc7c3c"
+    },
+    {
+      "path": "vllm/benchmarks/sweep/param_sweep.py",
+      "blob_sha": "c7607109483d036874393e851504d3d0481e89ae"
+    },
+    {
+      "path": "vllm/benchmarks/sweep/plot_pareto.py",
+      "blob_sha": "45e54be88e69ead1d8fe2f15db447467328e0f6b"
+    },
+    {
+      "path": "vllm/benchmarks/sweep/serve.py",
+      "blob_sha": "9f16134720d6a62c8eb8795d28615f591c269ea5"
+    },
+    {
+      "path": "vllm/benchmarks/sweep/serve_workload.py",
+      "blob_sha": "acf0ce5f7f3d1c8a5f270d3df43daf5f7304ace4"
+    },
+    {
+      "path": "vllm/benchmarks/throughput.py",
+      "blob_sha": "76f6a72fd98a7e4ff1b4bbb780547439eba5b24f"
+    },
+    {
+      "path": "vllm/compilation/backends.py",
+      "blob_sha": "434c1af47ee8e40fda26fa9cbab63ffe6c5362bc"
+    },
+    {
+      "path": "vllm/compilation/caching.py",
+      "blob_sha": "5205c7404fcb88d0dad9c355f6cc6ed9adfc86bf"
+    },
+    {
+      "path": "vllm/compilation/cuda_graph.py",
+      "blob_sha": "2dea34e0ff4d99fd2f1d3ee9351501eeb5fc5486"
+    },
+    {
+      "path": "vllm/compilation/decorators.py",
+      "blob_sha": "3aad32cc24e37f37edd527aa8f96d54562078430"
+    },
+    {
+      "path": "vllm/compilation/piecewise_backend.py",
+      "blob_sha": "576cd941f6a8946b93e3c1c393b98eba2a77cb12"
+    },
+    {
+      "path": "vllm/compilation/wrapper.py",
+      "blob_sha": "78b34f8959cbc7a2eaebfc67a89438c36927a871"
+    },
+    {
+      "path": "vllm/config/compilation.py",
+      "blob_sha": "7a16e3d6a046aa7c59f3007983cc3fe291612944"
+    },
+    {
+      "path": "vllm/config/parallel.py",
+      "blob_sha": "e103c9ffd73d014d0b1e86ffecb2eac5e10d3595"
+    },
+    {
+      "path": "vllm/config/profiler.py",
+      "blob_sha": "0ad920e21eda6ad17c7222f55dc8c6512ec23b25"
+    },
+    {
+      "path": "vllm/config/scheduler.py",
+      "blob_sha": "1dbe4b72eb7ce43deaf7cb1e9e93176b8219f028"
+    },
+    {
+      "path": "vllm/config/vllm.py",
+      "blob_sha": "f27c8418ab4df614a32affb9b34a30ac6f734604"
+    },
+    {
+      "path": "vllm/distributed/device_communicators/shm_broadcast.py",
+      "blob_sha": "c5180d68a3c46162810b2572a99dd30fa5caa3b4"
+    },
+    {
+      "path": "vllm/distributed/parallel_state.py",
+      "blob_sha": "fea0c4e3c78395a01efb09dec9c2d681a9f8a86b"
+    },
+    {
+      "path": "vllm/distributed/utils.py",
+      "blob_sha": "3618361f2a66401d3406f7b3b520891f8ec7234d"
+    },
+    {
+      "path": "vllm/engine/arg_utils.py",
+      "blob_sha": "ea628467e0b3609014a4a74b1dda49737263a306"
+    },
+    {
+      "path": "vllm/entrypoints/common/offline.py",
+      "blob_sha": "a5af009f22267dd70fda8aa9f341d6214c811fec"
+    },
+    {
+      "path": "vllm/entrypoints/generate/base/serving.py",
+      "blob_sha": "a0eda6d05ff4a391b69c11f60bd9a1fa9e15bcf8"
+    },
+    {
+      "path": "vllm/entrypoints/launchers/launcher.py",
+      "blob_sha": "44161439b6909fa7954c2b6cd34d9bfd7495ab5a"
+    },
+    {
+      "path": "vllm/entrypoints/llm.py",
+      "blob_sha": "6b7f91d08e4cfba2a234da9229fceb828d26efe8"
+    },
+    {
+      "path": "vllm/entrypoints/openai/chat_completion/serving.py",
+      "blob_sha": "b291ec6e8aae7cb92cc10dca01b518fe29d9e01e"
+    },
+    {
+      "path": "vllm/entrypoints/serve/exception_handling/handlers/vllm_error.py",
+      "blob_sha": "7b6954b8f77f37449f04105effdd29199645a800"
+    },
+    {
+      "path": "vllm/entrypoints/serve/utils/api_utils.py",
+      "blob_sha": "6b82a2afa07098a01bb5df9820df0700dcc55861"
+    },
+    {
+      "path": "vllm/envs.py",
+      "blob_sha": "a2b46030772f3845009fd837b5b55f6df1d11641"
+    },
+    {
+      "path": "vllm/forward_context.py",
+      "blob_sha": "9ddc8e9255ed04efa86f7f861a24208ae4a14a88"
+    },
+    {
+      "path": "vllm/model_executor/layers/attention/attention.py",
+      "blob_sha": "bec1856d93ad6f6e8083b45ac5b8dedd5d5f5178"
+    },
+    {
+      "path": "vllm/model_executor/layers/fused_moe/all2all_utils.py",
+      "blob_sha": "6a0a2b2358a5204201060a1aefed92b1c8366f4d"
+    },
+    {
+      "path": "vllm/model_executor/layers/fused_moe/config.py",
+      "blob_sha": "f20af8a6f826141cb460bdf6111c1195411efcba"
+    },
+    {
+      "path": "vllm/model_executor/layers/fused_moe/expert_map_manager.py",
+      "blob_sha": "daa2b3ff8e8308cfdaf74aa6d0eea5eccc32b31a"
+    },
+    {
+      "path": "vllm/model_executor/layers/fused_moe/modular_kernel.py",
+      "blob_sha": "7a4cbd42374621dd726e12d7e4986d30208dc934"
+    },
+    {
+      "path": "vllm/model_executor/layers/fused_moe/runner/moe_runner.py",
+      "blob_sha": "d220f8da36bb484590d877cf8b48c8c5f690d482"
+    },
+    {
+      "path": "vllm/model_executor/layers/linear.py",
+      "blob_sha": "65cda325a22188c83746121d54567f4f94a229a1"
+    },
+    {
+      "path": "vllm/model_executor/layers/logits_processor.py",
+      "blob_sha": "04541212fe0e15a4b3f0ca3870d9cd64eed78c78"
+    },
+    {
+      "path": "vllm/model_executor/layers/utils.py",
+      "blob_sha": "8d285dda75b84f83300ed3925b453d03337c64e8"
+    },
+    {
+      "path": "vllm/model_executor/model_loader/__init__.py",
+      "blob_sha": "226caebe1cd49fac95d9f66ec14e4c7aab71f9c8"
+    },
+    {
+      "path": "vllm/model_executor/model_loader/default_loader.py",
+      "blob_sha": "07283e50279eba3740faec00c6403615cf495fa8"
+    },
+    {
+      "path": "vllm/model_executor/model_loader/utils.py",
+      "blob_sha": "65d1ff2808d7f8bed0b6b345352a46977b15c37b"
+    },
+    {
+      "path": "vllm/model_executor/models/llama.py",
+      "blob_sha": "9e0f45388ab70e6cefb34c7c2fc36705a066fe1e"
+    },
+    {
+      "path": "vllm/model_executor/models/registry.py",
+      "blob_sha": "36f9bd6e6fccd79ce801c4117a6222e7f1562da5"
+    },
+    {
+      "path": "vllm/model_executor/models/utils.py",
+      "blob_sha": "ef1aac6de5582f86e62824a08550f1ed0e29f246"
+    },
+    {
+      "path": "vllm/platforms/cuda.py",
+      "blob_sha": "401a98f66febff1a6d0f07d0b8708267adc972b1"
+    },
+    {
+      "path": "vllm/profiler/wrapper.py",
+      "blob_sha": "ebe7d90c3bf3f9d18bac75a3744c0c7144763c07"
+    },
+    {
+      "path": "vllm/renderers/base.py",
+      "blob_sha": "e04bfa64eb762797a4e80217269a5ff0c2f0c2b1"
+    },
+    {
+      "path": "vllm/renderers/inputs/preprocess.py",
+      "blob_sha": "9daf38fdbd3bd54a9cb32175329af9ca5bc07099"
+    },
+    {
+      "path": "vllm/renderers/online_renderer.py",
+      "blob_sha": "b4e3fc6c46666bd012e39302f6ea328f2aa641b1"
+    },
+    {
+      "path": "vllm/sampling_params.py",
+      "blob_sha": "8331a1707b7db57bc8a70c59de4cc190ae222aca"
+    },
+    {
+      "path": "vllm/sequence.py",
+      "blob_sha": "c90531935bb9d52cb8d24cfbb6e62f7562644cf6"
+    },
+    {
+      "path": "vllm/v1/attention/backend.py",
+      "blob_sha": "466bba586d08c29da9d88c974bd6b799d0db7fa8"
+    },
+    {
+      "path": "vllm/v1/attention/backends/flash_attn.py",
+      "blob_sha": "6e906bc520c49e90bc6658c4a189b54215e5e28e"
+    },
+    {
+      "path": "vllm/v1/attention/backends/registry.py",
+      "blob_sha": "207c112a384c1e1450362c7c91ac31893fd783bd"
+    },
+    {
+      "path": "vllm/v1/attention/backends/rocm_attn.py",
+      "blob_sha": "471bb9f058483fbda3bf552c86c32eb6b7ae262f"
+    },
+    {
+      "path": "vllm/v1/attention/ops/dcp.py",
+      "blob_sha": "71e1fdae07cc0094b3c516e0efc325d6ee71950b"
+    },
+    {
+      "path": "vllm/v1/attention/ops/paged_attn.py",
+      "blob_sha": "896e929b5433d62f927422d97d02a3676e1e63c2"
+    },
+    {
+      "path": "vllm/v1/attention/selector.py",
+      "blob_sha": "a7e8cd0fd22a5c3a8f632bdddafc7d3634ec7349"
+    },
+    {
+      "path": "vllm/v1/core/block_pool.py",
+      "blob_sha": "3b0102fe84aa005a708d04b1c77380132ab80904"
+    },
+    {
+      "path": "vllm/v1/core/kv_cache_coordinator.py",
+      "blob_sha": "7d4f2d5a2b44fd0d104c0ae0415a4f46d000bf18"
+    },
+    {
+      "path": "vllm/v1/core/kv_cache_manager.py",
+      "blob_sha": "4f472170a874814b539ae900d014efecc7327150"
+    },
+    {
+      "path": "vllm/v1/core/kv_cache_utils.py",
+      "blob_sha": "03c6c5ff62acc46cdad8878e02ede91d8043f733"
+    },
+    {
+      "path": "vllm/v1/core/sched/async_scheduler.py",
+      "blob_sha": "290204d58c39cdec4c3cc1e58fe0697378aa5e98"
+    },
+    {
+      "path": "vllm/v1/core/sched/output.py",
+      "blob_sha": "9ad0d4e65865cfb4b4299cece2d1ccc2ea54c52a"
+    },
+    {
+      "path": "vllm/v1/core/sched/request_queue.py",
+      "blob_sha": "0a0277eb56336f6baee1ee0ef16184ca8d131c06"
+    },
+    {
+      "path": "vllm/v1/core/sched/scheduler.py",
+      "blob_sha": "cec96d2a49235fdade2768c427f1cff7868c6026"
+    },
+    {
+      "path": "vllm/v1/core/sched/utils.py",
+      "blob_sha": "045dacaa98295478e1dc193b9b36ae8c13a338fe"
+    },
+    {
+      "path": "vllm/v1/core/single_type_kv_cache_manager.py",
+      "blob_sha": "2e4fe55b96c2dede4cb9b767bab5babe08068f02"
+    },
+    {
+      "path": "vllm/v1/cudagraph_dispatcher.py",
+      "blob_sha": "d6abba301aec0594fcd19a08478a6d8c76121c53"
+    },
+    {
+      "path": "vllm/v1/engine/__init__.py",
+      "blob_sha": "1b14b08246aa4265849eb8ac393efbad3e741a6b"
+    },
+    {
+      "path": "vllm/v1/engine/admission_control.py",
+      "blob_sha": "b72d50f3465dd196245307a3a620e7b8f1aee7e7"
+    },
+    {
+      "path": "vllm/v1/engine/async_llm.py",
+      "blob_sha": "f2142af2b3fbb9adb5eab548bc16f371fab11f43"
+    },
+    {
+      "path": "vllm/v1/engine/coordinator.py",
+      "blob_sha": "cb120ba5d99323f2350c9259c510850a1e2f6f9b"
+    },
+    {
+      "path": "vllm/v1/engine/core.py",
+      "blob_sha": "35cc8cc1860cb3a164086f7ed44dea46785e8f30"
+    },
+    {
+      "path": "vllm/v1/engine/core_client.py",
+      "blob_sha": "dccc8cba5368718b4cb5a0842680ee7b2c973198"
+    },
+    {
+      "path": "vllm/v1/engine/input_processor.py",
+      "blob_sha": "17e8af5caeeff4056f912440b622f8c3a6babf2e"
+    },
+    {
+      "path": "vllm/v1/engine/llm_engine.py",
+      "blob_sha": "330c114a86ddf38c8368694e0a78aa7920347422"
+    },
+    {
+      "path": "vllm/v1/engine/output_processor.py",
+      "blob_sha": "eb499f6cc78ba89b14fa862e4cb5801f0837323f"
+    },
+    {
+      "path": "vllm/v1/executor/abstract.py",
+      "blob_sha": "0af9508662cb7271bc35c74497031ba4242e61b4"
+    },
+    {
+      "path": "vllm/v1/executor/multiproc_executor.py",
+      "blob_sha": "749f46b428723f91a5566e2a1bbb2efbf99fbe63"
+    },
+    {
+      "path": "vllm/v1/executor/ray_executor.py",
+      "blob_sha": "d101885ce2b6fce5c49040c188fec3d6fbdc0ed4"
+    },
+    {
+      "path": "vllm/v1/executor/ray_executor_v2.py",
+      "blob_sha": "8d254020ff206c20c08284380cfa59c8fd02c8f8"
+    },
+    {
+      "path": "vllm/v1/executor/uniproc_executor.py",
+      "blob_sha": "da1f2c588b6e5fe050a29052218cbb4c6ef3185e"
+    },
+    {
+      "path": "vllm/v1/kv_cache_interface.py",
+      "blob_sha": "79e88ca91d8f8fd119866357ac22d8f7fb34ad65"
+    },
+    {
+      "path": "vllm/v1/metrics/loggers.py",
+      "blob_sha": "65acc49ac0e03bd3fe5fdc8bd4e2b8f929f3d094"
+    },
+    {
+      "path": "vllm/v1/metrics/perf.py",
+      "blob_sha": "a2b3f534d88ccebcef860b2acacf70fb6f57ef5c"
+    },
+    {
+      "path": "vllm/v1/metrics/prometheus.py",
+      "blob_sha": "91bb88310d69952383db7ceb70062805ebafd273"
+    },
+    {
+      "path": "vllm/v1/metrics/stats.py",
+      "blob_sha": "87277f6545f01cb75c65426306111086f5feefaa"
+    },
+    {
+      "path": "vllm/v1/outputs.py",
+      "blob_sha": "22169b1fda93861db267ea73be64637a3f5bc17e"
+    },
+    {
+      "path": "vllm/v1/request.py",
+      "blob_sha": "4b1b9ecc2eede6347d839ef52683f3d40a306af5"
+    },
+    {
+      "path": "vllm/v1/sample/ops/topk_topp_sampler.py",
+      "blob_sha": "daa94ebc3af2b41484a29252b90eb6def5a71b62"
+    },
+    {
+      "path": "vllm/v1/sample/sampler.py",
+      "blob_sha": "d19f65f6d81d05174345d30e74abe44e6fdbbbc0"
+    },
+    {
+      "path": "vllm/v1/worker/block_table.py",
+      "blob_sha": "2beec249bff030b4fc1714d32bdb400d546e844e"
+    },
+    {
+      "path": "vllm/v1/worker/cp_utils.py",
+      "blob_sha": "49dcccf443182645f9cb14f7992b31282f2eec50"
+    },
+    {
+      "path": "vllm/v1/worker/dp_utils.py",
+      "blob_sha": "b2f2fe1506a9cc99e8f09deb3d8a28bfd2c94fe2"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/async_utils.py",
+      "blob_sha": "0d6481585e21b11d4cb6ad61a105de0648f94e7f"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/attn_utils.py",
+      "blob_sha": "8964c660a1d95a2fae20238a2e47c39e7ce58ca2"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/block_table.py",
+      "blob_sha": "1ab78864c31ee8f6fd5aeae897c4edb94d825c7b"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/buffer_utils.py",
+      "blob_sha": "7364156848bfc86ee8cee00b51a3af3f5a0ca12a"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/cudagraph_utils.py",
+      "blob_sha": "73be62319a64bfd8e0986811fdfce1a0e3914123"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/input_batch.py",
+      "blob_sha": "bd55a43f64123ff55e10eee912ac9029f4cd251b"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/model_runner.py",
+      "blob_sha": "57cef586f81fd48337bf43a437c392127ecc1a6b"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/pcp_manager.py",
+      "blob_sha": "aa245fa267c4c9b192d8f2294fb1ed2c0446c43e"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/sample/logits_processor/interface.py",
+      "blob_sha": "9934492ec227e562378b61ef695c6533c410f004"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/sample/penalties.py",
+      "blob_sha": "5df7c60afd56b4345c6023968f0501756125a36f"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/sample/sampler.py",
+      "blob_sha": "7ffc5bf493194722fe44b07400bccbf603462c7a"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/spec_decode/__init__.py",
+      "blob_sha": "fc028941cf0d60d02ada589db5e250f0ea19de69"
+    },
+    {
+      "path": "vllm/v1/worker/gpu/states.py",
+      "blob_sha": "16260b0ddb9e310105804e874f529d18512486cc"
+    },
+    {
+      "path": "vllm/v1/worker/gpu_model_runner.py",
+      "blob_sha": "e19c1b84f457cb4a621945ab8040c5310eb42185"
+    },
+    {
+      "path": "vllm/v1/worker/gpu_worker.py",
+      "blob_sha": "04feb5da025a6072f100eaba485baefe74247aaa"
+    },
+    {
+      "path": "vllm/v1/worker/utils.py",
+      "blob_sha": "d10cdcec64537445ab131e8f0ca7c67c175f1bfb"
+    },
+    {
+      "path": "vllm/v1/worker/worker_base.py",
+      "blob_sha": "95a0c3475d4da9a8beedfe55968cda6da8597d42"
+    }
+  ]
+}

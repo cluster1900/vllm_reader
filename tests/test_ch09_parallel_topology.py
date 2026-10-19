@@ -16,6 +16,7 @@ from examples.ch09_parallel_topology import (
     lse_weighted_combine,
     matmul,
     pcp_dual_chunk_assignment,
+    pcp_decode_owners,
     pipeline_partitions,
     row_parallel_linear,
 )
@@ -89,6 +90,21 @@ class PipelineAndContextTest(unittest.TestCase):
         self.assertIn(0, assignments[0])
         self.assertIn(15, assignments[0])
 
+    def test_pcp_only_decode_owners_skip_prefill_and_zero_rows(self):
+        self.assertEqual(
+            pcp_decode_owners([1, 16, 0, 1, 1], [False, True, False, False, False], 2),
+            [(0,), (), (), (1,), (0,)],
+        )
+
+    def test_pcp_dcp_replicates_decode_queries(self):
+        self.assertEqual(pcp_decode_owners([1, 1], [False, False], 2, dcp_enabled=True),
+                         [(0, 1), (0, 1)])
+
+    def test_pcp_and_pp_topology_has_no_general_prohibition(self):
+        topology = ParallelTopology(tp=2, pp=2, dp=2, pcp=2)
+        self.assertEqual(topology.worker_world_size, 8)
+        self.assertEqual(topology.world_size_across_dp, 16)
+
     def test_dcp_interleaved_owner(self):
         owners = [dcp_token_owner(i, 2, interleave=2) for i in range(8)]
         self.assertEqual(owners, [0, 0, 1, 1, 0, 0, 1, 1])
@@ -144,3 +160,4 @@ class DataParallelAndCostTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

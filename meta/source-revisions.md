@@ -36,3 +36,17 @@
 - 检查范围：十章源码、图示与引用的静态升级，CPU 教学脚本/单元测试；不是上游 CUDA/NCCL/真实模型验证。
 - 逐章“已更新/无影响”结论及证据：[升级复核](upgrade-v0.31.0-2026-10-18/README.md)。
 - 章节保持 `draft` / `runtime_verified: false`。历史实验输出不被改写为新基线运行结果；EPUB/网页发布仍须重建并验证。
+
+
+## 阅读基线 003：v0.32.0（2026-10-19 静态复核）
+
+- Repository: `vllm-project/vllm`
+- Tag: `v0.32.0`
+- Commit: `5df63a7203cdb9328d824a27b682e77c7b9928be`
+- 前一基线：`db9527a46873454610df6dbedf79a36d6bf1a7f6`；旧记录和旧实验输出原样保留，不作为本次运行证据。
+- Reader base: `5f78d105690c1968885abb8c0264cd98fb7b9a18`。
+- 获取方式：连接器读取固定 commit 文件，并逐一验证 Git blob SHA 与未截断 recursive tree 一致。
+- 本次是只读源码快照，不是完整上游 Git checkout；`../vllm` 是读者复现约定，不声称访问用户电脑或检查其 dirty 状态。
+- 十章均给出影响与证据，见[升级复核](upgrade-v0.32.0-2026-10-19/README.md)；章节继续 `draft` / `runtime_verified: false`。
+- Python 要求 `>=3.11,<3.15`。release 摘要的 tensor arena 默认开启说法与源码默认 False 不一致，以源码为准并保留差异记录。
+- 验证仅限本次实际执行的 Reader 教学测试、脚本与静态检查；没有运行真模型、GPU、CUDA Graph、NCCL、多机或性能实验。

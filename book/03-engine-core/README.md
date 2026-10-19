@@ -3,10 +3,10 @@ title: "第03章 Engine 与 EngineCore"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
-source_branch: v0.31.0
+source_commit: 5df63a7203cdb9328d824a27b682e77c7b9928be
+source_branch: v0.32.0
 source_dirty: false
-verified_at: 2026-10-18
+verified_at: 2026-10-19
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -36,7 +36,7 @@ LLMEngine / AsyncLLM
 执行期间到达的 abort 怎样生效、多个 batch 如何保持在途，以及进程退出或 worker
 故障如何被前端看见。
 
-本章绑定源码 revision `db9527a46873454610df6dbedf79a36d6bf1a7f6`。文中区分：
+本章绑定源码 revision `5df63a7203cdb9328d824a27b682e77c7b9928be`。文中区分：
 
 - **源码事实**：可在固定 revision 的实现或测试中直接定位。
 - **设计含义**：由多个源码事实推导出的工程解释。
@@ -427,6 +427,24 @@ flowchart TB
 
 > **读图方法：** 这张图用于压缩“ABORT 为什么同时进入两个队列”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
+### v0.32.0：IPC 与共享内存不是同一个开关
+
+MPClient 先用 bind address 创建 socket，再从 `zmq.LAST_ENDPOINT` 得到真实 endpoint 并构造
+`EngineZmqAddresses`；绑定地址与给 EngineCore 连接的地址要分开看，尤其是动态 TCP 端口。
+
+共享内存 tensor arena 则位于 Engine→Worker 广播，不是替换所有 API→Engine 消息。
+固定 commit 的 `ParallelConfig.enable_shm_tensor_arena` 默认 **False**，明确为实验性 opt-in；
+启用后还要求 queue readers 全部 node-local。它面向较大的 CPU tensor，保留 /dev/shm 槽位。
+发布摘要称其默认开启，与该 tag 源码不一致，本章以源码默认值与门控为准，不把摘要当运行事实。
+
+[源码] `vllm/v1/engine/core_client.py` - `MPClient.__init__`
+
+[源码] `vllm/config/parallel.py` - `ParallelConfig.enable_shm_tensor_arena`
+
+[源码] `vllm/v1/executor/multiproc_executor.py` - `MultiprocExecutor._init_executor`
+
+[源码] `vllm/distributed/device_communicators/shm_broadcast.py` - `MessageQueue`
+
 ## 3.6 EngineCore 初始化：顺序就是契约
 
 `EngineCore.__init__()` 的主顺序可以压缩为：
@@ -796,7 +814,7 @@ Pause 是 Scheduler 状态，不等于进程退出。
 | mode | 已在途请求 | 新请求 | Core 侧完成边界 |
 |---|---|---|---|
 | `abort` | 标记 abort，结束输出入队 | 入队但不调度 | Core 没有剩余工作，再同步设备 |
-| `wait` | 已 running 请求允许继续完成 | waiting 请求不准入，包括暂停前已排队者 | running 与在途 batch 排空 |
+| `wait` | running 及持有 KV 的可恢复 waiting 请求继续 drain | 未持有 KV 的新 waiting 请求暂停准入 | 可继续推进的请求与在途 batch 排空 |
 | `keep` | 保留请求；KV 是否保留还看 `clear_cache` | 入队但不调度 | 在途工作结算后同步设备 |
 
 表中按普通非 DP 的 `EngineCoreProc` 路径解释。`_pause_complete()` 判断
@@ -827,8 +845,13 @@ stateDiagram-v2
 
 > **读图方法：** 这是“Pause、Sleep 与 Resume”的状态图。先找初始状态，再沿箭头观察触发条件和状态变化；重点不是背状态名，而是弄清谁触发转换、转换后哪些资源需要更新。
 
-这里的“旧请求”仅指已经 running 的请求，不包括暂停前已进入 waiting 的请求；
-`Scheduler.schedule` 只在 `UNPAUSED` 时接纳 waiting。
+v0.32.0 不能只按 waiting/running 标签判断是否继续：`PAUSED_NEW` 还允许持有 KV 的
+waiting 请求 drain，避免部分完成的请求占着资源而无法排空；真正尚未开始的新请求仍等待 resume。
+具体资格由 Scheduler 判断：优先推进 `kv_holding_waiting`，只有该队列为空且 `UNPAUSED` 才取普通 `waiting`。
+`get_num_unfinished_requests` 在 `PAUSED_NEW` 只统计持有 KV 的 waiting，并扣除等待后续流式输入者；
+不能把“暂停前排队”简单等同于“持有 KV”。
+
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`、`get_num_unfinished_requests`
 
 [源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`、`get_num_unfinished_requests`
 
@@ -874,7 +897,13 @@ EngineCoreProc 的状态为：
 RUNNING -> REQUESTED -> SHUTTING_DOWN
 ```
 
-信号处理只设置 REQUESTED 并触发 WAKEUP，策略由 busy loop 的 `_handle_shutdown()` 执行。
+正常构造完成后，信号处理设置 REQUESTED，并通过 `SignalCallback` 唤醒 input queue；
+不会直接在信号处理器中操作可能被中断线程持有的非重入 queue 锁。v0.32.0 还记录
+`shutdown_requested`：若 SIGTERM/SIGINT 在 EngineCore 构造期间到达，先保存标志，构造完成后
+在进入 busy loop 之前转为 REQUESTED；callback 只在对象和队列已就绪后安装。
+策略仍由 busy loop 的 `_handle_shutdown()` 执行，不能丢掉初始化窗口中的退出请求。
+
+[源码] `vllm/v1/engine/core.py` - `EngineCoreProc.run_engine_core`
 
 ```mermaid
 flowchart TD
@@ -902,6 +931,15 @@ timeout 还负责等待进程和资源清理，两者不能混为一个 join tim
 `EngineCore.shutdown()` 清理 structured output backend、executor、scheduler，撤销启动
 时的 `gc.freeze()`，再清理 distributed environment 和显存缓存。MP client 侧还需停止
 engine manager、关闭 socket、结束输出线程或 asyncio task。
+
+### 多 Engine utility 结果不能只看一个 rank
+
+v0.32.0 的 `AsyncMPClient.call_utility_all_async` 收集所有 managed engine 的结果。
+`reset_prefix_cache_async` 与 `wake_up_async` 对结果取 all；`is_sleeping_async` 与
+`is_scheduler_paused_async` 使用 consensus helper，结果不一致时抛错而不是任取一个状态。
+这不表示所有 utility 都改成广播，仍应逐个查看方法调用的 helper。
+
+[源码] `vllm/v1/engine/core_client.py` - `call_utility_all_async`、`call_utility_consensus_async`
 
 ## 3.14 Executor failure：请求错误与进程错误
 
@@ -989,7 +1027,7 @@ MP 与 Ray 的主要差异在部署和生命周期控制。阅读 Ray 路径时�
 > **本节先看：** 下面的代码或调用链只保留“离线 in-process”的主干。阅读时依次寻找输入、状态变化和输出，暂时忽略辅助分支。
 
 ```text
-OfflineInferenceMixin._run_engine
+OfflineInferenceMixin._run_engine  [entrypoints/common/offline.py]
 -> LLMEngine.step
 -> InprocClient.get_output
 -> EngineCore.step_fn
@@ -1276,8 +1314,8 @@ aborts queue 让取消在 GPU 返回后、Scheduler update 前生效；input que
 <details>
 <summary>10. wait 与 keep</summary>
 
-两者暂停 waiting 准入；wait 允许已有 running 请求 drain，暂停前尚在 waiting 的请求
-也会等待 resume。keep 暂停后续调度，已提交工作仍需结算；若还指定清缓存，
+wait 暂停新工作准入，但允许 running 和持有 KV 的 waiting 请求 drain；纯新 waiting 请求等待 resume。
+keep 暂停后续调度，已提交工作仍需结算；若还指定清缓存，
 running 请求会被重置，不能再假定它们持有原 KV。
 </details>
 
@@ -1343,3 +1381,4 @@ Actor mixin 提供 Ray 生命周期、可见 GPU 和免握手覆盖；EngineCore
 
 本章正文已经完整，`content_complete=true`。当前机器缺少可用 vLLM GPU runtime，
 因此 `runtime_verified=false`，按项目规则保持 `draft`。
+

@@ -248,6 +248,33 @@ def pipeline_partitions(num_layers: int, pp_size: int) -> list[tuple[int, int]]:
     return result
 
 
+def pcp_decode_owners(
+    query_lengths: Sequence[int],
+    is_prefilling: Sequence[bool],
+    pcp_size: int,
+    *,
+    dcp_enabled: bool = False,
+) -> list[tuple[int, ...]]:
+    """Teaching ownership only: prefill/zero rows do not advance decode ordinal.
+
+    PCP-only has one owner per decode; DCP needs the query on every PCP rank.
+    This does not model prefill chunks, KV views, collectives, or PP execution.
+    """
+    if pcp_size < 1 or len(query_lengths) != len(is_prefilling):
+        raise ValueError("invalid PCP size or request metadata lengths")
+    owners = []
+    ordinal = 0
+    for length, prefill in zip(query_lengths, is_prefilling):
+        if length < 0:
+            raise ValueError("query lengths must be non-negative")
+        if length == 0 or prefill:
+            owners.append(())
+            continue
+        owners.append(tuple(range(pcp_size)) if dcp_enabled else (ordinal % pcp_size,))
+        ordinal += 1
+    return owners
+
+
 def pcp_dual_chunk_assignment(num_tokens: int, pcp_size: int) -> list[list[int]]:
     """Assign the two mirrored prefill chunks used by MRV2 PCPManager."""
 
@@ -433,3 +460,4 @@ def demo() -> None:
 
 if __name__ == "__main__":
     demo()
+

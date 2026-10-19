@@ -3,10 +3,10 @@ title: "第06章 PagedAttention 与 Attention Backend"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
-source_branch: v0.31.0
+source_commit: 5df63a7203cdb9328d824a27b682e77c7b9928be
+source_branch: v0.32.0
 source_dirty: false
-verified_at: 2026-10-18
+verified_at: 2026-10-19
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -34,7 +34,7 @@ prerequisites:
 寻址与执行契约。FlashAttention、FlashInfer、Triton 和平台专用实现都可能消费分页 KV；
 仓库中的 `vllm/v1/attention/ops/paged_attn.py` 也不是所有当前 GPU 路径的统一入口。
 
-本章绑定源码 revision `db9527a46873454610df6dbedf79a36d6bf1a7f6`，继续使用三种证据标签：
+本章绑定源码 revision `5df63a7203cdb9328d824a27b682e77c7b9928be`，继续使用三种证据标签：
 
 - **源码事实**：能在固定 revision 的实现或测试中直接定位。
 - **设计含义**：由多个源码事实共同推出的系统解释。
@@ -192,8 +192,9 @@ logical block 2 = positions 8,9,10,11
 
 ### 6.3.3 KV cache allocation block
 
-这是 cache manager 分配的页粒度，一页可同时对应许多层的同一个 block ID。当前源码在
-`BlockTable` 中称其尺寸为 `kv_cache_block_size`，MRV2 构造参数称为 `block_sizes`。
+这是 cache manager 分配的页粒度，一页可同时对应许多层的同一个 block ID。v0.32.0
+的持久 `BlockTable.block_size` 和 MRV2 `BlockTables.block_sizes` 都使用这个 manager
+粒度；它们不再在追加 ID 时自动展开 kernel blocks。
 
 ### 6.3.4 kernel block
 
@@ -202,8 +203,9 @@ attention kernel 读取与计算时所采用的分页粒度。在大多数普通
 
 ### 6.3.5 block table
 
-二维 tensor 的一行描述一个请求：第 `i` 项是该请求逻辑 block `i` 对应的物理 kernel block
-ID。它是地址目录，不保存 K/V。
+二维 tensor 的一行描述一个请求：第 `i` 项是该请求逻辑 block `i` 对应的物理 block
+ID。v0.32.0 必须区分持久的 manager block table 与 backend 使用的 kernel block table；
+两者只有在无需转换时才是同一视图。它们都是地址目录，不保存 K/V。
 
 ### 6.3.6 CUDA thread block
 
@@ -227,7 +229,9 @@ flowchart TB
 
 ## 6.4 Block Table 的地址公式
 
-先忽略 context parallelism。对请求内位置 `p` 和 kernel block size `B`：
+先忽略 context parallelism 与需要额外 stride 映射的 packed layout。对请求内位置 `p`，
+`B` 必须与所读表的粒度一致：manager 表配 manager block size，转换后的 kernel 表配
+kernel block size。对普通线性页视图：
 
 $$
 i = \left\lfloor \frac{p}{B} \right\rfloor
@@ -249,7 +253,7 @@ $$
 
 - `i` 是逻辑 block index；
 - `o` 是页内 token offset；
-- `b` 是物理 kernel block ID；
+- `b` 是这张表对应的物理 block ID；
 - `slot` 是把物理 block 与页内位置展平后的 token slot。
 
 ```mermaid
@@ -295,58 +299,82 @@ flowchart LR
 物理读取顺序是 `8,9,10,11,20,21,22,23,12,13`，但 attention 看见的逻辑 K/V 顺序仍是
 位置 `0..9`。随书 `slot_for_position()` 和对应测试固定了这个例子。
 
-## 6.5 Allocation Block 与 Kernel Block 不一定相等
+## 6.5 Allocation Block 与 Kernel Block：在 backend 边界转换
 
-当前 V1 同时保留 manager block size 和 kernel block size。若 allocation block 为 32 token，
-kernel 只接受 16 token page，一个 manager block 必须展开成两个连续的 kernel block ID：
+allocation block 与 kernel block 仍可能不同，但 v0.32.0 改变了转换所在层。旧版在
+`BlockTable.map_to_kernel_blocks()` 或 `BlockTables.append_block_ids()` 中展开 ID；
+现在前者已删除，后者只保留 manager ID。持久表、gather 和 slot mapping 都先使用
+manager 坐标，直到构造 backend metadata 时才由 `AttentionGroup` 转换读取表。
+
+例如 allocation page 为 32 token，kernel 读取页为 16 token，且物理布局允许连续拆页：
 
 ```text
-manager block 0 -> kernel blocks 0,1
-manager block 1 -> kernel blocks 2,3
-manager block 2 -> kernel blocks 4,5
+持久 manager table: [3, 5]
+backend kernel table: [6, 7, 10, 11]
 ```
 
-一般地，若 `A` 是 allocation block size，`K` 是 kernel block size：
-
-$$
-r = \frac{A}{K}
-$$
-
-manager block ID `m` 展开为：
-
-$$
-m \times r, m \times r + 1, \ldots, m \times r + r - 1
-$$
+若 `A` 是 allocation block size、`K` 是 kernel block size，两者单位均为 token/block，
+则每个 manager block 包含 `r=A/K` 个 kernel blocks，要求 `A % K == 0`。连续拆页时
+manager ID `m` 对应 `m*r+j`，其中 `j=0..r-1`。
 
 ```mermaid
 flowchart LR
-    M3["manager block 3, 32 tokens"] --> K6["kernel block 6, 16 tokens"]
-    M3 --> K7["kernel block 7, 16 tokens"]
-    K6 --> T0["manager offsets 0-15"]
-    K7 --> T1["manager offsets 16-31"]
+    M["persistent manager table: 3,5"] --> S["slot mapping uses manager size 32"]
+    M --> G["AttentionGroup maps backend read table"]
+    G --> K["kernel table: 6,7,10,11; size 16"]
+    K --> B["backend metadata builder"]
 ```
 
-> **读图方法：** 这张图用于压缩“Allocation Block 与 Kernel Block 不一定相等”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
+> **读图方法：** 先沿上游持久表分出两条路：写入地址仍按 manager 粒度生成，读取表在
+> backend 边界才展开。不要把右边的 kernel table 回写成左边的持久表。
 
-**源码事实：** MRV1 的 `BlockTable.map_to_kernel_blocks()` 与 MRV2 的
-`BlockTables.append_block_ids()` 都执行这种展开；上游测试验证 manager ID `10,11` 在
-`32 -> 16` 时变成 `20,21,22,23`。
+**源码事实：** `AttentionGroup.create_metadata_builders()` 解析 kernel size 并分配每个
+ubatch 的持久输出表；`build_metadata()` 经 `_with_kernel_block_table()` 调用
+`map_to_kernel_block_table()`，再进入具体 builder。MRV1 的 metadata 复用分支也显式
+映射表；MRV2 通过 `build_attn_metadata()` 进入同一 `AttentionGroup` 包装。
 
-这里 `A`、`K` 的单位均为 token/block，`r` 是无单位整数；必须满足 `A % K == 0`。这也解释了 `AttentionBackend.supports_block_size()` 为什么允许框架
-block size 是 kernel 要求的整数倍，而不一定完全相等。
+[源码] `vllm/v1/worker/utils.py` - `AttentionGroup.create_metadata_builders`、
+`build_metadata`、`_with_kernel_block_table`、`map_to_kernel_block_table`
 
-```mermaid
-flowchart TD
-    A["framework block size"] --> DIV{"multiple of kernel requirement?"}
-    DIV -->|"yes"| EXP["expand table entries if needed"]
-    DIV -->|"no"| REJ["backend validation rejects block size"]
-    EXP --> RUN["kernel consumes its page size"]
+[源码] `vllm/v1/worker/gpu_model_runner.py` - `_build_attn_group_metadata`
+
+[源码] `vllm/v1/worker/gpu/attn_utils.py` - `build_attn_metadata`
+
+### 6.5.1 Packed layout 不能总用 `m*r+j`
+
+当多个层的 page 交错存储时，同一层相邻 manager blocks 之间还夹着其他层的数据。
+`map_kv_cache_to_kernel_blocks()` 会按真实 stride 建立 kernel view，并设置
+`kernel_block_stride`。此时转换式为：
+
+```text
+kernel_id = manager_id * (kernel_block_stride or r) + j
 ```
 
-> **读图方法：** 这是“Allocation Block 与 Kernel Block 不一定相等”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
+`r` 只表示一页拆几份，`kernel_block_stride` 表示两个 manager page 起点之间相隔
+多少 kernel-page 单位，不一定相等。例如教学布局 `r=2`、stride=5，ID 3 展开成
+`[15,16]`，而不是 `[6,7]`。后者只适用于无额外间隔的连续拆页。
 
-这不是把物理 allocation 切成多个独立所有权对象。Scheduler 仍管理原 manager block，
-Worker 只为 kernel 构造更细的地址视图。
+源码会校验可表达的 cache view，不兼容的 token/state 布局会抛错并提示降低 block size
+或选择 layer-compact layout。`prepare_kernel_block_sizes()` 也不会对 block-outer
+packing 无条件做 group-wide 拆分。因此 backend 接受某个除数，并不等于任意物理布局
+都能免费转换。
+
+[源码] `vllm/v1/worker/utils.py` - `AttentionGroup.map_kv_cache_to_kernel_blocks`、
+`map_kv_caches_to_kernel_blocks`、`prepare_kernel_block_sizes`、`select_common_block_size`
+
+### 6.5.2 写地址与读地址如何保持一致
+
+普通连续拆页下，`A=32`、`K=16`、manager ID 3 内偏移 20，写 slot 是
+`3*32+20=116`；kernel 表对应 ID 7、页内偏移 4，读 slot 是 `7*16+4=116`。
+这证明该教学布局两套坐标可指向同一位置，不代表 packed layout 的每个地址都能用
+同一个扁平公式比较；后者还必须核对 tensor view 的 stride。
+
+这不是把物理 allocation 变成多个独立所有权对象。Scheduler 始终管理 manager block；
+attention group 为具体 backend 提供适配后的表与 cache view。
+`test_block_tables_apply_staged_writes_fuses_kv_groups` 在 v0.32.0 直接期待 group 的
+`[10,11]`，不再期待持久表中出现 `[20,21,22,23]`。
+
+[测试] `tests/v1/worker/test_gpu_block_table.py` - `test_block_tables_apply_staged_writes_fuses_kv_groups`
 
 ## 6.6 Block Table 怎样从 Scheduler 到达 GPU
 
@@ -355,7 +383,8 @@ Worker 只为 kernel 构造更细的地址视图。
 ### 6.6.1 SchedulerOutput 携带增量 block ID
 
 第 04、05 章已经看到，Scheduler 在分配成功后把每个请求新得到的 block ID 放入输出。Model
-Runner 维护 request index 与持久 block table，将新增 ID 追加或覆盖到对应行。
+Runner 维护 request index 与持久 manager block table，将新增 ID 原样追加或覆盖到对应行；
+后续需要的 kernel-table 映射见 6.5 节。
 
 ```mermaid
 sequenceDiagram
@@ -405,8 +434,8 @@ MRV1 路径使用 `commit_block_table()` 把 CPU buffer 的有效请求行复制
 `StagedWriteTensor` 还可通过 `write_contents.copy_to_uva` 读取内容，内容不总是单独 H2D。
 UVA 不是所有数据都免拷贝的保证；须同时检查平台能力和 tensor 驻留分支。
 
-[源码] `vllm/v1/worker/gpu/buffer_utils.py` - `NonUvaBuffer`、`UvaBufferPool`（L41–96）、
-`StagedWriteTensor.__init__`、`apply_write`（L153–175、L205–213）
+[源码] `vllm/v1/worker/gpu/buffer_utils.py` - `NonUvaBuffer`、`UvaBufferPool`、
+`StagedWriteTensor.__init__`、`apply_write`
 
 多 cache group 时，`BlockTables.apply_staged_writes()` 改用 `FusedStagedWriter.apply()`，
 汇总各组写入并用一个 kernel 应用。该分支同样区分 H2D 内容与 UVA 元数据，不能把它
@@ -437,7 +466,7 @@ flowchart TD
 不读取负数索引对应的 block-table 行，其所有 token 直接得到 PAD。清零 table 与屏蔽 slot
 write 是互补保护，不能以“table 已清零”替代有效 request 检查。
 
-[源码] `vllm/v1/worker/gpu/block_table.py` - `_compute_slot_mappings_kernel`（L325–364）
+[源码] `vllm/v1/worker/gpu/block_table.py` - `_compute_slot_mappings_kernel`
 
 ## 6.7 Slot Mapping：本轮 K/V 写到哪里
 
@@ -461,9 +490,10 @@ flowchart LR
 
 > **读图方法：** 阅读“Slot Mapping：本轮 K/V 写到哪里”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
 
-在普通非 CP 情况下，它对每个 scheduled position 使用 6.4 节同一个公式。区别在于输出形态：
+在普通非 CP 情况下，它对每个 scheduled position 使用 6.4 节同一个公式，并以当前
+cache group 的 manager block size 为单位。区别在于输出形态：
 
-- block table 是每请求一行，供 attention 按整个逻辑序列读取；
+- block table 是每请求一行，必要时经 `AttentionGroup` 转换后供 attention 读取；
 - slot mapping 是每个本轮 token 一个扁平 slot，供 KV update 做 scatter write。
 
 **读写地址的直觉：投递快件与按目录查书。** 对某个 cache group，slot mapping
@@ -661,7 +691,7 @@ CUDA Graph 或所有 attention feature。能力验证和 metadata builder 正是
 |---|---|---|
 | ragged query | `query_start_loc`、CPU 对应项 | 请求在扁平 query 中的边界 |
 | sequence | `seq_lens`、`max_query_len`、`max_seq_len` | 每请求和批次上界 |
-| paged KV | `block_table_tensor`、`slot_mapping` | 读地址目录与写地址 |
+| paged KV | `block_table_tensor`、`slot_mapping` | 公共 manager 表与写地址；进入 builder 前可映射读表 |
 | batch control | `num_reqs`、`num_actual_tokens`、`causal` | metadata 覆盖规模（可能含 padding）和 mask 语义 |
 
 其余字段支持 encoder/cross attention、DCP、multimodal prefix、R-SWA、ReplaySSM 等功能。
@@ -687,17 +717,18 @@ FlashAttention builder 将该值传到自己的 metadata；forward 按它切片 
 `seq_lens` 与 slot mapping 的无效槽标记理解；不要把后端字段旁“excluding padding”的注释
 提升为所有调用路径的不变量。这里修正文档解释，不修改上游字段名或 TODO。
 
-[源码] `vllm/v1/attention/backend.py` - `CommonAttentionMetadata`（L403–407）
+[源码] `vllm/v1/attention/backend.py` - `CommonAttentionMetadata`
 
-[源码] `vllm/v1/worker/gpu_model_runner.py` - `CommonAttentionMetadata` 构造（L2424–2440）
+[源码] `vllm/v1/worker/gpu_model_runner.py` - `CommonAttentionMetadata` 构造
 
-[源码] `vllm/v1/attention/backends/flash_attn.py` - `FlashAttentionMetadataBuilder.build`（L825、993）、
-`FlashAttentionImpl.forward`（L1286–1296）
+[源码] `vllm/v1/attention/backends/flash_attn.py` - `FlashAttentionMetadataBuilder.build`、
+`FlashAttentionImpl.forward`
 
 ### 6.10.1 Common 不等于最终 kernel 参数
 
 每个 backend 的 metadata builder 把公共字段转换为自己的 metadata，可能增加 scheduler
-metadata、cascade attention 切分、DCP 长度、graph 持久 buffer 或专用 mask：
+metadata、DCP 长度、graph 持久 buffer 或专用 mask。v0.32.0 已移除 cascade attention，
+不应再画出其公共前缀/后缀分支：
 
 ```mermaid
 flowchart LR
@@ -724,6 +755,7 @@ sequenceDiagram
     participant R as Model Runner
     participant T as BlockTables
     participant C as Common Metadata
+    participant G as AttentionGroup
     participant B as Backend Builder
     participant F as Forward Context
     S->>R: request order, token counts, block IDs
@@ -731,8 +763,11 @@ sequenceDiagram
     T-->>R: gathered batch block tables
     T-->>R: per-token slot mappings
     R->>C: build ragged and paged fields
-    C->>B: build backend metadata
-    B-->>F: metadata shared by layer names
+    R->>G: common metadata
+    G->>G: map manager table to kernel table if needed
+    G->>B: build backend metadata
+    B-->>R: backend metadata
+    R->>F: metadata shared by layer names
 ```
 
 > **读图方法：** 这是“Model Runner 构造 metadata 的真实顺序”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
@@ -753,17 +788,23 @@ max_seq_len       <- batch context upper bound
 ```
 
 每个 KV cache group 可能拥有不同 block table、slot mapping 或 attention group。Model Runner
-会为 group 浅拷贝 common metadata，再调用其 builder。若多个 group 的 spec 与 builder 类型相同，
-且 builder 支持 `update_block_table()`，当前代码可以复用已构造 metadata，只替换块表和 slot
-mapping。
+按 group 组织 common metadata，经 `AttentionGroup.build_metadata()` 转换读表后再调用
+builder。MRV1 中，若多个 group 的 spec 与 builder 类型相同，且 builder 支持
+`update_block_table()`，可以复用已构造 metadata，但仍要先映射新的 kernel block table。
+MRV2 的 `build_attn_metadata()` 复用分支则明确限于 `MambaSpec`，不能把 MRV1 的条件
+机械套到两个 Runner。
+
+[源码] `vllm/v1/worker/gpu_model_runner.py` - `_build_attn_group_metadata`
+
+[源码] `vllm/v1/worker/gpu/attn_utils.py` - `build_attn_metadata`
 
 ```mermaid
 flowchart TD
-    C["common metadata base"] --> G0["copy for KV group 0"]
+    C["common metadata base, MRV1"] --> G0["copy for KV group 0"]
     C --> G1["copy for KV group 1"]
     G0 --> BUILD["builder builds metadata"]
     G1 --> SAME{"same spec and builder?"}
-    SAME -->|"yes and update supported"| UPDATE["reuse metadata, update table"]
+    SAME -->|"yes and update supported"| UPDATE["map kernel table, then update metadata"]
     SAME -->|"no"| BUILD2["build independently"]
 ```
 
@@ -1001,12 +1042,18 @@ flowchart TD
 没有 mm-prefix 的这些路径保留原排序；MLA 又按架构、KV dtype、head 数和 head size
 采用另一张候选表。排序仍须经过能力校验，不等于插入的候选一定可用。
 
-[源码] `vllm/platforms/cuda.py` - `_get_backend_priorities`（L154–180）
+[源码] `vllm/platforms/cuda.py` - `_get_backend_priorities`
 
-[源码] `vllm/v1/attention/selector.py` - `get_attn_backend`（L170–177）：新增 `use_rswa` 能力约束
+[源码] `vllm/v1/attention/selector.py` - `get_attn_backend`：新增 `use_rswa` 能力约束
 
 因此“CUDA 上 vLLM 默认就是 FlashAttention”不是稳定结论。正确说法是：**当前平台为当前
 配置排序候选，并选择最高优先级的有效 backend。**
+
+v0.32.0 的 registry 允许 `register_backend("NEW_NAME", class_path)` 动态注册名称，
+而不只覆盖既有 enum；已有 enum 的覆盖路径仍保留。注册成功只意味着可被解析，
+不自动加入 CUDA 默认优先级，也不绕过能力校验。
+
+[源码] `vllm/v1/attention/backends/registry.py` - `AttentionBackendEnum.register`、`register_backend`
 
 ### 6.15.5 通用校验并不只看三项
 
@@ -1052,7 +1099,7 @@ page size、dtype、量化与并行条件的有限 compile keys 预热。它不�
 也不是“所有 FA4 请求都已预编译”的保证；本章不把编译成功等同于运行时 kernel 正确性。
 
 [源码] `vllm/v1/attention/backends/flash_attn.py` - `FA4DenseAttentionKernel.get_warmup_keys`、
-`FlashAttentionBackend.supports_mm_prefix`（L441–442）
+`FlashAttentionBackend.supports_mm_prefix`
 
 ### 6.16.2 Builder 复制公共分页字段
 
@@ -1065,9 +1112,13 @@ query_start_loc, seq_lens
 block_table_tensor, slot_mapping, causal
 ```
 
-然后按 FA 版本、CUDA Graph、cascade、DCP、sliding window 和 scheduler AOT metadata 等条件
-补充字段。FA3 与 FA2 的 graph 支持并不相同，源码将其编码为不同
-`AttentionCGSupport` 等级。
+然后按 FA 版本、CUDA Graph、DCP、sliding window 和 scheduler AOT metadata 等条件
+补充字段；cascade 相关字段已经删除。FA3 与 FA2 的 graph 支持并不相同，源码将其编码为不同
+`AttentionCGSupport` 等级。v0.32.0 还要求 per-request `causal` tensor 预先是
+`int32`：builder 遇到其他 dtype 直接报错，不在热路径临时转换并分配新 tensor，
+以免破坏 FULL CUDA Graph 对持久地址的依赖。
+
+[源码] `vllm/v1/attention/backends/flash_attn.py` - `FlashAttentionMetadataBuilder.build`
 
 ### 6.16.3 第一步：按 slot mapping 写新 K/V
 
@@ -1104,7 +1155,7 @@ key/value view: [num_blocks, block_size, num_kv_heads, head_size]
 
 ### 6.16.5 第三步：FlashAttention 直接消费 block table
 
-非 cascade、非 DCP 的普通路径从 metadata 取：
+非 DCP 的普通路径从 metadata 取：
 
 ```text
 cu_seqlens_q = query_start_loc
@@ -1112,12 +1163,15 @@ seqused_k    = seq_lens
 block_table  = block_table
 ```
 
-然后调用 `flash_attn_varlen_func()`，把 paged K/V cache 作为 `k`、`v`，并显式传入
+然后调用 `_FA4_DENSE_ATTENTION_KERNEL` 包装，其 `FA4DenseAttentionKernel.__call__()`
+经 `kernel()` 转到 `flash_attn_varlen_func()`。名称含 FA4 不代表调用时永远是 FA4，
+实际 `fa_version` 仍来自已选择版本。paged K/V cache 作为 `k`、`v`，同时显式传入
 `block_table=block_table`：
 
 ```mermaid
 flowchart TB
-    Q["ragged Q"] --> FA["flash attn varlen"]
+    Q["ragged Q"] --> WRAP["FA4DenseAttentionKernel wrapper"]
+    WRAP --> FA["flash attn varlen, selected fa_version"]
     KC["paged key cache"] --> FA
     VC["paged value cache"] --> FA
     QS["query start locations"] --> FA
@@ -1132,23 +1186,33 @@ flowchart TB
 这正是“FlashAttention 与分页 KV 不冲突”的源码证据。FlashAttention 描述的是一类高效
 attention 算法/实现；block table 描述 K/V 的地址组织。当前 API 可以同时使用两者。
 
-### 6.16.6 Cascade 和 DCP 是分支，不是另一套基本地址观
+### 6.16.6 Cascade 已删除，DCP 仍是独立分支
 
-存在公共 prefix 时，builder 可能选择 cascade attention，把公共前缀与各请求 suffix 分别计算
-再合并状态。DCP 路径还可能对 context attention 分片，并通过 log-sum-exp 合并不同 rank 的
-输出。这些分支仍传递 block table，只是 query、KV 范围和归约方式更复杂。
+v0.32.0 已删除 `cascade_attention()`、`use_cascade_attention()` 及 FlashAttention
+metadata 中的公共前缀/后缀字段。`SchedulerOutput.num_common_prefix_blocks` 保留空列表
+默认值，builder 的 `common_prefix_len` 兼容参数始终传 0；它们是树外实现兼容边界，
+不是内置 cascade 仍在执行的证据。Prefix cache 的 block 共享仍存在，不能把“移除
+cascade 计算优化”误解为“移除前缀缓存”。
+
+DCP 路径仍调用 `_forward_with_dcp()`：它按 context 分片计算，再合并带 LSE 的
+attention 状态。该路径继续消费 block table，但不等于旧的公共前缀 cascade。
 
 ```mermaid
 flowchart TD
-    META["FlashAttention metadata"] --> CAS{"use cascade?"}
-    CAS -->|"no"| DIRECT["varlen paged attention"]
-    CAS -->|"yes"| PREFIX["common prefix attention"]
-    CAS -->|"yes"| SUFFIX["per-request suffix attention"]
-    PREFIX --> MERGE["merge attention states"]
-    SUFFIX --> MERGE
+    META["FlashAttention metadata"] --> DCP{"DCP world size > 1?"}
+    DCP -->|"no"| DIRECT["wrapped varlen paged attention"]
+    DCP -->|"yes"| CONTEXT["_forward_with_dcp: local context attention"]
+    CONTEXT --> MERGE["combine attention output and LSE"]
 ```
 
-> **读图方法：** 这是“Cascade 和 DCP 是分支，不是另一套基本地址观”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
+> **读图方法：** 从 DCP 是否启用开始，只区分单 rank 分页路径与跨 rank context 路径。
+> 图中不再有公共 prefix/suffix cascade；前缀共享属于上一章的 KV 所有权机制。
+
+[源码] `vllm/v1/attention/backends/flash_attn.py` - `FlashAttentionImpl.forward`、`_forward_with_dcp`
+
+[源码] `vllm/v1/attention/backend.py` - `AttentionMetadataBuilder.build` 的兼容参数说明
+
+[源码] `vllm/v1/core/sched/output.py` - `SchedulerOutput.num_common_prefix_blocks`
 
 本章先建立单 rank 基本路径；第 09 章讨论跨 rank softmax 状态为什么不能直接平均。
 
@@ -1326,7 +1390,7 @@ flowchart LR
 
 | 函数 | 观察目标 |
 |---|---|
-| `expand_manager_blocks()` | allocation block 到 kernel block 展开 |
+| `expand_manager_blocks()` | backend 边界的 kernel 表映射，支持教学用 stride 参数 |
 | `slot_for_position()` | 单 token 地址公式 |
 | `build_query_start_loc()` | ragged query 累计边界 |
 | `build_slot_mapping()` | per-token scatter 地址与 padding |
@@ -1349,13 +1413,15 @@ prefix cache 生命周期、CUDA 并行、online softmax、DCP、graph capture �
 
 ## 6.21 测试怎样固定核心契约
 
-本章 13 个测试分为三组：
+本章 15 个测试分为三组：
 
 ### 地址测试
 
 > **本节先看：** 下面先给出“地址测试”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
 
-- manager 32-token block 展开为 16-token kernel blocks；
+- manager 32-token block 在 backend 边界展开为 16-token kernel blocks；
+- 带间隔布局使用独立 kernel-block stride；
+- 持久 manager 表保持不变，连续拆页下两套坐标指向相同 slot；
 - 不可整除时拒绝；
 - 非连续块表的手算 slot；
 - ragged query boundaries；
@@ -1379,8 +1445,10 @@ prefix cache 生命周期、CUDA 并行、online softmax、DCP、graph capture �
 - 更高优先级候选被拒后回退并保留原因；
 - feature 约束可让所有候选无效。
 
-上游 `tests/v1/worker/test_gpu_block_table.py` 还固定了 fused multi-group writes、hybrid block
-展开、DCP local slot、vacated row 清零和 dummy table 地址稳定性。这些是 GPU 测试，本地无
+上游 `tests/v1/worker/test_gpu_block_table.py` 固定了 fused multi-group writes 原样保留
+manager IDs、DCP local slot、vacated row 清零和 dummy table 地址稳定性。
+DCP 用例已更名为 `test_dcp_slot_mapping_only_shards_sharded_groups`；它验证仅
+`dcp_sharded=True` 的组转换为 local position，不再验证持久表展开。这些是 GPU 测试，本地无
 CUDA 环境没有执行。
 
 ## 6.22 可复现实验
@@ -1444,7 +1512,8 @@ paged K/V 与 block table。
 
 ### 误解 7：Manager block size 必须等于 kernel block size
 
-不一定。当前 hybrid blocks 允许 manager page 是 kernel page 的整数倍，并展开表项。
+不一定。当前可在 `AttentionGroup` 边界生成更细的 kernel 表；持久 manager 表不会
+因此展开。是否能转换还取决于 cache view 与 stride，不能只检查整数倍。
 
 ### 误解 8：同一轮只能全是 prefill 或全是 decode
 
@@ -1475,8 +1544,10 @@ paged K/V 与 block table。
 ### 练习 1：手算完整写入路径
 
 设 manager block size 32、kernel block size 16、请求 manager IDs 为 `[5,9]`，scheduled
-positions 为 `[30,31,32,33]`。先展开 kernel block table，再计算四个 slot。最后在 MRV2
-`_compute_slot_mappings_kernel` 中逐项对应公式。
+positions 为 `[30,31,32,33]`。先按 manager 表计算四个写 slot；再在连续可拆页的教学
+布局中展开 kernel 读表，证明地址相同。最后分别定位 MRV2
+`_compute_slot_mappings_kernel` 与 `AttentionGroup.map_to_kernel_block_table`，
+解释为什么不能把两个转换都放进 append 路径。
 
 ### 练习 2：证明 batch row 与 request state row 不同
 
@@ -1498,6 +1569,7 @@ Attention.forward
 -> FlashAttentionImpl.do_kv_cache_update
 -> unified_attention_with_output
 -> FlashAttentionImpl.forward
+-> FA4DenseAttentionKernel.__call__ / kernel
 -> flash_attn_varlen_func
 ```
 
@@ -1532,7 +1604,7 @@ Attention.forward
 
 1. 固定 source commit、模型、backend 与启动参数。
 2. 验证 request order、`idx_mapping` 和 block table row 对齐。
-3. 验证 manager block 到 kernel block 的展开倍数。
+3. 区分持久 manager 表与 backend kernel 表，验证展开倍数及实际 kernel-block stride。
 4. 对少量 positions 手算 slot mapping。
 5. 检查 padding token 是否为 `PAD_SLOT_ID`。
 6. 检查 `query_start_loc[-1]`、实际 token 数和 tensor slice 是否一致。
@@ -1544,7 +1616,7 @@ Attention.forward
 ```mermaid
 flowchart TD
     WRONG["wrong output or illegal access"] --> ROW["request row mapping"]
-    ROW --> EXP["manager to kernel block expansion"]
+    ROW --> EXP["AttentionGroup mapping ratio and stride"]
     EXP --> SLOT["slot mapping hand calculation"]
     SLOT --> RAG["ragged lengths and padding"]
     RAG --> LAYOUT["cache shape, stride, dtype"]
@@ -1602,7 +1674,7 @@ flowchart TD
 - `vllm/v1/worker/block_table.py`
   - `get_block_table_width`
   - `BlockTable`
-  - `BlockTable.map_to_kernel_blocks`
+  - `BlockTable.append_row`
   - `ComputeSlotMappingKernel`
   - `MultiGroupBlockTable`
 - `vllm/v1/worker/gpu/block_table.py`
@@ -1612,6 +1684,14 @@ flowchart TD
   - `BlockTables.compute_slot_mappings`
   - `_gather_block_tables_kernel`
   - `_compute_slot_mappings_kernel`
+
+- `vllm/v1/worker/utils.py`
+  - `AttentionGroup.create_metadata_builders`
+  - `AttentionGroup.map_to_kernel_block_table`
+  - `AttentionGroup.map_kv_cache_to_kernel_blocks`
+  - `AttentionGroup.build_metadata`
+  - `prepare_kernel_block_sizes`
+  - `map_kv_caches_to_kernel_blocks`
 
 ### Model Runner metadata
 
@@ -1623,6 +1703,10 @@ flowchart TD
 - `vllm/v1/worker/gpu/model_runner.py`
   - MRV2 `prepare_attn`
   - MRV2 block table gather 与 slot mappings
+- `vllm/v1/worker/gpu/attn_utils.py`
+  - `init_attn_backend`
+  - `init_kv_cache`
+  - `build_attn_metadata`
 
 ### 当前 FlashAttention 示例
 
@@ -1634,7 +1718,8 @@ flowchart TD
   - `FlashAttentionMetadataBuilder`
   - `FlashAttentionImpl.forward`
   - `FlashAttentionImpl.do_kv_cache_update`
-  - `cascade_attention`
+  - `FA4DenseAttentionKernel.__call__` / `kernel`
+  - `FlashAttentionImpl._forward_with_dcp`
 
 ### 历史与特定路径
 
@@ -1697,9 +1782,9 @@ PP、DCP/PCP 下 block table、Q/K/V 与 softmax 状态怎样分布。
 PagedAttention 的核心不是某个固定函数名，而是保持以下契约：
 
 1. 请求的 token 顺序是逻辑连续的，物理 KV pages 可以不连续；
-2. block table 将逻辑 block index 映射为物理 kernel block ID；
+2. 持久 manager 表保存分配 ID，backend kernel 表在需要时另外生成；
 3. 页内 offset 与物理 block ID 共同形成 flat cache slot；
-4. allocation block 可按整数倍展开成更小的 kernel blocks；
+4. `AttentionGroup` 按实际布局与 stride 把 allocation block 映射为 kernel blocks；
 5. block table 服务历史读取，slot mapping 服务本轮 K/V scatter write；
 6. `query_start_loc` 与 `seq_lens` 描述 Continuous Batching 的 ragged query/context；
 7. Model Runner 先生成 common metadata，再由 backend builder 转换；
@@ -1709,7 +1794,10 @@ PagedAttention 的核心不是某个固定函数名，而是保持以下契约�
 11. `vllm/v1/attention/ops/paged_attn.py` 是特定 helper，不是判断是否分页的唯一标准；
 12. 分页改变地址，不应改变逻辑 attention 数学结果。
 
-本章正文、30 余幅源码流程/地址图、教学模型、实验说明和 13 个 CPU 测试已经完成，
+2026-10-19 的 v0.32.0 静态复核与 CPU 测试记录见
+[升级核对](../../meta/upgrade-v0.32.0-2026-10-19/06-paged-attention.md)。
+
+本章正文、30 余幅源码流程/地址图、教学模型、实验说明和 15 个 CPU 测试已经完成，
 `content_complete=true`。当前机器没有可用的 vLLM NVIDIA GPU runtime，无法执行上游 CUDA
 block-table tests、真实 backend probe、kernel trace 和数值对照，因此
 `runtime_verified=false`，状态保持 `draft`。
@@ -1731,3 +1819,4 @@ block-table tests、真实 backend probe、kernel trace 和数值对照，因此
 3. -1 表示跳过该 token 的缓存写入；0 是保留 null block 的合法块 ID，仍用于占位或特定状态寻址。
 
 </details>
+

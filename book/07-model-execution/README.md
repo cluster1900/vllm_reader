@@ -3,10 +3,10 @@ title: "第07章 Executor、Worker 与 Model Runner"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
-source_branch: v0.31.0
+source_commit: 5df63a7203cdb9328d824a27b682e77c7b9928be
+source_branch: v0.32.0
 source_dirty: false
-verified_at: 2026-10-18
+verified_at: 2026-10-19
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -45,7 +45,7 @@ flowchart TD
 > **读图方法：** 阅读“本章定位”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
 这一段调用链看起来只是“跑模型”，实际上同时跨越五类边界：编排、进程、设备、并行和状态。
-本章绑定源码 revision `db9527a46873454610df6dbedf79a36d6bf1a7f6`，继续使用以下标签：
+本章绑定源码 revision `5df63a7203cdb9328d824a27b682e77c7b9928be`，继续使用以下标签：
 
 - **源码事实**：当前 revision 可直接定位的行为。
 - **设计意图**：源码注释或同 revision 设计文档表达的目标。
@@ -384,7 +384,9 @@ sequenceDiagram
     W->>W: resolve local rank and device
     W->>D: initialize distributed environment
     W->>W: set random seed
-    W->>G: GC, empty cache, memory snapshot
+    W->>G: GC and empty cache
+    W->>W: query loader external weight memory
+    W->>G: memory snapshot and engine budget
     W->>G: initialize workspace manager
     W->>R: construct MRV1 or MRV2
     E->>W: load_model()
@@ -413,9 +415,15 @@ flowchart LR
 
 ### 7.6.2 Runner 在什么时候选择
 
-Worker 缓存 `vllm_config.use_v2_model_runner`。workspace 初始化后，true 导入
+Worker 缓存 `vllm_config.use_v2_model_runner`。`init_device()` 调用
+`_init_workspace_and_model_runner()` 初始化 workspace，再由 `_make_model_runner()`
+选择实现。普通 GPU 路径中，true 导入
 `vllm/v1/worker/gpu/model_runner.py`，false 导入 `vllm/v1/worker/gpu_model_runner.py`。Runner 构造只建立配置和缓冲区结构，随后
 `Worker.load_model()` 才在权重 allocator context 中调用 Runner 的 `load_model()`。
+V2 的 encoder-only 配置另选 `MMEncoderModelRunner`，不能把上图当作所有 Worker 类型的枚举。
+
+[源码] `vllm/v1/worker/gpu_worker.py` - `Worker._init_workspace_and_model_runner`、
+`Worker._make_model_runner`
 
 ```mermaid
 flowchart TD
@@ -490,24 +498,31 @@ M_{\mathrm{KV}}=M_{\mathrm{requested}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph},\mat
 $$
 
 - 所有 `M` 的单位都是 byte（换成 GiB 时所有项一起换）；
-- `M_requested = total_memory * gpu_memory_utilization`，不是 free memory 乘利用率；
-  启动还会检查 free memory 是否足以满足 requested；
+- 先取 `M_util = ceil(total_memory * gpu_memory_utilization)`，不是 free memory 乘利用率；
+  普通进程内加载时 `M_requested=M_util`。若 loader 报告外部进程已持有权重
+  `M_external>0`，则 `M_requested=M_util-M_external`，并检查余量为正且 free memory
+  足以满足这个余量。外部权重不能因为不归当前进程 allocator 所有就漏算；
 - `M_nonKV` 包含权重及 profile 期间非 KV 消耗；
 - `M_graph,applied` 是实际扣除的 CUDA Graph 内存估算。固定 revision 中，环境变量
   `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` 默认值为 `1`，即默认应用估算；显式设为 `0`
-  才不扣此项。估算本身还要求 CUDA/ROCm 平台和非 `NONE` 的 graph mode，不能把开关开启
+  才不扣此项。估算本身还要求 CUDA/ROCm 或 XPU 平台和非 `NONE` 的 graph mode，不能把开关开启
   等同于必有非零预留。
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`
 
 [源码] `vllm/envs.py` - `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS`
 
+[源码] `vllm/v1/worker/utils.py` - `request_memory`；
+`vllm/v1/worker/gpu_worker.py` - `Worker.init_device`
+
 Worker 内仍保留“opt-in”措辞的注释，但环境变量的实际默认值已经是 `1`。默认行为应以
 `vllm/envs.py` 的取值和这里的分支为准，不能仅依据注释推断。
 
 ```mermaid
 flowchart TB
-    TOTAL["device total memory"] --> REQ["total times gpu_memory_utilization"]
+    TOTAL["device total memory"] --> UTIL["ceil(total times gpu_memory_utilization)"]
+    UTIL --> REQ["engine budget after external weights"]
+    EXT["loader-reported external weights"] --> REQ
     FREE["initial free memory"] --> CHECK["check free is at least requested"]
     REQ --> CHECK
     REQ --> W["weights and persistent state"]
@@ -546,7 +561,9 @@ flowchart TD
 
 先加载模型并收集 KV specs，才能确定 layout；先 profile，才能确定最终池容量。某些
 profiling 路径已经会创建最小临时 KV 并估算 graph，不能把图理解成 profile 时绝无
-KV 或 capture。最终缓存初始化后，服务前的 warmup/capture 再使用正式布局。`initialize_from_config()` 先记录 block 数/layout，再初始化 KV
+KV 或 capture。最终缓存初始化后，服务前的 warmup/capture 再使用正式布局。
+`initialize_from_config()` 先记录 block 数/layout 和由 EngineCore 解析的
+`hash_block_size`、`cache_hit_alignment_tokens`，再初始化 KV
 connector，然后调用 Runner `initialize_kv_cache()`。warmup 覆盖 compile sizes、kernel warmup、MRV2
 额外 warmup 和非 eager 下的 graph capture。
 
@@ -667,7 +684,17 @@ flowchart TD
 
 > **读图方法：** 阅读“StagedWriteTensor 与 async-first”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
-**边界：** 设计文档明确保留 feature-complete 与开放设计警告。运行事实仍需看当前配置与源码选择。
+v0.32.0 还需要区分两类索引和状态驻留：请求 `idx_mapping` 使用 int64，展开后的
+请求内位置 `expanded_local_pos` 仍为 int32。`RequestState.all_token_ids` 默认选择 UVA，
+但 n-gram speculation 会令 `use_dense_all_token_ids=True`，保存在 GPU 以便反复扫描；
+不能把“MRV2 token 历史永远在主机内存”当作固定事实。
+
+[源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.__init__`、`prepare_inputs`
+
+[源码] `vllm/v1/worker/gpu/states.py` - `RequestState.__init__`；
+`vllm/v1/worker/gpu/input_batch.py` - `expand_idx_mapping`
+
+**边界：** 设计文档保留 feature-complete 与开放设计警告。运行事实仍需看当前配置与源码选择。
 
 ## 7.13 输入准备：request slices 变成 flat batch
 
@@ -692,7 +719,12 @@ flowchart TB
 
 `query_start_loc[i]:query_start_loc[i+1]` 是请求 i 的 query 区间。block tables、slot mappings、seq
 lengths 与 backend metadata 必须使用同一请求顺序。Flat ragged representation 避免大面积 padding，
-也允许 prefill/decode 混合。
+也允许 prefill/decode 混合。v0.32.0 的持久 block table 保存 manager-block IDs；
+需要较小 kernel blocks 的 attention group 在 metadata 构造边界转换自己的表和 KV views，
+不能把 kernel-block 展开重新塞回通用输入 batch。具体寻址见第 06 章。
+
+[源码] `vllm/v1/worker/utils.py` - `AttentionGroup.build_metadata`、
+`AttentionGroup.map_to_kernel_block_table`
 
 MRV2 主干顺序是 update requests、处理 zero-work、gather state、决定 graph/DP padding、准备 inputs、
 gather block tables/slot mappings、构建 attention metadata、forward。
@@ -788,8 +820,11 @@ MRV1 在再次 execute 时显式抛出 `RuntimeError`；MRV2 的这条入口不�
 说明未来该设计可能变化，所以它是当前 revision 契约，不是永恒 API。
 
 MRV2 保存 input batch、attention metadata、slot mappings、hidden states、DP sync、finished IDs、connector
-output、aux hidden states 和 graph stats；MRV1 保存 scheduler output、logits、spec metadata、hidden/aux
-states、connector output 与 slot mappings。`sample_tokens()` 取出后立即清空临时 state。
+output、aux hidden states、graph stats 和本轮 `num_spec_tokens_to_schedule`；
+DP 协调字段现名为 `dp_sync_state`。MRV1 保存 scheduler output、logits、spec metadata、hidden/aux
+states、connector output 与 slot mappings。`sample_tokens()` 取出后立即清空临时 state。MRV2 proposal 使用保存的本轮 draft 数，
+把超出的 draft slots 设为 `-1`，并只向后续处理传递有效前缀，不能仅凭配置最大值
+假设每步产生同样多 draft。
 
 ```mermaid
 flowchart LR
@@ -856,8 +891,8 @@ MRV2 在构造时把 logit bias、penalties、bad words 与 custom logits proces
 否则显式过滤后走 Triton Gumbel。含 greedy、显式 seed 或要求 processed logprobs 的请求
 会影响 fused sampler 的资格，不能只按平台判断。
 
-[源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.__init__`（L65–100）、
-`apply_sampling_params`（L223–273）、`sample` / `_sample_random`（L275–360）
+[源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.__init__`、
+`apply_sampling_params`、`sample` / `_sample_random`
 
 [源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.apply_sampling_params`
 
@@ -911,7 +946,9 @@ sequenceDiagram
 
 ## 7.20 MRV2 sample_tokens 时间线
 
-MRV2 先取出并清空 state。非末 PP rank 接收末 rank 广播并更新本地状态；末 rank 执行 sampling、prompt
+MRV2 先取出并清空 state。非末 PP rank 接收末 rank 广播并更新本地状态；
+若同时启用 PCP，它先恢复 `pcp_manager.global_batch`，按全局请求顺序接收和记账，
+而不是把本 rank 的 PCP 局部行当成完整 batch。末 rank 执行 sampling、prompt
 logprobs、异步输出 copy、请求状态更新和可选 speculator proposal。
 
 ```mermaid
@@ -936,8 +973,8 @@ flowchart TD
 `pending_aux_output` 交给 `AsyncOutput`；不再把 `routed_experts` 放在 `ExecuteModelState` 中。
 `AsyncOutput.get_output()` 在 copy event 完成后处理辅助输出并填入结果。
 
-[源码] `vllm/v1/worker/gpu/model_runner.py` - `execute_model`（L1695–1699）、
-`sample_tokens`（L2138–2151）；`vllm/v1/worker/gpu/async_utils.py` - `AsyncOutput.get_output`（L202–205）
+[源码] `vllm/v1/worker/gpu/model_runner.py` - `execute_model`、
+`sample_tokens`；`vllm/v1/worker/gpu/async_utils.py` - `AsyncOutput.get_output`
 
 `AsyncOutput` 在 state postprocess 前创建并记录 copy event，使 D2H 可与后续工作重叠。“返回 async
 wrapper”通常表示 CPU 可消费结构尚在复制，不表示 model forward 尚未发生。
@@ -958,7 +995,7 @@ NumPy-backed structures。
 | `cudagraph_stats` | graph 执行统计 |
 | `aux_output_connector_output` | 辅助输出 connector 的逐请求结果，取代旧的直接 `routed_experts` 字段 |
 | `prompt_token_id_logprobs_dict` | 指定 prompt token IDs 的逐请求分数 |
-| `sampling_masks` | 配置启用时的采样掩码 |
+| `sampling_masks` | 配置启用时的采样掩码；单个请求可对应多个生成位置 |
 
 ```mermaid
 flowchart LR
@@ -971,6 +1008,8 @@ flowchart LR
 > **读图方法：** 阅读“ModelRunnerOutput 与异步输出”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
 
 `sampled_token_ids` 是二维变长结构，因为 speculative/jump decoding 可让不同请求本轮生成不同数量。
+v0.32.0 的 `SamplingMaskLists.slice_request()` 也按 `cu_num_generated_tokens` 和 CSR
+`offsets` 切出多位置掩码，不再假设一个请求只生成一个位置。
 zero-work、非末 PP rank 或 connector-only 路径可合法为空；异常由独立 failure 通道传播。
 
 `AsyncModelRunnerOutput.get_output()` 阻塞到结果可用，可能包括 D2H，且只能调用一次。Multiproc async
@@ -1009,9 +1048,7 @@ flowchart TD
     WM -->|yes, overrides V2=0| T
     WM -->|no| ENV{"VLLM_USE_V2_MODEL_RUNNER set?"}
     ENV -->|yes| RET["return explicit boolean"]
-    ENV -->|no| ROCM{"ROCm prefers MRV1 and V1 supports config?"}
-    ROCM -->|yes| F1["MRV1"]
-    ROCM -->|no| TRI{"Triton available?"}
+    ENV -->|no| TRI{"Triton available?"}
     TRI -->|no| F2["MRV1"]
     TRI -->|yes| UNS{"unsupported V2 features?"}
     UNS -->|yes| F3["MRV1 with warning"]
@@ -1022,23 +1059,41 @@ flowchart TD
 
 [源码] `vllm/config/vllm.py` - `VllmConfig.use_v2_model_runner`
 
-自动 fallback 检查包括 stock `torch.compile`、TP sequence parallelism、external launcher + PP、部分
-spec decoding/u-batching、elastic EP 和 Mamba `all` cache mode。custom logits processors
-和 KV sharing fast prefill 已不在这份 MRV2 自动 fallback 列表中。
+v0.32.0 的自动 fallback 清单包括：
+
+- external launcher + `PP>1`；
+- `suffix`、`medusa`、`mlp_speculator`、`custom_class` speculation；
+- 除 DFlash/DSpark 外的 parallel drafting；
+- heterogeneous-vocabulary draft models（target/draft 词表不同，V2 尚无对应 token mapping）；
+- u-batching/DBO 的限制。未显式选择 Runner 时，DBO 仍进入 fallback；显式 V2 还要
+  通过 LoRA、speculation、PP、CP、多模态、hybrid 和 graph mode 等组合校验。
+
+stock `torch.compile`、`ngram`/`ngram_gpu` 和 Elastic EP 已从这份清单移除。
+stock compile 在 MRV2 加载模型后调用共享的 `compile_model_with_stock_torch`，
+但配置会把 CUDA Graph 改为 NONE 并清空 capture sizes。旧 compile SP passes 已删除，
+Mamba `all` cache mode 本身也已删除，二者都不是“仍可配置但 fallback 到 MRV1”。
 
 [源码] `vllm/config/vllm.py` - `_get_v2_model_runner_unsupported_features`
 
 选择先处理 HiSparse 和 watermark：HiSparse 遇到显式 `VLLM_USE_V2_MODEL_RUNNER=0`
 会报错；watermark 则覆盖该值并选择 MRV2。其他配置才直接采用显式环境变量。
-默认 ROCm 的 MRV1 性能偏好也先检查 MRV1 能力，不能把 PCP 或 async+PP 等 V2-only
-组合误送到 MRV1。因此“环境变量总优先”与“不支持总会自动回退”都不成立。
+ROCm 的模型特定 MRV1 默认例外已移除；未显式选择时走相同的 Triton 与功能检查。
+选择后还会运行 `_validate_v2_model_runner` 或 `_validate_v1_model_runner`，显式强制
+不支持组合会报错，默认 fallback 后若 MRV1 也不支持同样会报错。
+因此“环境变量总优先”与“不支持总会成功回退”都不成立。
 
-[源码] `vllm/config/vllm.py` - `VllmConfig.use_v2_model_runner`（L701–763）、
-`_get_v2_model_runner_unsupported_features`（L3051–3113）、
-`_get_v1_model_runner_unsupported_features`（L3115–3163）
+[源码] `vllm/config/vllm.py` - `VllmConfig.use_v2_model_runner`、
+`_get_v2_model_runner_unsupported_features`、
+`_get_v1_model_runner_unsupported_features`
 
-[测试] `tests/test_config.py` - `test_v2_model_runner_supports_custom_logits_processors`、
-`test_watermarking_forces_model_runner_v2`（静态阅读，未运行上游测试）
+[测试] `tests/test_config.py` - `test_v2_model_runner_supports_speculative_method`、
+`test_v2_model_runner_heterogeneous_vocab_draft_falls_back_to_v1`、
+`test_rocm_keeps_compiled_deepseek_defaults`、`test_watermarking_forces_model_runner_v2`
+（静态阅读，未运行上游测试）
+
+[源码] `vllm/v1/worker/gpu/spec_decode/__init__.py` - `init_speculator`：
+`use_ngram()` 选择 `NgramGPUSpeculator` 并传入持久 `RequestState`。
+PCP+PP 和 Elastic EP 的迁移边界在第 09 章展开；不应把“Runner 支持”解释成所有组合支持。
 
 MRV2 目标是 permanent rows、async-first、GPU-native input metadata、Triton sampler、模块化和显式
 graph manager；MRV1 仍覆盖部分 V2 尚不支持组合。共存是能力迁移边界。
@@ -1258,7 +1313,8 @@ flowchart TD
 - `vllm/v1/executor/uniproc_executor.py`：`UniProcExecutor`、`AsyncOutputFuture`、external launcher。
 - `vllm/v1/executor/multiproc_executor.py`：`MultiprocExecutor`、`collective_rpc`、`WorkerProc`。
 - `vllm/v1/worker/worker_base.py`：`WorkerBase`、`WorkerWrapperBase`。
-- `vllm/v1/worker/gpu_worker.py`：device、load、profile、KV init、warmup、execute/sample。
+- `vllm/v1/worker/gpu_worker.py`：device、`_make_model_runner`、load、profile、KV init、warmup、execute/sample。
+- `vllm/v1/worker/utils.py`：`request_memory` 与 `AttentionGroup` 的布局转换。
 
 ### Model 与权重
 
@@ -1277,6 +1333,7 @@ flowchart TD
 - `vllm/v1/worker/gpu_model_runner.py`：MRV1 execute/sample。
 - `vllm/v1/worker/gpu/model_runner.py`：MRV2 execute/sample 与 `ExecuteModelState`。
 - `vllm/v1/worker/gpu/input_batch.py`、`vllm/v1/worker/gpu/states.py`：MRV2 inputs/state。
+- `vllm/v1/worker/gpu/spec_decode/__init__.py`：`init_speculator`，包括 GPU n-gram。
 - `vllm/v1/sample/sampler.py`：MRV1 Sampler。
 - `vllm/v1/worker/gpu/sample/sampler.py`：MRV2 Sampler。
 - `vllm/v1/outputs.py`：`ModelRunnerOutput`、`AsyncModelRunnerOutput`。
@@ -1344,3 +1401,4 @@ NCCL/PP、CUDA memory profiling、MRV1/MRV2 differential inference 和异步 D2H
 3. 通过本轮索引映射把 batch 行 0 映射到状态行 3，再收集输入与块表；不能直接把持久表的第 0 行当作 B。
 
 </details>
+

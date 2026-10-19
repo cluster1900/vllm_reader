@@ -39,6 +39,18 @@ class EngineCoreStepTest(unittest.TestCase):
         self.assertEqual(outputs[0][0].token_ids, (100,))
         self.assertEqual(outputs[0][0].finish_reason, "length")
 
+    def test_output_cap_does_not_launch_extra_work(self):
+        core = TeachingEngineCore(max_concurrent_batches=2)
+        core.add_request("bounded", max_tokens=2)
+        outputs = []
+        for _ in range(5):
+            result, _ = core.step_with_batch_queue()
+            if result:
+                outputs.extend(result[0])
+        self.assertEqual(len(core.executor.launched_batches), 2)
+        self.assertEqual(sum(len(output.token_ids) for output in outputs), 2)
+        self.assertEqual(outputs[-1].finish_reason, "length")
+
     def test_abort_between_launch_and_update_wins(self):
         core = TeachingEngineCore()
         core.add_request("r0", max_tokens=2)
@@ -101,3 +113,4 @@ class EngineCoreProcTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -3,10 +3,10 @@ title: "第10章 实验、性能分析与优化"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
-source_branch: v0.31.0
+source_commit: 5df63a7203cdb9328d824a27b682e77c7b9928be
+source_branch: v0.32.0
 source_dirty: false
-verified_at: 2026-10-18
+verified_at: 2026-10-19
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -945,6 +945,16 @@ Worker 通过 `vllm/profiler/wrapper.py` 的 `create_worker_profiler` 与
 多 rank 下每个 Worker 各自产生 trace。比较之前先确认 trace 文件对应的 DP/PP/TP/DCP/EP
 坐标，而不是只打开 rank 0。
 
+v0.32.0 的 `/start_profile` 可按 session 指定 `profile_prefix`、`delay_iterations`、
+`max_iterations`；后两项必须是非负 JSON 整数，max_iterations=0 表示不限制。
+这些迭代边界约束 Worker profiler，不约束 AsyncLLM 前端 CPU profiler；后者从 start 持续到 stop。
+即使 Worker 达到迭代上限，也必须调用 `/stop_profile`，否则下一次 start 会返回 HTTP 409。
+trace/summary 文件名使用 rank 或 hostname_pid.async_llm 前缀，session prefix 可避免覆盖。
+
+[设计] `docs/contributing/profiling.md` - Profile with PyTorch Profiler
+
+[源码] `vllm/config/profiler.py` - `validate_profile_iteration_bounds`
+
 ### 10.15.3 Proton
 
 Proton 面向 Triton kernel，可输出 aggregate tree 或 Chrome trace。本版本通过 NVIDIA
@@ -1250,6 +1260,16 @@ trace 显示最长 prefill step 从 D ms 降至 E ms，GPU idle 增加 F%。所�
 
 ---
 
+### v0.32.0：区分等待、KV 取回与缓存来源
+
+Prometheus 的 `vllm:num_requests_kv_fetch_by_stage` 仅在配置为 KV consumer 时注册，
+按 waiting_to_start、in_progress、completed_waiting 区分异步 KV 取回阶段。
+`vllm:prompt_tokens_cached_by_source` 则在准入时按 device、host、disk、p2p 或
+external_unspecified 计数，不能把所有缓存命中都解释为本地 HBM 复用。
+新增指标帮助定位等待来源，不改变 TTFT/ITL 的时间单位，也不自动证明缓存有端到端收益。
+
+[源码] `vllm/v1/metrics/loggers.py` - `PrometheusStatLogger`
+
 ## 10.20 参数扫描与 Pareto frontier
 
 > **本节先看：** 本节要回答：**参数扫描与 Pareto frontier**。下面的小节会逐层拆开概念、运行过程和源码落点；第一次阅读先抓对象之间的关系，第二次再记类名、字段和分支。
@@ -1290,6 +1310,15 @@ flowchart TD
 `ParameterSweep` 从 JSON 读取命名参数组合，把键归一化为 CLI 参数并运行 server/benchmark
 组合。workload sweep 可以从 serial 到 batch 估计范围，再探索中间 request rate 或
 max concurrency。结果汇总后可绘图。
+
+v0.32.0 新增 `--warmup-num-prompts`，在每个参数组合前执行一轮不计入正式结果的 warmup，
+单独保存为 warmup.json。`--continue-on-error` 可记录 .failure.json 并继续后续运行，
+失败返回 None，不能混入成功测量的平均值。warmup 失败也可能在该选项下继续，因此报告必须
+检查失败文件，不能只看最后的汇总图。
+
+[源码] `vllm/benchmarks/sweep/serve.py` - `run_comb`
+
+[测试] `tests/benchmarks/sweep/test_param_sweep.py` - `test_run_comb_excludes_warmup_from_measured_results`、`test_run_comb_continue_on_error_keeps_later_runs`
 
 上面的教学例子使用“吞吐越高、延迟越低”两项目标。当前上游 `plot_pareto.py` 使用的则是
 `tokens_per_user` 与 `tokens_per_gpu`，两轴均越高越好；不能把教学坐标直接当作该工具的输出口径。
@@ -1598,8 +1627,8 @@ throughput、goodput、p99 TTFT/TPOT、client queue、server queue。
     `benchmarks/attention_benchmarks/`：组件与 kernel 层实例。
 16. `tests/benchmarks/`：CLI、dataset adapter、sweep 和参数稳定性测试。
 
-本章正文已按 v0.31.0 复核，指标教学代码的 CPU 测试通过；源码基线为 commit
-`db9527a46873454610df6dbedf79a36d6bf1a7f6`。当前机器没有可用的 NVIDIA GPU vLLM
+本章正文已按 v0.32.0 静态复核，指标教学代码的 CPU 测试通过；源码基线为 commit
+`5df63a7203cdb9328d824a27b682e77c7b9928be`。当前机器没有可用的 NVIDIA GPU vLLM
 运行环境，因此 profiler、NCCL 与真实服务性能数据仍标记为 `runtime_verified: false`。
 本章给出的数值曲线均为教学示意，不能冒充实测结果。
 
@@ -1620,3 +1649,4 @@ throughput、goodput、p99 TTFT/TPOT、client queue、server queue。
 3. 还可能有客户端或服务端排队、输入准备、RPC、D2H、输出处理和网络等待。按同一请求的时间戳定位，不能把 kernel 时间当作端到端时间。
 
 </details>
+

@@ -3,10 +3,10 @@ title: "第09章 分布式与多 GPU 推理"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: db9527a46873454610df6dbedf79a36d6bf1a7f6
-source_branch: v0.31.0
+source_commit: 5df63a7203cdb9328d824a27b682e77c7b9928be
+source_branch: v0.32.0
 source_dirty: false
-verified_at: 2026-10-18
+verified_at: 2026-10-19
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -214,7 +214,7 @@ group 交换 tensor metadata，再在 device group 发送真正的 GPU tensor。
 
 ### 9.3.1 当前源码中的 world size 公式
 
-固定版本 `v0.31.0 / db9527a4...` 的 `ParallelConfig.__post_init__` 使用：
+固定版本 `v0.32.0 / 5df63a72...` 的 `ParallelConfig.__post_init__` 使用：
 
 $$
 W_{\mathrm{engine}}=\mathrm{TP}\times \mathrm{PP}\times \mathrm{PCP}
@@ -235,7 +235,7 @@ $$
 
 所有并行度是无单位正整数，`W` 是 worker 数，不包含 API、EngineCore 等辅助进程。
 能写出乘法不代表组合可运行：此版本已移除 `ParallelConfig` 中 PCP 与 DP 不能同时开启的
-通用禁令，但 MRV2 PCP 仍不支持 `PP>1`，还要满足 MLA、DCP、speculation 和 graph
+通用禁令，且 v0.32.0 移除了 MRV2 PCP 的 `PP>1` 禁令，但仍要满足 MLA、DCP、speculation 和 graph
 约束。移除一个校验不代表任意组合可运行。先检查合法性，再算部署规模。
 
 [源码] `vllm/config/parallel.py` - `ParallelConfig` 的 PCP/DCP 校验、`__post_init__`
@@ -855,6 +855,23 @@ $$
 
 ---
 
+### v0.32.0：编译 SP 与模型级 SP 分开
+
+移除的是 torch.compile sequence-parallel / AsyncTP passes，不是把所有序列并行从 vLLM 删除。
+`ParallelConfig.use_sequence_parallel_moe` 仍由 all-to-all backend、EP 开启、TP>1、DP>1 等条件决定，
+MoE dispatch/combine 仍可能使用 sequence-parallel 输入。不要拿旧 compile pass 配置去开启它，
+也不要由 pass 删除推断 TP、EP 或模型内 SP 的通信全都消失。
+
+[源码] `vllm/config/parallel.py` - `use_sequence_parallel_moe`、`use_all2all`
+
+v0.32.0 的 MRV2 unsupported-feature 清单不再含 Elastic EP；这只是取消统一回退条件，
+扩缩容仍有独立校验与暂停策略。`DPLBAsyncMPClient._eep_commit_pause_mode` 在 V2 无法复用
+fused MoE kernel 的情况下选择 wait，否则选择 keep；不能把支持 EEP 理解为任意组合都无须 drain。
+
+[源码] `vllm/config/vllm.py` - `_get_v2_model_runner_unsupported_features`
+
+[源码] `vllm/v1/engine/core_client.py` - `DPLBAsyncMPClient._eep_commit_pause_mode`
+
 ## 9.9 PCP 与 DCP：都切 context，但切法不同
 
 > **本节先看：** 本节要回答：**PCP 与 DCP：都切 context，但切法不同**。下面的小节会逐层拆开概念、运行过程和源码落点；第一次阅读先抓对象之间的关系，第二次再记类名、字段和分支。
@@ -891,7 +908,10 @@ rank 3: [6,7]   + [8,9]
 flowchart LR
     T[Original token order] --> K{"Decode OR (short prefill AND DCP enabled)?"}
     K -->|no| C[Split into 2 x PCP chunks]
-    K -->|yes| REP[Replicate full query to PCP ranks]
+    K -->|yes| DCP{DCP enabled?}
+    DCP -->|yes| REP[Replicate full query to participating ranks]
+    DCP -->|no| OWNER[Round-robin decode request owner]
+    OWNER --> G
     REP --> G[Gather and reorder]
     C --> R0[rank 0: front 0 + back 7]
     C --> R1[rank 1: front 1 + back 6]
@@ -906,7 +926,10 @@ flowchart LR
 
 > **读图方法：** 阅读“PCP 的 DualChunkSwap”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
 
-Decode tokens 不按相同方式分片，而是复制到 PCP ranks；启用 DCP 时，过短、无法填满全部
+Decode 请求不再一概复制：PCP-only（DCP=1）因 KV 在 PCP ranks 上复制，可按当前 step 的
+有效 decode 请求序号 round-robin 分配唯一 owner，prefill 和零 token 行不占用该序号。
+owner 不必跨 step 固定，hidden states/KV 的恢复保证后续 rank 可继续处理。
+启用 DCP 时则需要各参与 rank 都计算 decode query；过短、无法填满全部
 `2×PCP` chunks 的 prefill 也会复制，避免某些 rank 缺少 chunk。具体条件是
 `(2×PCP-1)×ceil(query_len/(2×PCP)) >= query_len`。图中 rank 0–3 的双 chunk 分支以足长 prefill 为例。
 执行结束后 gathered hidden states 还要按原 token 顺序恢复；当前局部行按 decode 在前、
@@ -916,7 +939,7 @@ prefill 在后，再按 request 与原片段起点排序。切片和正确重排
 
 固定版本的 `PCPManager.validate_config` 有明确限制，包括：
 
-- 仅支持 MLA；不与 PP、encoder-decoder、multimodal 或 LoRA 同时使用。
+- 仅支持 MLA；不与 encoder-decoder、multimodal 或 LoRA 同时使用。v0.32.0 不再禁止 PP 组合。
 - speculative decoding 允许 DSpark 或单模块 MTP，不支持其他方法或多模块 MTP。
   DSpark 的 draft model 使用 MLA 时，还要求 `DCP=1` 或 `DCP=PCP`。
 - 通用配置已不再禁止 PCP 与 DP 组合，但仍需通过其他配置和后端校验。
@@ -928,7 +951,14 @@ prefill 在后，再按 request 与原片段起点排序。切片和正确重排
 因此旧版本“PCP 禁用所有 speculation/full graph”的规则已不适用；也不能反过来
 说 PCP 全面支持它们。升级实验必须记录完整组合，而不只是 PCP size。
 
-[源码] `vllm/v1/worker/gpu/pcp_manager.py` - `PCPManager.validate_config`、`replicated_requests`
+[源码] `vllm/v1/worker/gpu/pcp_manager.py` - `PCPManager.validate_config`、`replicated_requests`、`_iter_rank_chunks`
+
+[源码] `vllm/config/parallel.py` - `ParallelConfig.pcp_shard_decode_requests`
+
+PCP+PP 时，非末 PP rank 的 `sample_tokens` 恢复 global batch 后接收末 rank 输出；
+因此 PP 输出同步使用全局请求顺序，不是每个 PCP rank 的局部行序。
+
+[源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.sample_tokens`
 
 ### 9.9.4 DCP 如何分配 KV token
 
@@ -1452,6 +1482,7 @@ CUDA 或 NCCL，用于验证代数与基础拓扑契约，而非完整复制当�
 - `column_parallel_linear`、`row_parallel_linear`：TP 矩阵切分；
 - `pipeline_partitions`：当前默认 PP 层划分；
 - `pcp_dual_chunk_assignment`：PCP 双 chunk 分配；
+- `pcp_decode_owners`：PCP-only 的逐步 decode owner 与 DCP 查询复制；
 - `dcp_token_owner`、`lse_weighted_combine`：DCP owner 与正确归并；
 - `expert_map`、`dispatch_tokens`、`combine_expert_outputs`：EP 数据流；
 - `choose_dp_engine`：当前内部 DP 负载分数的教学近似；
@@ -1469,7 +1500,7 @@ workers，并打印与 9.3 节一致的 groups。
 
 教学模拟器已移除旧基线的 `PCP>1 && DP>1` 禁令，并测试组合后的 DP/PCP/EP groups。
 但 `pcp_dual_chunk_assignment` 只演示足长 prefill 的双 chunk 划分，不覆盖新版
-PCP+DCP 的短 prefill 复制、speculation 和 CUDA Graph 行为；它也不模拟模型/backend
+PCP+DCP 的短 prefill 复制、speculation 和 CUDA Graph 行为；新增 decode owner 函数也不模拟 collective 或真实 PP 执行；它也不模拟模型/backend
 合法性校验。因此构造成功只证明拓扑可展开，不证明该配置可在真实模型上运行。
 
 ### 9.18.1 为什么教学代码不启动 NCCL
@@ -1548,8 +1579,8 @@ group。
 
 > **本节先看：** 下面先给出“练习题”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
 
-1. `TP=4, PP=2, PCP=2, DP=3` 的形式乘积分别是多少？为什么 MRV2 PCP 的 PP
-   校验仍拒绝它？把 PP 改为 1 后，PCP+DP 是否仍被通用配置禁止？还需核对哪些约束？
+1. `TP=4, PP=2, PCP=2, DP=3` 的形式乘积分别是多少？v0.32.0 不再禁止 PCP+PP 后，
+   为什么这个乘积仍不能证明模型可运行？请列出 MLA、speculation、DCP 与 graph 约束。
 2. 为什么 `DCP=2` 不一定需要比 `DCP=1` 多两倍进程？
 3. 对 `TP=2, PP=2, DP=2` 手工推导 rank 5 的坐标和三个 process groups。
 4. 证明 Row Parallel Linear 的 partial outputs 必须求和，不能 concat。
@@ -1626,8 +1657,8 @@ communication contract 重新建立理解。
 14. `vllm/v1/worker/cp_utils.py`、`vllm/v1/attention/ops/dcp.py`：DCP 通信与归并。
 15. `tests/distributed/`、`tests/v1/engine/`、`tests/v1/worker/`：边界条件与回归测试。
 
-本章正文已按 v0.31.0 复核，源码基线为 commit
-`db9527a46873454610df6dbedf79a36d6bf1a7f6`。当前环境没有可用的 NVIDIA 多 GPU vLLM
+本章正文已按 v0.32.0 静态复核，源码基线为 commit
+`5df63a7203cdb9328d824a27b682e77c7b9928be`。当前环境没有可用的 NVIDIA 多 GPU vLLM
 运行条件，因此真实 NCCL/Ray 多机实验仍标记为 `runtime_verified: false`，不能把静态源码
 核对和 CPU 教学测试表述成真实 GPU 验证。
 
@@ -1648,3 +1679,4 @@ communication contract 重新建立理解。
 3. 按四分之一与四分之三加权，结果为 17.5；平均值 15 不正确。LSE 是保存归一化信息并稳定合并的一种方式。
 
 </details>
+
