@@ -202,6 +202,9 @@ flowchart TB
 `EngineCore._initialize_kv_caches()` 会 profile 内存，计算 block 数，并可能因 auto-fit
 调小 `max_model_len`。
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
+> - [636da2476](https://github.com/vllm-project/vllm/commit/636da2476d184b44e670449498ec850fbfaab8d6)（[#60513](https://github.com/vllm-project/vllm/pull/60513)）：MRV2 的 draft-model speculator 改为在 auto-fit 之后读取 `max_model_len`，draft attention metadata 的 `max_seq_len` 取 draft 上限与 `max_model_len` 的较小值，避免 auto-fit 缩小上下文后 draft 侧仍用旧长度。
+
 多进程模式下，EngineCore 通过 `EngineCoreReadyResponse` 把最终的
 `max_model_len`、`num_gpu_blocks`、`block_size`、dtype 和并行大小回传给 client；client
 再同步前端配置。因此“配置对象已构造”不等于“所有运行时容量已定值”。
@@ -852,6 +855,9 @@ waiting 请求 drain，避免部分完成的请求占着资源而无法排空；
 不能把“暂停前排队”简单等同于“持有 KV”。
 
 [源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`、`get_num_unfinished_requests`
+
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
+> - [d5b36699b](https://github.com/vllm-project/vllm/commit/d5b36699b21bd7b1c4ce01afe218e3c3eaacc27e)（[#51488](https://github.com/vllm-project/vllm/pull/51488)）：`pause_generation` 的 `abort` / `wait` 模式在 main 上会以可重试的 `engine_paused` 错误拒绝暂停期间到达的新请求；`keep` 模式与 sleep 等其他暂停仍不拒绝新请求；KV 清理标记和已打开 streaming session 的输入不受影响。上文模式表中 `abort` 行“入队但不调度”与 `wait` 行“未持有 KV 的新 waiting 请求暂停准入”这两格“新请求”列，以及状态图里“新请求只排队”，在 main 上只对 `keep` 模式成立；`abort` / `wait` 下新请求会直接收到 `engine_paused` 错误。
 
 [源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`、`get_num_unfinished_requests`
 
