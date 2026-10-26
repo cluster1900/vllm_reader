@@ -620,7 +620,7 @@ step-skipped queue，然后继续检查其他请求。若配置为丢弃 stale o
 请求 KV 无法分配时，通常执行 `break`。这决定了后面的请求能否绕过队首。
 
 > **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
-> - [43caf5b35](https://github.com/vllm-project/vllm/commit/43caf5b3520b704fa766f00fc2b24da25c78e084)（[#59030](https://github.com/vllm-project/vllm/pull/59030)）：waiting 请求在 encoder 输入/lookahead 检查后 `num_new_tokens == 0` 时，main 改为跳过该请求并重新入队后 `continue`，不再 `break` 终止 waiting 接纳循环。上文 break 条件列表在 main 上少了这一项。
+> - [43caf5b35](https://github.com/vllm-project/vllm/commit/43caf5b3520b704fa766f00fc2b24da25c78e084)（[#59030](https://github.com/vllm-project/vllm/pull/59030)）：v0.32.0 中，waiting 请求经 encoder 输入调度（`_try_schedule_encoder_inputs`）和 prefill lookahead 预留（`_reserve_prefill_lookahead`）后若 `num_new_tokens == 0`，同样执行 `break`（可视为上文“预算不足”的一种）；main 上改为 `skip_request` 把它移入 step-skipped 队列（持有 KV 的进 `step_skipped_kv_holding`，否则进 `step_skipped_waiting`）后 `continue`，不再挡住后面的请求。关闭 chunked prefill 且 `num_new_tokens > request_token_budget` 时的 `break`、spec decode padding 放弃调度时的 `break`、以及 Mamba 对齐后 `num_new_tokens == 0` 的 `break` 均未改。
 
 ### 4.9.2 Waiting 分配失败不会立即抢占 running
 

@@ -857,7 +857,7 @@ waiting 请求 drain，避免部分完成的请求占着资源而无法排空；
 [源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`、`get_num_unfinished_requests`
 
 > **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
-> - [d5b36699b](https://github.com/vllm-project/vllm/commit/d5b36699b21bd7b1c4ce01afe218e3c3eaacc27e)（[#51488](https://github.com/vllm-project/vllm/pull/51488)）：`pause_generation` 的 `abort` / `wait` 模式在 main 上会以可重试的 `engine_paused` 错误拒绝暂停期间到达的新请求；`keep` 模式与 sleep 等其他暂停仍不拒绝新请求；KV 清理标记和已打开 streaming session 的输入不受影响。上面状态图里“新请求只排队”在 main 上只对 `keep` 模式成立。
+> - [d5b36699b](https://github.com/vllm-project/vllm/commit/d5b36699b21bd7b1c4ce01afe218e3c3eaacc27e)（[#51488](https://github.com/vllm-project/vllm/pull/51488)）：`pause_generation` 的 `abort` / `wait` 模式在 main 上会以可重试的 `engine_paused` 错误拒绝暂停期间到达的新请求；`keep` 模式与 sleep 等其他暂停仍不拒绝新请求；KV 清理标记和已打开 streaming session 的输入不受影响。上文模式表中 `abort` 行“入队但不调度”与 `wait` 行“未持有 KV 的新 waiting 请求暂停准入”这两格“新请求”列，以及状态图里“新请求只排队”，在 main 上只对 `keep` 模式成立；`abort` / `wait` 下新请求会直接收到 `engine_paused` 错误。
 
 [源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`、`get_num_unfinished_requests`
 
