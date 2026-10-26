@@ -1349,6 +1349,10 @@ flowchart TD
 [源码] `vllm/v1/worker/gpu/cudagraph_utils.py` - `_maybe_ubatch_twin`、
 `_capture_stream` / `capture`
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
+> - [2c19f6793](https://github.com/vllm-project/vllm/commit/2c19f6793e98384ee38ba9b5df425b7378f3ae95)（[#63372](https://github.com/vllm-project/vllm/pull/63372)）：DBO 下 routed-experts capturer 按各 ubatch 的 token 偏移写入，修正微批次互相覆盖的问题。
+> - [66bf93154](https://github.com/vllm-project/vllm/commit/66bf931544202f159cf83c66a812826b7d5c84fb)（[#63476](https://github.com/vllm-project/vllm/pull/63476)）：微批线程出错时报告最先记录的那个失败，而不是编号最小的微批。
+
 ```mermaid
 flowchart LR
     Init["capture descriptors"] --> Table["candidate table by token count + LoRA"]

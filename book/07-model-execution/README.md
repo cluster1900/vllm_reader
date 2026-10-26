@@ -670,6 +670,9 @@ UVA（统一虚拟寻址）帮助设备访问映射后的地址，不表示主�
 
 [源码] `vllm/v1/worker/gpu/buffer_utils.py` - `FusedStagedWriter.apply`
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
+> - [fc2b6ab45](https://github.com/vllm-project/vllm/commit/fc2b6ab45ed3e498b52d74fd880a8b40a65ba3a7)（[#62698](https://github.com/vllm-project/vllm/pull/62698)）：staged write 的 Triton kernel 在 main 上改为二维 grid（行数 × 按 1024 元素切出的 chunk 数），每个 program 只写一个 chunk，不再在单个 program 内循环写完整行；单 group 与 `FusedStagedWriter` 两条路径都改了。
+
 ```mermaid
 flowchart TD
     BASE["GPU base"] --> APPLY["apply-write kernel"]

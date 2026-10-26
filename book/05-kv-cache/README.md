@@ -1190,6 +1190,9 @@ sequenceDiagram
 这组测试说明 partial-tail 不是独立的小优化，而是会穿过调度、spec decode、并行和远端
 KV 生命周期的条件化能力。初学者先掌握完整 block 主线，再读这些测试更稳妥。
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
+> - KV offload 在 main 上有一组修复，本书只讲到 offload 边界，正文不受影响：[1757f6720](https://github.com/vllm-project/vllm/commit/1757f6720c3c1cc130a834b41f264ac22a782289)（[#61390](https://github.com/vllm-project/vllm/pull/61390)） 文件系统发布遇到 EEXIST 视为已存储；[6f5143383](https://github.com/vllm-project/vllm/commit/6f51433838b858a9cd0478b2ffee4d2c610a1712)（[#63010](https://github.com/vllm-project/vllm/pull/63010)） 重启后重置已存储 chunk 下标；[2b1f75c80](https://github.com/vllm-project/vllm/commit/2b1f75c80f79496b313e28362f0856632dfbf5ea)（[#61780](https://github.com/vllm-project/vllm/pull/61780)） store 失败时通知背压检测；[921ed7fa1](https://github.com/vllm-project/vllm/commit/921ed7fa11c41b89ce36e81f50fb3b1c293dc8f7)（[#60810](https://github.com/vllm-project/vllm/pull/60810)） 恢复的 session 重置 block table；[fc0cfcdc0](https://github.com/vllm-project/vllm/commit/fc0cfcdc05b1717cadb17a0e24a6b1f611aec456)（[#61019](https://github.com/vllm-project/vllm/pull/61019)） 修正 EAGLE/MTP group 的 partial tail；[65bc69835](https://github.com/vllm-project/vllm/commit/65bc698356b4b0106630788536b6af6a916308e9)（[#63266](https://github.com/vllm-project/vllm/pull/63266)） 拒绝未对齐的 ChunkedLocal CPU 后缀命中。详见 meta/main-tracking-2026-10-25.md。
+
 ### 5.15.5 v0.32.0 的 checkpoint 与 cache group 边界
 
 新版 `KVCacheSpec.prefix_cacheable` 区分可命中的持久状态与只服务运行的 cache group。

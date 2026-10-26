@@ -572,6 +572,9 @@ flowchart TB
 input budget 与 draft slots、新 block 记录、speculative token 记录和 encoder compute
 budget。这保证最终 `SchedulerOutput` 与预算账本一致。
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
+> - [ceb01b6dd](https://github.com/vllm-project/vllm/commit/ceb01b6ddf6e19510ba138f810d38dd70e665f52)（[#61976](https://github.com/vllm-project/vllm/pull/61976)）：PRIORITY 策略下，若被选中的抢占对象正是当前 running 请求自身，main 改为 `continue` 处理下一个 running 请求，而不是 `break` 结束整段 running 调度。
+
 ## 4.9 第二段：再接纳 WAITING 请求
 
 waiting 循环只有在本轮没有 preempted request、不是 `PAUSED_ALL`，且预算和 sequence
@@ -615,6 +618,9 @@ step-skipped queue，然后继续检查其他请求。若配置为丢弃 stale o
 
 但 sequence slot 已满、预算不足、关闭 chunked prefill 时队首请求放不下，或当前 waiting
 请求 KV 无法分配时，通常执行 `break`。这决定了后面的请求能否绕过队首。
+
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
+> - [43caf5b35](https://github.com/vllm-project/vllm/commit/43caf5b3520b704fa766f00fc2b24da25c78e084)（[#59030](https://github.com/vllm-project/vllm/pull/59030)）：waiting 请求在 encoder 输入/lookahead 检查后 `num_new_tokens == 0` 时，main 改为跳过该请求并重新入队后 `continue`，不再 `break` 终止 waiting 接纳循环。上文 break 条件列表在 main 上少了这一项。
 
 ### 4.9.2 Waiting 分配失败不会立即抢占 running
 

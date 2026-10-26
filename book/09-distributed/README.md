@@ -648,6 +648,9 @@ Executor 收集多个 rank 的回复；不能把“一份最终响应”写成�
 [源码] `vllm/v1/executor/multiproc_executor.py` - `MultiprocExecutor._get_output_rank`、
 `collective_rpc`
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
+> - [7050ef881](https://github.com/vllm-project/vllm/commit/7050ef881ff0835f6890a47db1859a24c65481d6)（[#58466](https://github.com/vllm-project/vllm/pull/58466)）：main 移除了 batch-sharded sampling 与 adaptive verification（自适应 spec 验证）不能同时开启的配置限制；BatchSharder 在开启 adaptive verification 时改用实际接纳的 draft token 数切分。
+
 [源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.sample`
 
 ### 9.6.7 PP 的气泡
