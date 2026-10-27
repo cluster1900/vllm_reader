@@ -2,8 +2,8 @@
 
 - 当前阅读基线：`v0.32.0` / `5df63a7203cdb9328d824a27b682e77c7b9928be`（基线 003），正文不变。上游仍无新 release（最新 v0.32.0，2026-10-18）。
 - 跟踪区间：`vllm-project/vllm` `main` `a7407ab44557802ca32a0ba2c2707362d7d21563`..`ed1a7307950ab5e6593d25123579ed7ca998b350`（[#63689](https://github.com/vllm-project/vllm/pull/63689)，2026-10-27 08:24 UTC+8），共 101 个提交。接续 [2026-10-25 记录](main-tracking-2026-10-25.md)。
-- 方法：在只读 partial clone 中逐条 `git show` 阅读下表提交的非测试源码 diff；只记录读过 diff 的条目。没有运行上游代码、GPU 或模型。其余提交为 CI、文档、XPU/ROCm 专用 kernel、MoE 调优表和具体模型修复，与本书章节无关，未列入。
-- 结论：v0.32.0 正文对 v0.32.0 本身仍成立；与 main 行为冲突的三处（ch05 EAGLE 末块回退、ch06/ch07 staged write 内容搬运、ch08 AsyncScheduler placeholder/cache 边界）在原段落后加“main 上的变化（未发版）”注记，升级基线时改写正文。
+- 方法：在只读 partial clone 中逐条 `git show` 阅读下表提交的非测试源码 diff；只记录读过 diff 的条目。没有运行上游代码、GPU 或模型。影响表共 43 行（#63475 并入 #62936 行）。其余 57 个提交已按“是否修改书中 `[源码]` 锚点文件”逐条复扫：命中的只有 `vllm/envs.py` 新增变量、`model_executor/models/registry.py` 新增模型、`launchers/launcher.py` 的 `serve_http`（书只锚定 `terminate_if_errored`），均不涉及书中描述的符号；其余为 CI、文档、XPU/ROCm 专用 kernel、MoE 调优表和具体模型修复。
+- 结论：v0.32.0 正文对 v0.32.0 本身仍成立；共加 10 处“main 上的变化（未发版）”注记：新增注记块 7 处（ch03 §3.6.2、ch05 §5.6 时序图、ch07 KV init 段，均为 #62330；ch05 EAGLE 末块回退 #61589；ch06 staged write #63633；ch08 §8.4 #61589；ch09 §9.9.3 #61994），在既有注记块追加条目 3 处（ch05 KV offload；ch07 #63633；ch09 batch-shard #63554）。其中与 v0.32.0 正文描述冲突、升级时须改写正文的是 #61589、#63633、#62330。
 
 ## 影响表
 
@@ -47,10 +47,16 @@
 | [50a184f43](https://github.com/vllm-project/vllm/commit/50a184f43583dec8942a0494d1fec4f4acc4a2e9) / [#63256](https://github.com/vllm-project/vllm/pull/63256) | RL 权重同步 | `ParamMeta` 新增 `owners`/`mesh_shape`/`placements`（`Replicate`/`Shard`）声明权重归属与布局 | 无章节提及 | 仅清单 |
 | [33a73daf1](https://github.com/vllm-project/vllm/commit/33a73daf1771eaa1014d1f272b4ae6815ee62d7e) / [#62936](https://github.com/vllm-project/vllm/pull/62936) | kernel | persistent TopK 在候选溢出时走精确恢复路径（新增 `persistent_topk_overflow.cuh`）；#63475 补 CTA 同步 | 无章节提及 | 仅清单 |
 | [39e6a1aaf](https://github.com/vllm-project/vllm/commit/39e6a1aafcaea1b90c515dacfc3a20835756758c) / [#63622](https://github.com/vllm-project/vllm/pull/63622) | benchmark | `vllm bench forward` 默认计入 MTP/EAGLE 等 drafting，`--exclude-drafter` 只计目标模型 | ch10 实验方法 | 仅清单 |
+| [3e75ccba2](https://github.com/vllm-project/vllm/commit/3e75ccba298d0c7f045f35c39078cec74184b799) / [#62330](https://github.com/vllm-project/vllm/pull/62330) | KV 初始化 / DCP | `EngineCore._initialize_kv_caches` 在 profiling 前先调用新函数 `get_global_kv_cache_groups`（从 `get_kv_cache_configs` 中拆出合并 spec 与分组），再 `adjust_dcp_kv_cache_interleave_size(global_kv_cache_groups)`，并经 `set_kv_cache_layout(layout.name, cp_kv_cache_interleave_size)` 下发；`get_kv_cache_configs` 新增 `global_kv_cache_groups` 参数，Executor/WorkerBase 的 `set_kv_cache_layout` 增加 interleave 参数；`ensure_kv_transfer_initialized` 不再调整 interleave | ch03 §3.6.2；ch05 §5.6 时序图；ch07 KV init 段 | 注记 |
+| [9e3db4887](https://github.com/vllm-project/vllm/commit/9e3db48873b87a3c232f16991675d33abb49b72b) / [#61685](https://github.com/vllm-project/vllm/pull/61685) | Worker 初始化 | `Worker.init_device` 在加载权重前调用 `maybe_init_localized_resources`（FlashInfer CuTeDSL NVFP4 MoE 的 locality-domain 资源；由默认关闭的 `VLLM_USE_LOCALITY_DOMAINS` 等环境变量控制） | ch07 init_device 段 | 仅清单 |
+| [0f6b26191](https://github.com/vllm-project/vllm/commit/0f6b26191064384aa35060c87f4ed570c7875e66) / [#61879](https://github.com/vllm-project/vllm/pull/61879) | Attention 层 | `Attention.forward` 在 query 已是 FP8 时不再做 query quant（随 Muse Spark Open 支持引入） | ch06 Attention 段 | 仅清单 |
+| [6597ceafb](https://github.com/vllm-project/vllm/commit/6597ceafbc50d4a7fde9d8ef2d207989732758f7) / [#63638](https://github.com/vllm-project/vllm/pull/63638) | attention backend 注册 | `AttentionBackendEnum` 新增 `KIMI_K3_KV_BALANCED_MLA`（opt-in） | ch06 backend 注册段 | 仅清单 |
+| [85e199e60](https://github.com/vllm-project/vllm/commit/85e199e60ca87a4b136aeaa0842541139b94c778) / [#62091](https://github.com/vllm-project/vllm/pull/62091) | 并行组 | `initialize_model_parallel`：Engram 表非 CPU offload、`embedding_across_dp` 且 TP=1 时 engram DP 组取整个 DP | ch09（Engram 未展开） | 仅清单 |
 
 ## 升级清单（下一个 tag 发版后）
 
 - [ ] 确认新 tag 是否包含上表各提交。
+- [ ] ch03 / ch05 / ch07：按 #62330 更新 KV 初始化步骤与 §5.6 时序图（profiling 前先分组并定 DCP interleave，`set_kv_cache_layout` 带 interleave）。
 - [ ] ch05：按 #61589 改写 EAGLE 末块回退与 Mamba checkpoint 算例（默认 lookahead hash 不回退；connector 或 `disable_lookahead_block_hashes` 时保留旧行为）；按 KV offload 条目复核 §5.15.4。
 - [ ] ch08：按 #61589 把 §8.4.2–8.4.3 的源码锚点从 `AsyncScheduler._update_request_with_output` 改到 `Scheduler._update_request_with_output` / `update_from_output`，边界改为 `num_in_flight_tokens`。
 - [ ] ch06 / ch07：按 #63633 改写 staged write 的内容搬运（内容也经 UVA 缓冲），更新 §7.12.1 流程图的“non-blocking H2D”节点。

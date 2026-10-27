@@ -596,6 +596,9 @@ sequenceDiagram
 
 > **读图方法：** 这是“从字节数到 block 数”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-27.md。
+> - [3e75ccba2](https://github.com/vllm-project/vllm/commit/3e75ccba298d0c7f045f35c39078cec74184b799)（[#62330](https://github.com/vllm-project/vllm/pull/62330)）：main 把图中 `U->>U: merge specs and build groups` 提前到 `determine_available_memory()` 之前：EngineCore 调用新函数 `get_global_kv_cache_groups`，用分组结果确定 NIXL P/D 的 DCP interleave（`adjust_dcp_kv_cache_interleave_size`），`set_kv_cache_layout` 同时下发 layout 与 interleave；之后 `get_kv_cache_configs(specs, bytes, global_kv_cache_groups)` 不再自行分组。
+
 ### 5.6.4 `num_blocks` 与有效并发
 
 粗略并发不能只用“总块数除以单请求按最大长度所需的块数”，因为每个请求可能同时

@@ -503,6 +503,9 @@ KV cache 的真实规格来自执行侧模型层，容量又依赖加载模型�
 6. 调用 executor 初始化 cache。
 7. compile 或 warm up 模型。
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-27.md。
+> - [3e75ccba2](https://github.com/vllm-project/vllm/commit/3e75ccba298d0c7f045f35c39078cec74184b799)（[#62330](https://github.com/vllm-project/vllm/pull/62330)）：main 在第 2、3 步之间先用 `get_global_kv_cache_groups` 合并各 worker spec 并分组，据此 `adjust_dcp_kv_cache_interleave_size`，再通过 `set_kv_cache_layout(layout, cp_kv_cache_interleave_size)` 把 layout 与 DCP interleave 一起下发，然后才 profile；第 4 步 `get_kv_cache_configs` 直接使用这组 groups。
+
 第 05 章会展开 block 生命周期；这里要记住的是 Scheduler 创建之前，内存契约必须确定。
 
 ### 3.6.3 `step_fn` 在启动时绑定

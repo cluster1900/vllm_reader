@@ -573,6 +573,9 @@ connector，然后调用 Runner `initialize_kv_cache()`。warmup 覆盖 compile 
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.compile_or_warm_up_model`
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-27.md。
+> - [3e75ccba2](https://github.com/vllm-project/vllm/commit/3e75ccba298d0c7f045f35c39078cec74184b799)（[#62330](https://github.com/vllm-project/vllm/pull/62330)）：NIXL P/D 的 DCP interleave 原在 `initialize_from_config()` 初始化 KV connector（`ensure_kv_transfer_initialized`）时由各 worker 调整；main 改为 EngineCore 在 profiling 前统一确定，worker 只在 `set_kv_cache_layout` 中赋值，sparse indexer 也不再懒加载缓存该值。
+
 ## 7.11 SchedulerOutput 到长期请求状态
 
 `SchedulerOutput` 是本 step 增量指令，不是完整请求数据库。Runner 将完成/抢占、新请求、增量 blocks
