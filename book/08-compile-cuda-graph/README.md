@@ -488,6 +488,9 @@ sequenceDiagram
 
 [测试] `tests/v1/core/test_async_scheduler.py` - `test_kv_pressure_preemption_with_inflight_output`
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-27.md。
+> - [2fb320d83](https://github.com/vllm-project/vllm/commit/2fb320d8304381e224dd27fbf8c13c30b4e1020f)（[#61589](https://github.com/vllm-project/vllm/pull/61589)）：main 删除了 `AsyncScheduler._update_request_with_output`。placeholder 扣减移入 `Scheduler._update_request_with_output`（仅非 stale 且 `num_output_placeholders>0` 时，仍断言不小于零），§8.4.3 的 `cache_blocks` 调用移到 `Scheduler.update_from_output`，边界改为 `num_computed_tokens - num_in_flight_tokens`，且有 spec token 的同步调度也会执行。stale 输出不扣减的结论不变，源码锚点需改。
+
 ```mermaid
 flowchart TD
     O["output returns"] --> S{"is_stale?"}

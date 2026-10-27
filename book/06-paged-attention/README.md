@@ -443,6 +443,9 @@ UVA 不是所有数据都免拷贝的保证；须同时检查平台能力和 ten
 
 [源码] `vllm/v1/worker/gpu/buffer_utils.py` - `StagedWriteTensor.apply_write`、`FusedStagedWriter.apply`
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-27.md。
+> - [78e2f7960](https://github.com/vllm-project/vllm/commit/78e2f796019384b07c9f9b6d8a371e3ea958b33a)（[#63633](https://github.com/vllm-project/vllm/pull/63633)）：main 删除了写入内容的 `async_tensor_h2d` 分支。`StagedWriteTensor.apply_write` 与 `FusedStagedWriter.apply` 都用 `UvaBufferPool.copy_chunks_to_uva` 把暂存内容拼入轮转 UVA 缓冲，kernel 经 UVA 读取；上文“写入内容通过 H2D 复制到设备”“内容不总是单独 H2D”在 main 上应改为“内容与元数据都经 UVA 缓冲（无 UVA 时由 `NonUvaBuffer` 拷贝）”。
+
 [源码] `vllm/v1/worker/gpu/block_table.py` - `BlockTables.apply_staged_writes`、`gather_block_tables`
 
 ### 6.6.3 为什么 dummy 行必须清零
