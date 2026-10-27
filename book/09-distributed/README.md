@@ -650,6 +650,7 @@ Executor 收集多个 rank 的回复；不能把“一份最终响应”写成�
 
 > **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
 > - [7050ef881](https://github.com/vllm-project/vllm/commit/7050ef881ff0835f6890a47db1859a24c65481d6)（[#58466](https://github.com/vllm-project/vllm/pull/58466)）：main 移除了 batch-sharded sampling 与 adaptive verification（自适应 spec 验证）不能同时开启的配置限制；BatchSharder 在开启 adaptive verification 时改用实际接纳的 draft token 数切分。
+> - main 2026-10-25～10-27：[26cbb47d4](https://github.com/vllm-project/vllm/commit/26cbb47d48e6b1de8ab2b4bc1c839821ffcfd56b)（[#63554](https://github.com/vllm-project/vllm/pull/63554)） 让 probabilistic draft 的 draft logits 缓存也按 batch-shard 分片：开启 batch-sharded sampling、无 draft watermarker 且 speculator 支持时，每个 TP rank 只分配 `cdiv(max_num_reqs, TP)` 行，只存自己负责验证的请求（owner `req_state_idx % TP`，行 `req_state_idx // TP`）；custom rejection sampler 不能读分片 logits。
 
 [源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.sample`
 
@@ -957,6 +958,9 @@ prefill 在后，再按 request 与原片段起点排序。切片和正确重排
 [源码] `vllm/v1/worker/gpu/pcp_manager.py` - `PCPManager.validate_config`、`replicated_requests`、`_iter_rank_chunks`
 
 [源码] `vllm/config/parallel.py` - `ParallelConfig.pcp_shard_decode_requests`
+
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-27.md。
+> - [af6665b5d](https://github.com/vllm-project/vllm/commit/af6665b5dd2098898dce52b9e1c5005863738024)（[#61994](https://github.com/vllm-project/vllm/pull/61994)）：DeepSeek-V4.1 模型层原先在 PCP 下拒绝一切 speculative decoding；main 改为允许固定长度 DSpark（其他方法和 adaptive verification 仍报错）。有 spec 时 compressor ring 在每个 PCP rank 聚合完整 tail 以支持拒绝回滚，`PCPManager.sync_drafts` 从 PCP rank 0 广播 draft tokens 与 draft logits，保证各 rank 验证同一提议。上文 `validate_config` 的方法级限制不变。
 
 PCP+PP 时，非末 PP rank 的 `sample_tokens` 恢复 global batch 后接收末 rank 输出；
 因此 PP 输出同步使用全局请求顺序，不是每个 PCP rank 的局部行序。

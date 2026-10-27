@@ -596,6 +596,9 @@ sequenceDiagram
 
 > **读图方法：** 这是“从字节数到 block 数”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-27.md。
+> - [3e75ccba2](https://github.com/vllm-project/vllm/commit/3e75ccba298d0c7f045f35c39078cec74184b799)（[#62330](https://github.com/vllm-project/vllm/pull/62330)）：main 把图中 `U->>U: merge specs and build groups` 提前到 `determine_available_memory()` 之前：EngineCore 调用新函数 `get_global_kv_cache_groups`，用分组结果确定 NIXL P/D 的 DCP interleave（`adjust_dcp_kv_cache_interleave_size`），`set_kv_cache_layout` 同时下发 layout 与 interleave；之后 `get_kv_cache_configs(specs, bytes, global_kv_cache_groups)` 不再自行分组。
+
 ### 5.6.4 `num_blocks` 与有效并发
 
 粗略并发不能只用“总块数除以单请求按最大长度所需的块数”，因为每个请求可能同时
@@ -1192,6 +1195,7 @@ KV 生命周期的条件化能力。初学者先掌握完整 block 主线，再�
 
 > **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
 > - KV offload 在 main 上有一组修复，本书只讲到 offload 边界，正文不受影响：[1757f6720](https://github.com/vllm-project/vllm/commit/1757f6720c3c1cc130a834b41f264ac22a782289)（[#61390](https://github.com/vllm-project/vllm/pull/61390)） 文件系统发布遇到 EEXIST 视为已存储；[6f5143383](https://github.com/vllm-project/vllm/commit/6f51433838b858a9cd0478b2ffee4d2c610a1712)（[#63010](https://github.com/vllm-project/vllm/pull/63010)） 重启后重置已存储 chunk 下标；[2b1f75c80](https://github.com/vllm-project/vllm/commit/2b1f75c80f79496b313e28362f0856632dfbf5ea)（[#61780](https://github.com/vllm-project/vllm/pull/61780)） store 失败时通知背压检测；[921ed7fa1](https://github.com/vllm-project/vllm/commit/921ed7fa11c41b89ce36e81f50fb3b1c293dc8f7)（[#60810](https://github.com/vllm-project/vllm/pull/60810)） 恢复的 session 重置 block table；[fc0cfcdc0](https://github.com/vllm-project/vllm/commit/fc0cfcdc05b1717cadb17a0e24a6b1f611aec456)（[#61019](https://github.com/vllm-project/vllm/pull/61019)） 修正 EAGLE/MTP group 的 partial tail；[65bc69835](https://github.com/vllm-project/vllm/commit/65bc698356b4b0106630788536b6af6a916308e9)（[#63266](https://github.com/vllm-project/vllm/pull/63266)） 拒绝未对齐的 ChunkedLocal CPU 后缀命中。详见 meta/main-tracking-2026-10-25.md。
+> - main 2026-10-25～10-27（至 ed1a73079）继续修改 KV offload，同样不影响正文：[fe5fe8ba5](https://github.com/vllm-project/vllm/commit/fe5fe8ba5fb9412ac6deafd192ae8b7c466b96c5)（[#61961](https://github.com/vllm-project/vllm/pull/61961)） 新增 `sync_load_budget_bytes`，预算内的 CPU 小命中在本步同步加载；[e113018f5](https://github.com/vllm-project/vllm/commit/e113018f5067045ac92de3949b8c302439abb226)（[#61050](https://github.com/vllm-project/vllm/pull/61050)） CPU LRU 按请求 rank 与位置排序，`CachePolicy.insert` 新增 `req_context`；[c13d4a5a4](https://github.com/vllm-project/vllm/commit/c13d4a5a46c2c663b728aa21af7eb00ece6bd698)（[#57646](https://github.com/vllm-project/vllm/pull/57646)） finalize 时暴露已处理前缀；[14aefcd4f](https://github.com/vllm-project/vllm/commit/14aefcd4f907ff91cb29b9e80bd9c6a5568944bb)（[#62929](https://github.com/vllm-project/vllm/pull/62929)） cache reset 后暂停 promotion 直到 job 回报；[a64fc9408](https://github.com/vllm-project/vllm/commit/a64fc94081cfa3f0061a87e6c0646ed472552a1b)（[#60574](https://github.com/vllm-project/vllm/pull/60574)） 同步 reset/重载时保留新 load；[1d3f05aad](https://github.com/vllm-project/vllm/commit/1d3f05aadb9c100c9665dabc3bb188fcd3e7d0e8)（[#63652](https://github.com/vllm-project/vllm/pull/63652)） 不存含 null block 的 sliding-window chunk；[8c6e770a1](https://github.com/vllm-project/vllm/commit/8c6e770a1ca9a522fa32f91995ba241e21e5a88c)（[#63655](https://github.com/vllm-project/vllm/pull/63655)） 对象 key 按 `blocks_per_chunk` 分命名空间；P2P 层 [963399729](https://github.com/vllm-project/vllm/commit/9633997299f29d54f1da38fb4a37e7d1a6535005)（[#63781](https://github.com/vllm-project/vllm/pull/63781)）（分模式超时 10s/30s）、[51d2a8559](https://github.com/vllm-project/vllm/commit/51d2a855942907366bc15ba72d76130d0fc4346b)（[#63708](https://github.com/vllm-project/vllm/pull/63708)）（send 不阻塞）、[8a4b018f1](https://github.com/vllm-project/vllm/commit/8a4b018f1c1b5ebf195072a00196a915c4e534b3)（[#63628](https://github.com/vllm-project/vllm/pull/63628)）、[f682f1dc3](https://github.com/vllm-project/vllm/commit/f682f1dc32586f43c3917c4516b8f95f7bf0471d)（[#63664](https://github.com/vllm-project/vllm/pull/63664)）、[71294c2e9](https://github.com/vllm-project/vllm/commit/71294c2e9ac41ed710b6eb4ca41cba3793705345)（[#63498](https://github.com/vllm-project/vllm/pull/63498)） 为失败处理修复。详见 meta/main-tracking-2026-10-27.md。
 
 ### 5.15.5 v0.32.0 的 checkpoint 与 cache group 边界
 
@@ -1222,6 +1226,9 @@ checkpoint 位置也有一处容易多退一个边界的细节：非 EAGLE 先�
 对齐；EAGLE 使用 prompt 全长作为 proof limit，再减一个对齐单位。例：长度 128、
 对齐 32，EAGLE 返回 96，而不是先减 1 后再退到 64。此为纯函数的源码算例，不是
 GPU 运行结果。
+
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-27.md。
+> - [2fb320d83](https://github.com/vllm-project/vllm/commit/2fb320d8304381e224dd27fbf8c13c30b4e1020f)（[#61589](https://github.com/vllm-project/vllm/pull/61589)）：main 上 EAGLE 类方法开启 prefix caching 且未配置 KV connector 时，每个 block hash 还覆盖块后 `num_prefill_lookahead_tokens` 个 token，Scheduler 因此关闭 EAGLE 末块回退，Mamba checkpoint 也不再按上文“EAGLE 减一个对齐单位”计算（`num_hash_lookahead_tokens>0` 时 `drop_eagle_block` 为假）。上面 128/32→96 的算例只适用于配置 KV connector 或 `disable_lookahead_block_hashes=True` 的旧路径。`BlockStored` 事件同时新增 `lookahead_token_ids`，外部 KV 事件消费者需用相同设置。
 
 HiSparse host tier 有私有 pool：命中可能比设备 group 更长，分配时只附着本地与外部命中
 实际覆盖的部分。host CoW 不进入普通 worker GPU block-copy 通道，不能画成所有 group
