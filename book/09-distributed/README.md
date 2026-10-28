@@ -240,6 +240,10 @@ $$
 
 [源码] `vllm/config/parallel.py` - `ParallelConfig` 的 PCP/DCP 校验、`__post_init__`
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-27～10-28（ed1a73079..0106c8abc）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-28.md。
+> - [4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：`ParallelConfig.numa_bind` 默认由 `False` 改为 `None`（`parallel.py` L329–L344 @ `0106c8abc`）。`None` 时在多 NUMA、`numactl`、spawn、mp/uni 等条件满足时 best-effort 自动绑定（软 memory preference，`_numa_bind_auto`）；显式 `True` 为严格绑定（失败即启动错误），`False` 关闭。
+
+
 ### 9.3.2 rank 的逻辑布局是一个多维张量
 
 `initialize_model_parallel` 把 ranks 解释为：
@@ -651,6 +655,7 @@ Executor 收集多个 rank 的回复；不能把“一份最终响应”写成�
 > **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
 > - [7050ef881](https://github.com/vllm-project/vllm/commit/7050ef881ff0835f6890a47db1859a24c65481d6)（[#58466](https://github.com/vllm-project/vllm/pull/58466)）：main 移除了 batch-sharded sampling 与 adaptive verification（自适应 spec 验证）不能同时开启的配置限制；BatchSharder 在开启 adaptive verification 时改用实际接纳的 draft token 数切分。
 > - main 2026-10-25～10-27：[26cbb47d4](https://github.com/vllm-project/vllm/commit/26cbb47d48e6b1de8ab2b4bc1c839821ffcfd56b)（[#63554](https://github.com/vllm-project/vllm/pull/63554)） 让 probabilistic draft 的 draft logits 缓存也按 batch-shard 分片：开启 batch-sharded sampling、无 draft watermarker 且 speculator 支持时，每个 TP rank 只分配 `cdiv(max_num_reqs, TP)` 行，只存自己负责验证的请求（owner `req_state_idx % TP`，行 `req_state_idx // TP`）；custom rejection sampler 不能读分片 logits。
+> - main 2026-10-27～10-28：[820be160ce](https://github.com/vllm-project/vllm/commit/820be160ce0dc9098deaa2a4c6b5fc534c43881d)（[#64151](https://github.com/vllm-project/vllm/pull/64151)） 在上述分片条件上增加 `prefill_context_parallel_size == 1`（`vllm/v1/worker/gpu/spec_decode/speculator.py` L282–L287 @ `0106c8abc`）。PCP 开启时关闭 batch-sharded draft logits，因为 `PCPManager.sync_drafts` 按 request state 整行索引 draft logits。详见 meta/main-tracking-2026-10-28.md。
 
 [源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.sample`
 
