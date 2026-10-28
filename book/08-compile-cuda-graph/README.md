@@ -1660,6 +1660,9 @@ profile 得到的非 KV 占用，`graph reserve` 是实际应用的 graph 估算
 `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1`；禁用该项只改变估算是否扣除，不代表 graph
 运行时不占显存。估算资格还检查 CUDA/ROCm 或 XPU 平台以及非 NONE graph mode。
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-27～10-28（ed1a73079..0106c8abc）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-28.md。
+> - [dc4d977d97](https://github.com/vllm-project/vllm/commit/dc4d977d97f9cfaa7c6dc2de7fd94a77204a6914)（[#63778](https://github.com/vllm-project/vllm/pull/63778)）：Worker 侧对 V2 runner 不再把“`cudagraph_mode != NONE`（或 encoder 特例）”作为调用 `profile_cudagraph_memory` 的前提；改为 `use_v2_model_runner or cudagraph_mode != NONE`（`gpu_worker.py` L716–L720 @ `0106c8abc`）。上文“估算资格还检查……非 NONE graph mode”在 V2 路径上需改为“由 runner 决定是否 profile（含 encoder graph）”。
+
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`
 
 [源码] `vllm/envs.py` - `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS`

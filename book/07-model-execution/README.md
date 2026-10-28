@@ -575,6 +575,7 @@ connector，然后调用 Runner `initialize_kv_cache()`。warmup 覆盖 compile 
 
 > **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-27.md。
 > - [3e75ccba2](https://github.com/vllm-project/vllm/commit/3e75ccba298d0c7f045f35c39078cec74184b799)（[#62330](https://github.com/vllm-project/vllm/pull/62330)）：NIXL P/D 的 DCP interleave 原在 `initialize_from_config()` 初始化 KV connector（`ensure_kv_transfer_initialized`）时由各 worker 调整；main 改为 EngineCore 在 profiling 前统一确定，worker 只在 `set_kv_cache_layout` 中赋值，sparse indexer 也不再懒加载缓存该值。
+> - main 2026-10-27～10-28：[dc4d977d97](https://github.com/vllm-project/vllm/commit/dc4d977d97f9cfaa7c6dc2de7fd94a77204a6914)（[#63778](https://github.com/vllm-project/vllm/pull/63778)）：`Worker.determine_available_memory` 在 V2 runner 下只要平台为 CUDA-alike/XPU 就调用 `model_runner.profile_cudagraph_memory()`（`gpu_worker.py` L715–L720 @ `0106c8abc`），不再在 Worker 侧要求 `cudagraph_mode != NONE` 或展开 `cudagraph_mm_encoder` 条件；是否真正 profile 由 runner 自决（encoder graph 不依赖 cudagraph_mode）。[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：Worker/EngineCore 子进程可通过 `numa_utils.configure_subprocess` 做 best-effort NUMA 绑定（默认 `numa_bind=None`）。详见 meta/main-tracking-2026-10-28.md。
 
 ## 7.11 SchedulerOutput 到长期请求状态
 
