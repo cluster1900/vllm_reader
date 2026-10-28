@@ -2,8 +2,8 @@
 
 - 当前阅读基线：`v0.32.0` / `5df63a7203cdb9328d824a27b682e77c7b9928be`（基线 003），正文不变。上游仍无新 release（最新 v0.32.0，2026-10-18）。
 - 跟踪区间：`vllm-project/vllm` `main` `ed1a7307950ab5e6593d25123579ed7ca998b350`..`0106c8abce0f8fec21d2871e5b7404acd9c75065`（[#61831](https://github.com/vllm-project/vllm/pull/61831)，2026-10-28 08:54 UTC+8），共 103 个提交。接续 [2026-10-27 记录](main-tracking-2026-10-27.md)。
-- 方法：在只读 partial clone 中逐条 `git show` 阅读下表提交的非测试源码 diff；只记录读过 diff 的条目。没有运行上游代码、GPU 或模型。影响表共 36 行。其余 67 个提交已按“是否修改书中 `[源码]` 锚点文件”逐条复扫：命中但不改书中描述符号的（如 `vllm/config/vllm.py` 配置边角、`vllm/v1/worker/utils.py` 的 KV 视图拷贝、`topk_topp_sampler` 的 nvcc 回退、`parallel_state`/cudagraph stream、NIXL/Mooncake connector 内部）列入“仅清单”或本节“不受影响/边角”；其余为 CI、文档、ROCm/XPU 专用、具体模型 recipe 与 AMD 镜像。
-- 结论：v0.32.0 正文对 v0.32.0 本身仍成立；共加/追加“main 上的变化（未发版）”注记：ch05（prefix cache API #60960；KVCR #60469/#63889；HiSparse backend #62592）、ch07（NUMA 默认 #61258；MRV2 CUDA graph profile 门控 #63778）、ch08（同 #63778）、ch09（PCP 关闭 draft logits 分片 #64151）。其中与 v0.32.0 正文描述冲突、升级时须改写正文的是 #60960、#64151、#63778、#61258。
+- 方法：在只读 partial clone 中逐条 `git show` 阅读下表提交的非测试源码 diff；只记录读过 diff 的条目。没有运行上游代码、GPU 或模型。影响表共 33 行。其余 67 个提交已按“是否修改书中 `[源码]` 锚点文件”逐条复扫：命中但不改书中描述符号的（如 `vllm/config/vllm.py` 配置边角、`vllm/v1/worker/utils.py` 的 KV 视图拷贝、`topk_topp_sampler` 的 nvcc 回退、`parallel_state`/cudagraph stream、NIXL/Mooncake connector 内部）列入“仅清单”或本节“不受影响/边角”；其余为 CI、文档、ROCm/XPU 专用、具体模型 recipe 与 AMD 镜像。
+- 结论：v0.32.0 正文对 v0.32.0 本身仍成立；共加/追加“main 上的变化（未发版）”注记：ch05（prefix cache API #60960；KVCR #60469/#63889；HiSparse backend #62592）、ch07（NUMA 默认 #61258；MRV2 CUDA graph profile 门控 #63778）、ch08（同 #63778）、ch09（PCP 关闭 draft logits 分片 #64151；NUMA #61258）、ch10（实验合同中的 NUMA/`numa_bind` 默认 #61258）。其中与 v0.32.0 正文描述冲突、升级时须改写正文的是 #60960、#64151、#63778、#61258。
 
 ## 影响表
 
@@ -14,7 +14,7 @@
 | [43111fd1f0](https://github.com/vllm-project/vllm/commit/43111fd1f0c3135ff671e25e2e85238aa05743d0) / [#53104](https://github.com/vllm-project/vllm/pull/53104) | spec decode（EAGLE） | `_should_share`：若 draft/target 的 `weight` 不是 Tensor（量化层用 `weight_packed`/`qweight`），不再 `torch.equal`，返回 False 保留 draft 自己的 lm_head，避免误共享量化头 | 书中未展开 EAGLE 共享 lm_head | 仅清单 |
 | [e7fa26d5c8](https://github.com/vllm-project/vllm/commit/e7fa26d5c8d94636a4d0525e1a2462cb661ea331) / [#63996](https://github.com/vllm-project/vllm/pull/63996) | spec decode（DeepSeek） | 抽出 `needs_mtp_hidden_buffer`（DSpark 跳过 MTP hidden buffer）；`CommonAttentionMetadata.invalidate_cached_layout` 在 in-place 改 `seq_lens` 后丢弃缓存布局；tilelang MHC kernel 改进 | 书中未展开 #41834 / DSpark buffer | 仅清单 |
 | [c6f6e6a983](https://github.com/vllm-project/vllm/commit/c6f6e6a9835c3e4df9c06bb6c564c7d866be9f22) / [#63841](https://github.com/vllm-project/vllm/pull/63841) | spec decode（DSpark） | `GlmMoeDsaForCausalLM`：draft 方法为 `dspark`（与 `mtp` 一样）时不再把未设置的 `spec_config.kv_cache_dtype` 强制为 `auto`，从而可沿用目标的 fp8 KV cache（声称每 rank 约省 5.38 GB） | ch09 DSpark 未写 dtype | 仅清单 |
-| [e1e77a279d](https://github.com/vllm-project/vllm/commit/e1e77a279d68a9601be062cb267a5f9911c422c7) / [#60960](https://github.com/vllm-project/vllm/pull/60960) | prefix cache | `Request.get_skip_reading_prefix_cache` 改为 `get_prefix_cache_hit_limit` / `get_max_cache_hit_length`：`prefix_cache_lookup_enabled` 看 `prefix_cache_hit_limit != 0`；有 `prompt_logprobs`/`prompt_logprob_token_ids` 时上限为 `prompt_logprob_start or 0`（显式 `skip_reading_prefix_cache=False` 时可复用评分起点之前的本地前缀）；KV connector 外部命中不受该上限约束（`skip_reading_external_kv`） | ch05 §5.12.1–5.12.2 | 注记（与正文冲突） |
+| [e1e77a279d](https://github.com/vllm-project/vllm/commit/e1e77a279d68a9601be062cb267a5f9911c422c7) / [#60960](https://github.com/vllm-project/vllm/pull/60960) | prefix cache | `Request.get_skip_reading_prefix_cache` 改为 `get_prefix_cache_hit_limit` / `get_max_cache_hit_length`：`prefix_cache_lookup_enabled` 看 `prefix_cache_hit_limit != 0`；有 `prompt_logprobs`/`prompt_logprob_token_ids` 时上限为 `prompt_logprob_start or 0`（显式 `skip_reading_prefix_cache=False` 时可复用评分起点之前的本地前缀）；一旦 `prefix_cache_hit_limit is not None` 则 `skip_reading_external_kv` 为 True，调度器跳过外部 KV connector 命中（`scheduler.py` L1132–L1133），仅允许有界的本地前缀复用 | ch05 §5.12.1–5.12.2 | 注记（与正文冲突） |
 | [e3883b7a7e](https://github.com/vllm-project/vllm/commit/e3883b7a7ec41f3117dfb7ca764746ec80a24d87) / [#60469](https://github.com/vllm-project/vllm/pull/60469) | KV offload（KVCR） | KVCR manager 在 store 完成时按请求聚合 `completed_prefixes`，跨共享前缀 key 保序，由 scheduler finalize 请求 recency，不再对已完成前缀逐块 touch | ch05 §5.15.4 | 注记（汇总） |
 | [36f5ff3172](https://github.com/vllm-project/vllm/commit/36f5ff3172eb75433e54e496d64c473e951f8ecc) / [#63889](https://github.com/vllm-project/vllm/pull/63889) | KV offload（KVCR） | 降低 KVCR adapter 开销（framework pin / key adapter 路径整理，少一次多余遍历） | ch05 §5.15.4 | 注记（汇总） |
 | [4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc) / [#61258](https://github.com/vllm-project/vllm/pull/61258) | Core / NUMA | `ParallelConfig.numa_bind` 默认由 `False` 改为 `None`：环境允许时 best-effort 自动绑定（软 mem preference、`_numa_bind_auto`）；`True` 仍为严格失败即退出，`False` 关闭。`numa_utils.configure_subprocess` 在 `None` 时探测 | ch07 Worker 启动；ch09 ParallelConfig；ch10 NUMA 检查项 | 注记 |
@@ -45,7 +45,7 @@
 
 ## 不受影响（本区间相对书中锚点）
 
-- ch01–ch04、ch06、ch10：本区间无改写其 v0.32.0 正文锚点符号的提交；ch06 staged-write 正文仍以既有 #63633 注记为准，本区间无新冲突。
+- ch01–ch04、ch06：本区间无改写其 v0.32.0 正文锚点符号的提交；ch06 staged-write 正文仍以既有 #63633 注记为准，本区间无新冲突。ch10 仅在实验合同的 NUMA 检查项旁追加 #61258 注记（不改 v0.32.0 正文锚点）。
 - ch02 生命周期总览、ch04 调度主路径：无直接符号变更。
 - Rust Frontend 全批次：书中不覆盖，升级清单不要求改章节正文。
 

@@ -626,6 +626,8 @@ size 已经就绪。第 8 章说明 compile range 与 CUDA Graph descriptor 都�
 - container image 或依赖 lock；
 - power/clock policy 与同机干扰任务。
 
+> **main 上的变化（未发版）**：[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：记录环境时须写明 `ParallelConfig.numa_bind`（`parallel.py` L329–L344 @ `0106c8abc`）。默认 `None` 为 best-effort 自动绑定（多 NUMA、`numactl`、spawn、mp/uni 等条件满足时软 memory preference）；显式 `True` 严格绑定（失败即启动错误），`False` 关闭。仅写“NUMA 拓扑”而不写该开关的取值，无法复现 Worker 子进程是否被绑核。详见 meta/main-tracking-2026-10-28.md。
+
 ### 10.10.2 固定 workload
 
 > **本节先看：** 下面先给出“固定 workload”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
