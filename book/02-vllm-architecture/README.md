@@ -312,6 +312,10 @@ data: [DONE]
 
 [源码] `vllm/v1/engine/async_llm.py` - `AsyncLLM.generate`
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-28～10-29（0106c8abc..36d4ef654）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-29.md。
+> - [9fc019a749](https://github.com/vllm-project/vllm/commit/9fc019a749cbf3235cc06aa5357b17fd37cb648a)（[#64097](https://github.com/vllm-project/vllm/pull/64097)）：`run_batch` 支持 `/v1/completions`（`entrypoints/launchers/run_batch.py` L182–L197、L828–L829 @ `36d4ef654`），不再仅限 chat completions。
+> - [f60edccd00](https://github.com/vllm-project/vllm/commit/f60edccd0079428503f9e9f66e3b651aa4da73db)（[#64177](https://github.com/vllm-project/vllm/pull/64177)）：chat completions 序列化省略 null 的 `annotations` 与 `usage.prompt_tokens_details`（`exclude_none`）。
+
 ### 两条路径的共享与分叉
 
 > **本节先看：** 下面先用表格整理“两条路径的共享与分叉”。先横向比较每一列解决的问题和适用边界，再把具体名称映射到源码。
