@@ -1076,6 +1076,12 @@ v0.32.0 的自动 fallback 清单包括：
 - u-batching/DBO 的限制。未显式选择 Runner 时，DBO 仍进入 fallback；显式 V2 还要
   通过 LoRA、speculation、PP、CP、多模态、hybrid 和 graph mode 等组合校验。
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-28～10-29（0106c8abc..36d4ef654）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-29.md。
+> - [cdd2750cd5](https://github.com/vllm-project/vllm/commit/cdd2750cd5e7d90849282a16bc46c21bbc58bcbd)（[#61464](https://github.com/vllm-project/vllm/pull/61464)）：`_get_dbo_unsupported_features` **移除** “dual batch overlap with speculative decoding”，且 decode CP 不再列入；仅保留 prefill CP（`vllm/config/vllm.py` L3247–L3270 @ `36d4ef654`）。启用 DBO+spec 时调用 `_raise_dbo_thresholds_for_spec_decode`（L3225–L3245）把 `dbo_*_token_threshold` 抬到至少 `num_ubatches * uniform_decode_query_len`。上文“显式 V2 还要通过……speculation……CP……组合校验”中 speculation / DCP 两项在 main 上已不再作为 DBO 硬禁令；升级时须改写正文。
+> - [d7f68d4c7d](https://github.com/vllm-project/vllm/commit/d7f68d4c7d31004e257b7b2ff142b4edd83e0d8c)（[#62748](https://github.com/vllm-project/vllm/pull/62748)）：`sampler.apply_staged_writes()` 仅在本步有 `scheduled_new_reqs` 时调用（`model_runner.py` L1298–L1302 @ `36d4ef654`）。
+> - [06e172b5cf](https://github.com/vllm-project/vllm/commit/06e172b5cf8845c80c40a6eaaecbcbde3e38e8df)（[#59341](https://github.com/vllm-project/vllm/pull/59341)）：MRV2 lm_head LoRA 的 `prompt_lora_mapping` 按 `num_logits`（每请求 1+drafts 行）展开（`lora_utils.py` L99–L104；调用处 L1913）。
+> - [65faf4efa0](https://github.com/vllm-project/vllm/commit/65faf4efa0281fc2e04096a28cd35fb8dc7d3218)（[#63237](https://github.com/vllm-project/vllm/pull/63237)）：routed experts capturer 在 `profile_run` 中、KV cache profiling 之前初始化。
+
 stock `torch.compile`、`ngram`/`ngram_gpu` 和 Elastic EP 已从这份清单移除。
 stock compile 在 MRV2 加载模型后调用共享的 `compile_model_with_stock_torch`，
 但配置会把 CUDA Graph 改为 NONE 并清空 capture sizes。旧 compile SP passes 已删除，
