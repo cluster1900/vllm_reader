@@ -783,6 +783,9 @@ flowchart LR
 
 `split_graph()` 特别保留原始 node 顺序，因为带 mutation 的图若被重排，语义可能改变。
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-29～10-30（36d4ef654..2eae56c4b）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-30.md。
+> - [d1ad431de](https://github.com/vllm-project/vllm/commit/d1ad431de60f995585e75d66bb5bea55f313ca96)（[#64279](https://github.com/vllm-project/vllm/pull/64279)）：撤销 #42129 的 `_VllmFallbackAllowList`（把所有 `vllm::*` / `vllm_aiter::*` 当作 Inductor `FALLBACK_ALLOW_LIST`）。allow-list 内 custom op 的 fallback 不带默认 layout 约束，整图编译时 `vllm::unified_kv_cache_update` 会收到 head-major key，`reshape_and_cache_flash` 只读 `key.stride(0)` 并假设 head 紧排，KV cache 被写乱。默认 mode 3 在 attention / KV-cache op 处切图，二者不在同一 Inductor graph，不受影响；`splitting_ops: []` 或 compile mode 1/2（Transformers backend）把 attention 与 KV 写入编进同一张图才会触发。v0.32.0 基线本身仍带该 allow-list。
+
 ### 8.8.2 piecewise compilation 不是“attention 不编译”的唯一含义
 
 默认 Dynamo-level split 会把 splitting op 放在独立 subgraph，把其他 subgraph 交给
