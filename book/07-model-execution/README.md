@@ -952,6 +952,9 @@ sequenceDiagram
 
 > **读图方法：** 这是“Grammar mask 的汇合点”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-29～10-30（36d4ef654..2eae56c4b）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-30.md。
+> - [322f90a2a](https://github.com/vllm-project/vllm/commit/322f90a2a356a83276bc07236e0e620a4e4fc93a)（[#63219](https://github.com/vllm-project/vllm/pull/63219)）：`GrammarOutput` 删除 `num_acceptable_drafts`（`output.py` L341–L346）；`DraftTokensHandler` 按 req_id 保留 draft（`spec_decode/utils.py` L51–L131），`execute_model` 开头 `begin_step`（`model_runner.py` L1794–L1795），移除时 `discard`（L1198–L1199）。删除 `grammar_invalid_drafts`。PP + structured output 不再依赖当前 batch 整表 draft。
+
 ## 7.20 MRV2 sample_tokens 时间线
 
 MRV2 先取出并清空 state。非末 PP rank 接收末 rank 广播并更新本地状态；
@@ -974,6 +977,9 @@ flowchart TD
 ```
 
 > **读图方法：** 这是“MRV2 sample_tokens 时间线”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
+
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-29～10-30（36d4ef654..2eae56c4b）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-30.md。
+> - [d8fdf4f61](https://github.com/vllm-project/vllm/commit/d8fdf4f61bb606e2eb216230cd821096b2a64d3e)（[#64458](https://github.com/vllm-project/vllm/pull/64458)）：`PPHandler._sample_len` 有 draft 时宽为 `max_sample_len`、否则 1（`pp_utils.py` L104–L106）；`receive(..., recv_drafts=)` 与 last rank `broadcast_drafts` 对齐；draft 经 `post_update` 写入 `req_states.draft_tokens`。
 
 [源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.sample_tokens`
 

@@ -939,6 +939,9 @@ mapping。
 - sliding window、non-causal、sink、MLA、sparse、PCP/DCP 等能力；
 - cache spec/layout 偏好与组合校验。
 
+> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-29～10-30（36d4ef654..2eae56c4b）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-30.md。
+> - [a6c3635e3](https://github.com/vllm-project/vllm/commit/a6c3635e3660f6343c14e2158c7ab44c62be88b9)（[#64064](https://github.com/vllm-project/vllm/pull/64064)）：新增 `AttentionBackend.supports_head_size_v`，默认要求 V=K（`vllm/v1/attention/backend.py` L109–L112）；`RocmAiterUnifiedAttentionBackend` 允许 `head_size_v <= head_size`（`rocm_aiter_unified_attn.py` L90–L94），从而 MiMo-V2.6 可用 ROCm AITER unified attention。
+
 ### 6.14.2 `AttentionMetadataBuilder`
 
 builder 绑定一个 KV cache spec、若干 layer name、vLLM config 和 device。它把 common metadata
