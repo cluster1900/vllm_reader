@@ -315,6 +315,7 @@ data: [DONE]
 > **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-28～10-29（0106c8abc..36d4ef654）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-29.md。
 > - [9fc019a749](https://github.com/vllm-project/vllm/commit/9fc019a749cbf3235cc06aa5357b17fd37cb648a)（[#64097](https://github.com/vllm-project/vllm/pull/64097)）：`run_batch` 支持 `/v1/completions`（`entrypoints/launchers/run_batch.py` L182–L197、L828–L829 @ `36d4ef654`），不再仅限 chat completions。
 > - [f60edccd00](https://github.com/vllm-project/vllm/commit/f60edccd0079428503f9e9f66e3b651aa4da73db)（[#64177](https://github.com/vllm-project/vllm/pull/64177)）：chat completions 序列化省略 null 的 `annotations` 与 `usage.prompt_tokens_details`（`exclude_none`）。
+> - main 2026-10-29～10-30：[5c1939140](https://github.com/vllm-project/vllm/commit/5c19391400c58ae10feca2483f55c547df211715)（[#63896](https://github.com/vllm-project/vllm/pull/63896)）：`ResponsesRequest.thinking_token_budget` 写入 `SamplingParams`（`vllm/entrypoints/openai/responses/protocol.py` L452、L650 @ `2eae56c4b`），与 chat completions 对齐。Rust frontend 仍不服务 `/v1/responses`。
 
 ### 两条路径的共享与分叉
 
