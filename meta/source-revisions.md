@@ -82,3 +82,17 @@
 - 当前基线仍为 003（`v0.32.0`）；不切换基线、不改写 v0.32.0 正文。
 - 跟踪范围：vLLM `main` `36d4ef654a83e227216b0c0b55cf4041d96b1675`..`2eae56c4ba0cf12087fec035514eedede83c257d`（#64610，2026-10-30），109 个提交。最新 GitHub Release 仍为 v0.32.0（2026-10-18）。git rc tag 有 `v0.32.1rc0`（2365177dd，2026-10-18，在 main 上、早于本区间起点）、`v0.33.0rc0`（4135590ff，2026-10-26，在 main 上、早于区间起点）、`v0.33.0rc1`（cbafc4690，2026-10-28，不在 main 历史上，位于发布分支）；三者都没有 GitHub Release 条目（连 pre-release 也没有），不是阅读基线。
 - 逐条 SHA/PR、受影响章节与升级动作见[main 跟踪记录](main-tracking-2026-10-30.md)；已在 ch02、ch05、ch06、ch07、ch08、ch09 加了“main 上的变化（未发版）”注记。#64279：v0.32.0 基线自身带 #42129 allow-list，Transformers backend + 整图编译会 KV 损坏。#64356：ch09 中 #63554 的 owner/row 规则已过时。本区间没有与 v0.32.0 正文直接冲突、升级时必须改写的提交。
+
+## 阅读基线 004：v0.33.0（2026-11-10 B0 钉扎）
+
+- Repository: `vllm-project/vllm`
+- Tag: `v0.33.0`（annotated tag 解引用 commit；GitHub Release 条目的 `tag_name` 为 `v0.33.0rc3`，指向同一 commit）
+- Commit: `4ba787ec9959e566d3b587a796dff07673324da5`
+- 前一基线：`5df63a7203cdb9328d824a27b682e77c7b9928be`（v0.32.0 / 基线 003）；旧记录、旧实验输出与 `meta/main-tracking-*.md` 注记原样保留。
+- Reader base：本 B0 PR 合入前的 `main`；本批只更新 README / source-revisions / chapter-source-map / 十章 `source_commit`+`source_branch`，**不改写章节正文**。
+- 获取方式：同级 `../vllm` 以 detached HEAD 检出上述 commit（由 annotated tag `v0.33.0` 解引用核对）。
+- Python 要求仍为 `>=3.11,<3.15`（`pyproject.toml` `requires-python`）。
+- 正文落注记与符号/路径修复按 bot-hub #127 分批 B1–B5（v0.33.0 范围内）与 B6–B9（追 main）；本基线条目不宣称十章已完成静态语义升级。
+- `python3 scripts/check_book.py` 在钉扎后对 `4ba787ec…` 尚有 6 处 source-map 失败（见 B0 PR）：`kv_cache_utils` 中 4 个函数迁至 `kv_cache_planning.py`、`async_scheduler._update_request_with_output` 迁至 `scheduler.py`、`ray_executor.py` 删除（现为 `ray_executor_v2.py`）。B0 不改 map 符号列表与正文，留给对应批次。
+- 章节继续 `draft` / `runtime_verified: false`。
+

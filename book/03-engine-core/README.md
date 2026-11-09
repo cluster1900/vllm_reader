@@ -3,10 +3,10 @@ title: "第03章 Engine 与 EngineCore"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 5df63a7203cdb9328d824a27b682e77c7b9928be
-source_branch: v0.32.0
+source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
+source_branch: v0.33.0
 source_dirty: false
-verified_at: 2026-10-19
+verified_at: 2026-11-10
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
