@@ -807,7 +807,7 @@ flowchart LR
 
 | 模式 | 代表路径 | 谁选择 DP engine |
 |---|---|---|
-| external load balancing | `DPAsyncMPClient` | 外部负载均衡器或调用者；v0.33.0 起它也能承接 Elastic EP 扩缩容（见 §9.8 末尾） |
+| external load balancing | `DPAsyncMPClient` | 外部负载均衡器或调用者；v0.33.0 起它也能承接 Elastic EP 扩缩容（见 §9.8.6） |
 | internal load balancing | `DPLBAsyncMPClient` | vLLM client 根据 engine stats |
 | hybrid/local | 多节点本地 engine 集合 | 外部先选节点，本地再选 engine |
 
@@ -1111,6 +1111,8 @@ fused MoE kernel 的情况下选择 wait，否则选择 keep；不能把支持 E
 - `POST /scale_elastic_ep`，body 为 `new_data_parallel_size`（正整数）和可选的 `drain_timeout`（默认 120 秒）（`api_router.py:38-65` @ `05caae03`）。该入口调用 `AsyncLLM.scale_elastic_ep`（`async_llm.py:1321` @ `05caae03`）：先 `prepare_elastic_ep`，再按需排空，最后 `commit_elastic_ep`。排空只在环境变量 `VLLM_ELASTIC_EP_DRAIN_REQUESTS` 打开时发生，默认关闭。
 - `POST /is_scaling_elastic_ep` 用来查询当前阶段（`api_router.py:84` @ `05caae03`）。
 
+Engine 侧，`DPEngineCoreProc.reinitialize_distributed`（`core.py:2870` @ `05caae03`）创建 `ElasticEPScalingState` 并返回 `ready_key`；`commit_prepared_elastic_ep`（`:2924`）只在状态已经 `is_ready_for_switch` 时把 `commit_requested` 置为真，并不自己切 group。Worker 上的实际准备与提交由 `ElasticEPScalingExecutor`（`elastic_execute.py:153` @ `05caae03`）执行；外部 LB 下的 prepare/commit 握手由 `ExternalElasticEPScaleCoordinator`（`external_elastic_ep.py:205` @ `05caae03`）协调。prepare 完成后，`set_scaling_elastic_ep(True)` 会让 `ScalingMiddleware` 在整个扩缩窗口内对除 `/health`、`/is_scaling_elastic_ep` 以外的请求返回 503（`async_llm.py:1359-1362`、`middleware.py:51-63` @ `05caae03`）。
+
 **Scale-up 主路径（existing rank 视角）：**
 
 ```mermaid
@@ -1126,13 +1128,13 @@ flowchart TB
     GRP --> DONE[COMPLETE + reconfigure_finished]
 ```
 
-> **读图方法：** 这是已有 engine（`worker_type=="existing"`）扩容的状态链。把「等待 commit_requested」看成控制面屏障：prepare 可以和排空请求重叠，真正切换 process group 只发生在 commit。新 engine 是另一条链：`PRE_KV_INIT`（先 `prepare_new_worker`，再用 `sync_kv_cache_memory_size(-1)` 拿到预算）→ `PREPARE`（`warmup_new_worker`，然后 `commit_scale_up(False)`，不等待 `commit_requested`）→ `COMPLETE`。不要把 new/existing 画成同一条状态链。
+> **读图方法：** 这是已有 engine（`worker_type=="existing"`）扩容的状态链。把「等待 commit_requested」看成控制面屏障：prepare 期间旧 engine 仍在正常处理请求；排空和 503 暂停发生在 prepare 完成之后、commit 之前（`async_llm.py:1359-1362` @ `05caae03`）。真正切换 process group 只发生在 commit。新 engine 是另一条链：`PRE_KV_INIT`（先 `prepare_new_worker`，再用 `sync_kv_cache_memory_size(-1)` 拿到预算）→ `PREPARE`（`warmup_new_worker`，然后 `commit_scale_up(False)`，不等待 `commit_requested`）→ `COMPLETE`。不要把 new/existing 画成同一条状态链。
 
-**Scale-down。** 留下来的 ranks 在 `PREPARE` 之后进入 `COMMIT_SCALE_DOWN`，同样要等 `commit_requested` 才会切 group（`ScaleDownRemainingEngineState`，`elastic_state.py:48-51`、`:230-248` @ `05caae03`）。被摘掉的 rank（`worker_type=="removing"`）只有 `PREPARE → COMPLETE`：在 `PREPARE` 里执行 `commit_scale_down(removing=True)`，发送 `EEPNotificationType.SHUTDOWN_COMPLETE`；外部 LB 下还要等 store 上该 rank 的 `shutdown_complete` 键（`elastic_state.py:255-278` @ `05caae03`）。若外部 LB 下该 rank 将被淘汰，API 进程会先 `set_elastic_ep_rank_retired(True)`（`async_llm.py:1363-1369` @ `05caae03`）；之后 `ScalingMiddleware` 对除 `/health`、`/is_scaling_elastic_ep` 以外的请求返回 503，健康检查仍可用，等待外部进程回收（第 03 章 3.4.4 已述）。
+**Scale-down。** 留下来的 ranks 在 `PREPARE` 之后进入 `COMMIT_SCALE_DOWN`，同样要等 `commit_requested` 才会切 group（`ScaleDownRemainingEngineState`，`elastic_state.py:48-51`、`:230-248` @ `05caae03`）。被摘掉的 rank（`worker_type=="removing"`）只有 `PREPARE → COMPLETE`：在 `PREPARE` 里执行 `commit_scale_down(removing=True)`，发送 `EEPNotificationType.SHUTDOWN_COMPLETE`；外部 LB 下还要等 store 上该 rank 的 `shutdown_complete` 键（`elastic_state.py:255-278` @ `05caae03`）。若外部 LB 下该 rank 将被淘汰，API 进程还会 `set_elastic_ep_rank_retired(True)`（`async_llm.py:1363-1369` @ `05caae03`）。commit 成功后，扩缩窗口的 503 会撤掉，但退休标记仍在，该进程继续对非 `/health`、`/is_scaling_elastic_ep` 的请求返回 503，等待外部进程回收（第 03 章 3.4.4 已述）。
 
 **和普通 EP 的边界。** §9.8.1–9.8.5 讲的是静态 topology 下的 route / dispatch / combine；本节只多了「拓扑可变」。负载不均、straggler、all-to-all backend 选择等性能讨论仍然成立——扩容不会自动消除专家热点。
 
-开启 `enable_elastic_ep` 时，`VllmConfig._resolve_extensible_kv_cache` 把可扩展 KV cache 视为不支持，因为扩容会跳过 warmup、复用已经 profile 过的 KV 尺寸（`vllm/config/vllm.py:3204-3208` @ `05caae03`）。
+开启 `enable_elastic_ep` 时，`VllmConfig._resolve_extensible_kv_cache` 把可扩展 KV cache 标为不支持，因为扩容会跳过 warmup、复用已经 profile 过的 KV 尺寸（`vllm/config/vllm.py:3204-3208` @ `05caae03`）：若显式打开可扩展 KV cache，会抛出 `ValueError`；若该选项未设置，则被静默关掉（`:3242-3253`）。
 
 [源码] `vllm/entrypoints/serve/elastic_ep/api_router.py` - `scale_elastic_ep`、`is_scaling_elastic_ep`（`:38`、`:84` @ `05caae03`）
 
