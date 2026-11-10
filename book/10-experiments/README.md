@@ -6,7 +6,7 @@ source_path: ../vllm
 source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
 source_branch: v0.33.0
 source_dirty: false
-verified_at: 2026-10-19
+verified_at: 2026-11-10
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -223,10 +223,40 @@ token 数，缺失时可能重新 tokenize 文本；ITL 列表则来自流式事
 - usage 是否返回真实 token 数；
 - tokenizer 是否与服务端一致。
 
-**当前适配器的末事件规则。** completion 与 chat 适配器只在含 choices 的消息上
-更新末时间戳；chat 的 trailing usage-only 消息不再延长 E2EL。含 choices 的空
-content/role 消息仍可能触发首事件计时，因此这里也不保证等于第一个可见文本 token。
-与旧版对比时，这一计时修正本身就可能降低 chat 的 E2EL/TPOT，不能当作 GPU 提速。
+**当前适配器的首/末事件规则。** completion 与 chat 适配器只在含 choices 的消息上
+更新末时间戳；chat 的 trailing usage-only 消息不再延长 E2EL。与旧版对比时，这一计时修正本身
+就可能降低 chat 的 E2EL/TPOT，不能当作 GPU 提速。
+
+v0.33.0 又把 chat 适配器的“首事件”判定收紧：只有 `_choice_has_streamed_output()`
+（`vllm/benchmarks/lib/endpoint_request_func.py:392`）为真的 choice 才算已流出输出，才会启动 TTFT、
+追加 ITL 并推进末时间戳。判定规则是：`delta` 里有非空的 `content`、`reasoning`、`tool_calls` 或
+`function_call`；或者 `content` 恰为空串且**没有** `role` 字段（例如一个特殊 token 在
+`skip_special_tokens` 下解码成空串，仍是真实生成的 token）。只带 `role` 的开头元数据消息不再触发首事件计时。
+所以 chat 的 TTFT 现在对准第一个真正承载输出的 chunk，而不是“第一条带 choices 的消息”；
+它和 v0.32.0 的差异取决于服务端把 role 消息放在首个输出之前多久，不能当作服务端变快或变慢
+（[dcf8158cd](https://github.com/vllm-project/vllm/commit/dcf8158cd)，
+[#62341](https://github.com/vllm-project/vllm/pull/62341)）。
+
+```mermaid
+flowchart TD
+    MSG["收到一条 SSE data 消息并解析 JSON"] --> USAGE["先调用 _update_server_metrics: 若带 metrics 则记录服务端耗时"]
+    USAGE --> OUT{"choices 非空, 且 choices[0] 的 delta 有 content/reasoning/tool_calls/function_call, 或 content 为空串且无 role?"}
+    OUT -->|"否: 没有形成已流出输出的消息, 例如 usage-only 消息或只有 role 的开头消息"| UG{"带 usage?"}
+    UG -->|"是: 包括同时带 usage 的 role-only 消息"| TOK["记录 completion_tokens 与 prompt_tokens, 不推进末时间戳"]
+    UG -->|"否"| IGN["不计时"]
+    OUT -->|"是"| FIRST{"这是第一个这样的消息?"}
+    FIRST -->|"是"| TTFT["TTFT = 当前时间 - 发送时间"]
+    FIRST -->|"否"| ITL["追加 ITL = 当前时间 - 上一次输出时间"]
+    TTFT --> END["推进末时间戳, E2EL = 末时间戳 - 发送时间"]
+    ITL --> END
+```
+
+> **读图方法：** 这是 chat 适配器处理每条流式消息的判定图。先看第一道判定“这条消息是否形成已流出输出”，只有通过的消息才能产生 TTFT 或 ITL；没通过的消息一律走左侧分支，源码里这是 `if … elif usage` 的 `elif`（`endpoint_request_func.py:487`），所以只要带 usage 就记 token 数，不论 choices 是否为空，也不改变任何计时。
+
+此外，v0.33.0 不再对每个网络读到的字节块先 `strip()`：completion、chat、audio 三个适配器都直接把原始字节
+交给 `StreamedResponseHandler` 按 SSE 消息边界拼接，避免首尾空白在传输分块边界被吞掉
+（[02d69c663](https://github.com/vllm-project/vllm/commit/02d69c663)，
+[#51172](https://github.com/vllm-project/vllm/pull/51172)）。
 
 此版本还增加 `openai-responses` 适配器：文本 delta 和 reasoning delta 都参与 TTFT/ITL
 计时，仅文本 delta 累积到返回文本；usage 从终结事件取值，但终结事件不推进末时间戳。
@@ -437,6 +467,10 @@ IDs 统计总量；拿不到 outputs 的路径则用请求中的 `prompt_len + e
 ready check 和 warmup 不进入正式 duration，但会改变 cache、compile 和连接状态。这是有意测
 稳定态；若目标是 cold-start，必须另建实验。
 
+正式 duration 的终点在 v0.33.0 也有变化：主 workload 的所有请求完成后先计算
+`benchmark_duration`，**然后**才停止 probe 任务（见 10.13.4）。此前先等 probe 退出再计时，会把最后一个
+probe 间隔算进主 workload 的吞吐分母。
+
 ### 10.7.2 request rate 与 max concurrency 控制不同维度
 
 > **本节先看：** 下面先给出“request rate 与 max concurrency 控制不同维度”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
@@ -544,7 +578,12 @@ prefix 重复、停止条件、chat template、语言分布和 structured output
 
 客户端认为 prompt 长 512 tokens，而服务端 tokenizer 得到 540，会同时污染长度分组、吞吐
 分子和 max model len 判断。当前 serve benchmark 会尝试通过 `/tokenize` 检测并对齐 prompts，
-但 endpoint 不可用时会跳过。最终报告仍应保存服务端实际 usage。
+但 endpoint 不可用时会跳过。v0.33.0 起跳过时的警告会区分原因：连接失败（`base_url` 不可达）、
+HTTP 404（服务没有 `/tokenize` 路由，**或者**它不服务名为 `model_id` 的模型，可用 `GET /v1/models` 核对）、
+其他 HTTP 状态码，以及其他异常（`vllm/benchmarks/serve.py:_align_prompts_to_server_tokenizer`，
+[bafb26366](https://github.com/vllm-project/vllm/commit/bafb26366)，
+[#59888](https://github.com/vllm-project/vllm/pull/59888)）。看到任何一条，都说明本次没有做 tokenizer 对齐。
+最终报告仍应保存服务端实际 usage。
 
 ### 10.8.5 cache 实验必须显式构造重复
 
@@ -583,6 +622,14 @@ flowchart TD
 
 把第一请求和第 1000 个请求放在同一个平均值里，会同时测到部署冷启动与稳定态服务，通常
 无法解释。
+
+其中“KV memory profiling”这一步在 v0.33.0 多了一个前置动作：`Worker.init_device`（`vllm/v1/worker/gpu_worker.py:449`）在拍内存快照之前先用一次
+`torch.mm` 和一次带 bias 的 `torch.nn.functional.linear` 创建 cuBLAS/cuBLASLt handle
+（`vllm/v1/worker/gpu_worker.py` 中的注释：这些 handle 由 CUDA 直接分配显存，torch 看不见也无法回收缓存来满足它，
+profiling 若把 torch 缓存撑满，首次 cuBLAS 调用就会失败；先创建则让它们与 NCCL buffer 一样计入基线）
+（[9cede34a6](https://github.com/vllm-project/vllm/commit/9cede34a6)，
+[#61044](https://github.com/vllm-project/vllm/pull/61044)）。
+做跨版本对比时，启动日志里的可用 KV 显存应连同 commit 一起记录，不要假设与旧版逐字节相同。
 
 ### 10.9.2 warmup 应覆盖会出现的 shape
 
@@ -626,7 +673,7 @@ size 已经就绪。第 8 章说明 compile range 与 CUDA Graph descriptor 都�
 - container image 或依赖 lock；
 - power/clock policy 与同机干扰任务。
 
-> **main 上的变化（未发版）**：[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：记录环境时须写明 `ParallelConfig.numa_bind`（`parallel.py` L329–L344 @ `0106c8abc`）。默认 `None` 为 best-effort 自动绑定（多 NUMA、`numactl`、spawn、mp/uni 等条件满足时软 memory preference）；显式 `True` 严格绑定（失败即启动错误），`False` 关闭。仅写“NUMA 拓扑”而不写该开关的取值，无法复现 Worker 子进程是否被绑核。详见 meta/main-tracking-2026-10-28.md。
+> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；下面这条**不包含在** v0.33.0 中，下一次升级基线时复核。[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：记录环境时须写明 `ParallelConfig.numa_bind`（`parallel.py` L329–L344 @ `0106c8abc`）。默认 `None` 为 best-effort 自动绑定（多 NUMA、`numactl`、spawn、mp/uni 等条件满足时软 memory preference）；显式 `True` 严格绑定（失败即启动错误），`False` 关闭。仅写“NUMA 拓扑”而不写该开关的取值，无法复现 Worker 子进程是否被绑核。详见 meta/main-tracking-2026-10-28.md。
 
 ### 10.10.2 固定 workload
 
@@ -706,6 +753,12 @@ p99 推导网络延迟，因为几个 p99 可能来自不同请求。
 EngineCore 输出时间戳记录 first/last token，前端 TTFT 又使用当前输出处理迭代的时间。
 要测 GPU 内核，应另用 CUDA events 或 profiler；不能把内部请求指标当作设备计时。
 
+此外，`IterationStats.__init__` 在 v0.33.0 起把 `envs.VLLM_COMPUTE_NANS_IN_LOGITS` 读一次存成实例字段
+`compute_nans_in_logits`（`vllm/v1/metrics/stats.py:482`），`update_from_output` 每个请求每步只读这个字段：
+在从不启用 envs 缓存的进程（API server）里，每次访问 `envs` 属性都会重新读环境变量，这是一次纯 CPU 开销优化，
+不改变 NaN 检测语义（[6fe7401fa](https://github.com/vllm-project/vllm/commit/6fe7401fa)，
+[#61710](https://github.com/vllm-project/vllm/pull/61710)）。
+
 [源码] `vllm/v1/metrics/stats.py` - `IterationStats.update_from_output`、`update_from_finished_request`
 
 ### 10.11.2 Prometheus 关键指标
@@ -749,6 +802,31 @@ prompt throughput 可能下降，同时业务输入吞吐上升，这并不矛�
 
 若用户自行设置 `PROMETHEUS_MULTIPROC_DIR`，当前代码会警告每次 vLLM run 之间必须清空；
 残留 shard 文件可能让 counter/gauge 不准确。把旧 metrics 当成新 run 数据，会直接破坏 A/B。
+
+### 10.11.5 bench serve 结果里的服务端耗时
+
+v0.33.0 的 `bench serve` 可以把服务端自己测的两段耗时随请求一起写进结果，用来和客户端 TTFT 对账
+（[ae43d045c](https://github.com/vllm-project/vllm/commit/ae43d045c)，
+[#55809](https://github.com/vllm-project/vllm/pull/55809)）。前提有三个：服务以
+`--enable-per-request-metrics` 启动；流式请求带 usage（`stream_options.include_usage=true` 或服务端强制包含 usage）；
+`n=1`。满足时，最后一条 usage chunk 的 `metrics` 字段携带 `queue_time_ms` 与 `time_to_first_token_ms`，
+客户端适配器把它们除以 1000，存为 `RequestFuncOutput.server_queue_time` 与 `server_ttft`（秒）。
+
+要点是**口径不同于客户端 TTFT**：服务端的 `queue_time_ms` 是 `scheduled_ts - queued_ts`，
+`time_to_first_token_ms` 是 `first_token_ts - scheduled_ts`（`vllm/entrypoints/generate/base/serving.py` 的
+`build_per_request_timing_metrics`），即“从首次被调度到首 token”，不含排队、渲染、网络和客户端 semaphore 等待。
+客户端 TTFT 与它相减得到的是“排队 + 渲染 + 传输 + 客户端”的合计，不能直接当作网络延迟（参见 10.11.1 关于同一时钟的约束）。
+
+结果 JSON 里新增 `server_queue_times` 与 `server_ttfts` 两个逐请求列表；只有当至少一个请求带回了这些值时才出现
+（`_get_server_metrics_results`，`vllm/benchmarks/serve.py:391`），缺失的请求位置为 `null`。它们与 `ttfts`、`itls`
+一样体量大，没有 `--save-detailed` 时会被删掉，并且不会进入 PyTorch benchmark 格式的输出。注意它与结果里已有的
+`queue_times`（客户端 max-concurrency semaphore 等待）是两回事。
+
+[源码] `vllm/benchmarks/lib/endpoint_request_func.py` - `RequestFuncOutput`、`_update_server_metrics`
+
+[源码] `vllm/benchmarks/serve.py` - `_get_server_metrics_results`
+
+[源码] `vllm/entrypoints/generate/base/serving.py` - `build_per_request_timing_metrics`
 
 ---
 
@@ -852,6 +930,31 @@ xychart-beta
 当前 serve benchmark 可在主 workload 之外周期发送 1-token probe。它能观察背景压力下轻量
 请求的延迟，但 probe 本身也增加负载；必须记录 probe rate，并与无 probe baseline 对照。
 
+v0.33.0 修了两处会让 probe 污染结果的实现问题（[c54dca96b](https://github.com/vllm-project/vllm/commit/c54dca96b)，
+[#60511](https://github.com/vllm-project/vllm/pull/60511)）：
+
+- **连接池。** 主 session 的连接池上限等于 `--max-concurrency`；probe 与主请求共用时，会排在池子里等连接，
+  于是测到的“probe 延迟”里混进了客户端等连接的时间。现在 probe 用自己的 `make_session(1)`（一条独立连接，
+  `vllm/benchmarks/serve.py:856` 的 `make_session` 工厂与 probe 循环），主池容量不被占用，也不再被主 workload 反压。
+  测试 `test_bench_serve_insecure` 为此加上 `--probe-request-rate 5`，确认独立 session 也遵守 `--insecure`。
+- **duration。** 见 10.7.1：先计 `benchmark_duration`，再停 probe。
+
+```mermaid
+sequenceDiagram
+    participant W as 主 workload tasks
+    participant M as 主 session(连接数=max_concurrency)
+    participant P as probe 任务
+    participant PS as probe 专用 session(连接数=1)
+    participant T as benchmark 计时
+    W->>M: 正式请求
+    P->>PS: 周期发送 1-token 请求
+    W-->>T: 全部完成
+    T->>T: benchmark_duration = 当前时间 - 起点
+    T->>P: 之后才 probe_stop.set() 并等待退出
+```
+
+> **读图方法：** 这是 probe 与主 workload 分离后的时序图。先看两条并行的连接路径（主 session 与 probe 专用 session 互不占用连接），再看最下面三行：先停止计时，后停止 probe，所以最后一个 probe 间隔不会进入主 workload 的 duration。
+
 ---
 
 ## 10.14 参数实验矩阵：每个旋钮改变哪条机制
@@ -953,9 +1056,41 @@ v0.32.0 的 `/start_profile` 可按 session 指定 `profile_prefix`、`delay_ite
 即使 Worker 达到迭代上限，也必须调用 `/stop_profile`，否则下一次 start 会返回 HTTP 409。
 trace/summary 文件名使用 rank 或 hostname_pid.async_llm 前缀，session prefix 可避免覆盖。
 
+v0.33.0 的 `/start_profile` 请求体多了一个可选字段 `profiler_kwargs`（JSON 对象，
+`StartProfileRequest.profiler_kwargs`，`vllm/entrypoints/serve/profile/api_router.py`），
+用于**只对这一次 session** 覆盖 PyTorch profiler 的构造参数，例如 `{"record_shapes": true, "with_stack": true}`；
+Python API `LLM.start_profile(..., profiler_kwargs=...)` 同样接受。路由层只要求它是 JSON 对象，不检查键名。
+Worker 侧 `TorchProfilerWrapper` 把 `profiler_config` 派生的基础参数 `_base_profiler_kwargs` 与请求覆盖项合并
+（`vllm/profiler/wrapper.py`：`set_profiler_kwargs`，仅在 profiler 未处于 active 时生效，且保留原来的
+`on_trace_ready`）。`Worker.profile` 在每次 start 时都调用它（`vllm/v1/worker/gpu_worker.py:1439`），
+每次都从基础参数重新合并，所以上一次的覆盖不会泄漏到下一次。
+基类 `WorkerProfiler.set_profiler_kwargs` 是空操作，因此 CUDA、Proton 等非 torch profiler 会忽略该字段
+（[dd5e75449](https://github.com/vllm-project/vllm/commit/dd5e75449)，
+[#51974](https://github.com/vllm-project/vllm/pull/51974)；该 PR 标题只写了 profile_prefix，
+本次 `5df63a72..4ba787ec` 区间内它带来的新增字段是 `profiler_kwargs`）。
+对应实验含义：想比较“有/无 shape 记录”的开销，不必重启服务，只需在两次 session 里换 `profiler_kwargs`；
+但 stack/shape 仍会显著增加开销，得到的 trace 只用于定位，不能当吞吐数据。
+
+```mermaid
+flowchart LR
+    REQ["POST /start_profile 请求体: profile_prefix / delay / max / profiler_kwargs"] --> API["StartProfileRequest: 只保留提供了的字段"]
+    API --> ENG["AsyncLLM.start_profile -> EngineCore.profile -> Worker.profile"]
+    ENG --> NEW{"Worker 上已有 profiler 实例?"}
+    NEW -->|"否: 第一次 start"| CREATE["create_worker_profiler(..., profiler_kwargs)"]
+    NEW -->|"是"| SET
+    CREATE --> SET["每次 start 都调用 set_profiler_kwargs: 非 active 时重算 = 基础参数 + 覆盖项"]
+    SET --> RUN["profiler.start(delay_iterations, max_iterations)"]
+```
+
+> **读图方法：** 这是 `profiler_kwargs` 从 HTTP 请求到 torch profiler 的传递图。先看上半部分：字段一路透传到 Worker；再看菱形：第一次 session 在创建 profiler 时带上覆盖项，随后每次 start（包括第一次）都经 `set_profiler_kwargs` 按“基础参数 + 本次覆盖项”重算，最后才进入 `start`。
+
 [设计] `docs/contributing/profiling.md` - Profile with PyTorch Profiler
 
 [源码] `vllm/config/profiler.py` - `validate_profile_iteration_bounds`
+
+[源码] `vllm/profiler/wrapper.py` - `TorchProfilerWrapper.set_profiler_kwargs`、`create_worker_profiler`
+
+[源码] `vllm/v1/worker/gpu_worker.py` - `Worker.profile`
 
 ### 10.15.3 Proton
 
@@ -1456,6 +1591,24 @@ run-2026-09-07T120000/
 指标字段会演进。至少保存工具 commit、命令、字段单位和 schema version，避免半年后把秒
 当毫秒、把 expected tokens 当 actual tokens。
 
+### 10.22.4 跨版本比较前先看口径变化清单
+
+把 v0.32.0 与 v0.33.0 的 benchmark 数字放在一起比较之前，先确认本章讲过的几处测量口径是否随版本变了，
+否则差异可能来自工具而不是引擎。下面五项都已包含在 v0.33.0 中，只涉及 `bench serve` 的测量与记录，不改变引擎行为：
+
+| 变化 | 影响哪类比较 | 正文位置 |
+|---|---|---|
+| chat 流式只在带实质内容的事件上记 TTFT（#62341） | 跨版本 chat TTFT、ITL | 10.2.3 |
+| probe 请求用独立 session，`benchmark_duration` 先于停止 probe 计算（#60511） | 带 probe 的吞吐、request/s | 10.7.1、10.13.4 |
+| SSE 流不再对每个网络块 `strip()`（#51172） | 输出文本与 token 计数 | 10.2.3 |
+| 结果里新增服务端 `server_queue_times`、`server_ttfts`（#55809） | 与客户端 TTFT 对账 | 10.11.5 |
+| cuBLAS handle 先于显存快照创建（#61044） | 可用 KV 显存、启动日志里的 profile 数 | 10.9.1 |
+
+v0.32.0→v0.33.0 的破坏性变更与弃用清单（每一项附 PR 与提交）见：
+[meta/upgrade-v0.33.0-2026-11-10/breaking-changes.md](../../meta/upgrade-v0.33.0-2026-11-10/breaking-changes.md)。
+清单里与本章实验直接相关的是“暂停期间新请求返回 HTTP 503”：压测脚本若在 `pause_generation` 窗口内（`abort`、`wait` 模式）发请求，
+会得到 503 而不是排队等待，需要在报告里把这类失败与容量拒绝分开统计。
+
 ---
 
 ## 10.23 随章教学代码
@@ -1629,8 +1782,8 @@ throughput、goodput、p99 TTFT/TPOT、client queue、server queue。
     `benchmarks/attention_benchmarks/`：组件与 kernel 层实例。
 16. `tests/benchmarks/`：CLI、dataset adapter、sweep 和参数稳定性测试。
 
-本章正文已按 v0.32.0 静态复核，指标教学代码的 CPU 测试通过；源码基线为 commit
-`5df63a7203cdb9328d824a27b682e77c7b9928be`。当前机器没有可用的 NVIDIA GPU vLLM
+本章正文已按 v0.33.0 静态复核（复核日期 2026-11-10），指标教学代码的 CPU 测试通过；源码基线为 commit
+`4ba787ec9959e566d3b587a796dff07673324da5`。当前机器没有可用的 NVIDIA GPU vLLM
 运行环境，因此 profiler、NCCL 与真实服务性能数据仍标记为 `runtime_verified: false`。
 本章给出的数值曲线均为教学示意，不能冒充实测结果。
 
