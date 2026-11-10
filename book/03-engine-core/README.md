@@ -6,7 +6,7 @@ source_path: ../vllm
 source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
 source_branch: v0.33.0
 source_dirty: false
-verified_at: 2026-10-19
+verified_at: 2026-11-10
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -36,7 +36,7 @@ LLMEngine / AsyncLLM
 执行期间到达的 abort 怎样生效、多个 batch 如何保持在途，以及进程退出或 worker
 故障如何被前端看见。
 
-本章绑定源码 revision `5df63a7203cdb9328d824a27b682e77c7b9928be`。文中区分：
+本章绑定源码 revision `4ba787ec9959e566d3b587a796dff07673324da5`（vLLM v0.33.0）。文中区分：
 
 - **源码事实**：可在固定 revision 的实现或测试中直接定位。
 - **设计含义**：由多个源码事实推导出的工程解释。
@@ -202,8 +202,12 @@ flowchart TB
 `EngineCore._initialize_kv_caches()` 会 profile 内存，计算 block 数，并可能因 auto-fit
 调小 `max_model_len`。
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
-> - [636da2476](https://github.com/vllm-project/vllm/commit/636da2476d184b44e670449498ec850fbfaab8d6)（[#60513](https://github.com/vllm-project/vllm/pull/60513)）：MRV2 的 draft-model speculator 改为在 auto-fit 之后读取 `max_model_len`，draft attention metadata 的 `max_seq_len` 取 draft 上限与 `max_model_len` 的较小值，避免 auto-fit 缩小上下文后 draft 侧仍用旧长度。
+auto-fit 缩小 `max_model_len` 之后，读取这个长度的组件也要同步，否则会沿用旧值。v0.33.0 中，
+MRV2（V2 Model Runner，新一代 Model Runner）的 draft-model speculator 改为在 auto-fit 之后读取 `max_model_len`，draft attention
+metadata 的 `max_seq_len` 取“draft 上限”与 `max_model_len` 的较小值（#60513，提交
+`636da2476`）。
+
+[源码] `vllm/v1/worker/gpu/spec_decode/speculator.py` - 读取 `max_model_len` 的 draft metadata 构造
 
 多进程模式下，EngineCore 通过 `EngineCoreReadyResponse` 把最终的
 `max_model_len`、`num_gpu_blocks`、`block_size`、dtype 和并行大小回传给 client；client
@@ -214,10 +218,20 @@ full-attention cache manager 的 block size：只有集合中恰好一种大小�
 否则为 `None`。MPClient 汇总各 READY response 时也只在值一致时保留该值。
 它不是简单复制 CLI 的 `block_size`，也不能把 `None` 读成“没有 KV cache”。
 
+v0.33.0 的 `EngineCoreReadyResponse` 另增三个字段，服务于 Elastic EP 的外部负载均衡模式
+（#43202）：`coord_store_port`（引擎侧 `ParallelConfig._coord_store_port`）、
+`coordinator_input_address` 与 `coordinator_output_address`（DP 协调器的两个后端地址）。
+`MPClient._apply_ready_response` 对它们采取“第一个有效值生效，其后必须一致”的策略：
+端口已有非零值时 `assert` 相等，地址已记录时同样 `assert` 相等。`enable_elastic_ep` 打开时，
+握手阶段的 ready 消息还会携带 `elastic_ep_max_dp_size` 与 `num_redundant_experts`。
+这些字段只在 Elastic EP 场景有意义；普通部署里端口为 0、地址为 `None`。
+
 [源码] `vllm/v1/engine/core.py` - `EngineCore._initialize_effective_attention_block_size`、
 `EngineCoreProc._make_ready_response`
 
 [源码] `vllm/v1/engine/core_client.py` - `MPClient._apply_ready_response`
+
+[源码] `vllm/v1/engine/__init__.py` - `EngineCoreReadyResponse`
 
 ```mermaid
 sequenceDiagram
@@ -306,6 +320,17 @@ output handler 按 `VLLM_V1_OUTPUT_PROC_CHUNK_SIZE` 切分大输出批次，并�
 `await asyncio.sleep(0)`，避免一次 CPU 输出处理长期占用 event loop。这里优化的是前端
 公平性，不是 GPU batch 大小。
 
+v0.33.0 对这个 handler 有两处时序调整。其一，多模态处理器缓存（P0）与引擎侧缓存（P1）
+若漂移，EngineCore 会在输出里带回 `mm_cache_miss_hashes`；handler 现在在每个 chunk 的
+`process_outputs()` **之前**调用 `renderer.queue_mm_cache_invalidations()`，保证已经排队的
+渲染任务在下一次缓存查找前就看到失效标记，而不是等错误发布之后才清理（#62164）。
+其二，`generate()` 与 `encode()` 都把 `GenerationError`（含可重试的 `RetryableRequestError`）与
+`VLLMClientError`、`GracefulHTTPError` 一样视为“请求级失败”：只记录并向调用者抛出，
+不当作引擎故障。只有 `generate()` 在这条分支里额外中止兄弟请求：`n>1` 时若一个子请求被拒绝，
+它会 `abort(q.request_id, internal=True)` 回收其余同胞请求；`encode()` 这条分支不做这一步。
+
+[源码] `vllm/v1/engine/async_llm.py` - `AsyncLLM._run_output_handler`、`AsyncLLM.generate`、`AsyncLLM.encode`
+
 ## 3.4 Client 工厂：四种组合，三条有效路径
 
 `EngineCoreClient.make_client()` 的关键决策是 multiprocessing 与 asyncio：
@@ -365,6 +390,55 @@ get_output  -> EngineCore.step_fn -> post_step
 写入 `client_index`，以便多个前端共享 EngineCore 时，结果仍回到正确 client。utility
 方法使用 `call_id -> Future` 映射把远端结果交给等待 coroutine。
 
+### 3.4.4 DP 变体：wave 由谁唤醒
+
+DP 部署里，所有 rank 要在同一个“wave”（各 rank 同步推进的一轮运行周期）里一起空转或一起推进（MoE 需要各 rank 同步参与
+all-to-all），所以只要有一个 rank 收到新请求，其余空闲 rank 也必须被叫醒。v0.32.0 里这件事
+由**前端**发起：`DPAsyncMPClient.add_request_async()` 发现 `engines_running` 为假，就把
+`("FIRST_REQ", engine)` 经内部 PAIR socket 交给统计任务，转给协调器。问题在于前端对
+“引擎是否在运行”的判断可能过时，而处于暂停态的引擎会丢弃 `START_DP_WAVE`。
+
+v0.33.0（#59559，提交 `a94c31571`）改成**只有引擎发起 wave**：
+
+```mermaid
+sequenceDiagram
+    participant F as DPAsyncMPClient
+    participant E1 as 收到请求的 DP engine
+    participant C as DPCoordinator
+    participant E2 as 其余 DP engines
+    F->>E1: ADD(request)
+    Note over F: 不再发送 FIRST_REQ
+    E1->>E1: add_request，未运行且未暂停则 engines_running=True
+    E1->>C: EngineCoreOutputs(start_wave=current_wave)
+    C->>E2: START_DP_WAVE
+    E2->>E2: 空闲则进入运行态，暂停态丢弃该消息
+```
+
+> **读图方法：** 这是“wave 由谁唤醒”的时序图。从上到下看一次新请求：前端只负责把 ADD 送到某个引擎；是否需要叫醒别的 rank，由收到请求的引擎判断并通知协调器。若协调器再收到前端消息，只会记录一条 error 日志。
+
+对应的代码变化有三处：`DPEngineCoreProc.add_request()` 去掉了 `request_wave != current_wave`
+这个前提，只要有协调器、引擎没在运行且调度器是 `UNPAUSED`，就发 `start_wave`；协调器
+`DPCoordinatorProc` 不再处理前端来的 wave 消息；前端原来叫 `first_req_*` 的 socket 改名为
+`scale_send_socket` / `scale_rcv_socket`，现在只用来传 `SCALE_ELASTIC_EP` 标记。
+
+`DPLBAsyncMPClient` 还新增 `streaming_reqs` 集合（#58942）：流式输入会话的 abort 会发给
+**所有**引擎，因为会话结束时仍在途的 chunk 可能已经在别的引擎上重建了该请求。
+
+`DPAsyncMPClient`（外部负载均衡）在 `enable_elastic_ep` 时创建
+`ExternalElasticEPScaleCoordinator`，`prepare_elastic_ep` / `commit_elastic_ep` /
+`abort_external_elastic_ep` / `get_external_elastic_ep_status` 经它完成（#43202）；被缩容淘汰的
+rank 通过 `set_elastic_ep_rank_retired(True)` 标记，之后 `AsyncLLM.check_health()` 直接返回，
+`should_keep_api_server_alive` 为真，等待外部进程关闭它。Elastic EP 的完整流程不在本章展开。
+
+[源码] `vllm/v1/engine/core_client.py` - `DPAsyncMPClient`、`DPLBAsyncMPClient`
+
+[源码] `vllm/v1/engine/core.py` - `DPEngineCoreProc.add_request`
+
+[源码] `vllm/v1/engine/coordinator.py` - `DPCoordinatorProc`
+
+[测试] `tests/v1/engine/test_engine_core.py` - `test_idle_dp_rank_announces_wave_for_new_work`、
+`test_paused_dp_rank_ignores_start_wave`
+
 ## 3.5 多进程拓扑与三条 CPU 通道
 
 普通非 DP 在线路径至少包含三条 CPU 执行通道：
@@ -408,6 +482,12 @@ loop 单线程拥有。这比网络线程直接改 Scheduler 更容易维持顺�
 调用 `preprocess_add_request()`，把传输对象转为运行态 `Request`。多模态缓存缺失或请求
 预处理错误可在这里变成 request-scoped error，而不是让 core 主循环崩溃。
 
+v0.33.0 又增加一类：预处理抛出 `VLLMValidationError` 时（当前用于请求选择的 structured
+output 后端与 EngineCore 已锁定的后端不一致，#49625），`_handle_request_validation_error`
+发出 `FinishReason.ERROR` 并附 `RequestError(code="validation_error")`；前端用
+`RequestError.to_exception()` 还原成 `VLLMValidationError`，调用者看到的是请求参数错误，而不是
+引擎故障。
+
 ### 3.5.2 ABORT 为什么同时进入两个队列
 
 ABORT 被放入：
@@ -430,15 +510,22 @@ flowchart TB
 
 > **读图方法：** 这张图用于压缩“ABORT 为什么同时进入两个队列”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
-### v0.32.0：IPC 与共享内存不是同一个开关
+### v0.33.0：IPC 与共享内存不是同一个开关
 
 MPClient 先用 bind address 创建 socket，再从 `zmq.LAST_ENDPOINT` 得到真实 endpoint 并构造
 `EngineZmqAddresses`；绑定地址与给 EngineCore 连接的地址要分开看，尤其是动态 TCP 端口。
+v0.33.0 还把两端的真实地址保存为 `MPClient.input_address` 与 `output_address`。
 
 共享内存 tensor arena 则位于 Engine→Worker 广播，不是替换所有 API→Engine 消息。
 固定 commit 的 `ParallelConfig.enable_shm_tensor_arena` 默认 **False**，明确为实验性 opt-in；
 启用后还要求 queue readers 全部 node-local。它面向较大的 CPU tensor，保留 /dev/shm 槽位。
-发布摘要称其默认开启，与该 tag 源码不一致，本章以源码默认值与门控为准，不把摘要当运行事实。
+v0.32.0 的发布摘要称其默认开启，与该 tag 源码不一致；v0.33.0 源码默认值仍为 `False`
+（`enable_shm_tensor_arena: bool = False`），本章以源码默认值与门控为准，不把摘要当运行事实。
+
+`MessageQueue` 的 reader 在 v0.33.0 有一处资源修复（#63165）：reader 一直忙、从不进入空闲
+等待时，libzmq 仍会为每次 notify 在内部排一个命令，若从不 poll 就会无限增长。现在
+`SpinCondition.record_read()` 每隔 `SHM_NOTIFY_POLL_INTERVAL_S`（2 秒）对 notify socket
+做一次 `poll(timeout=0)` 并取走挂起消息。这不改变共享内存的读写协议。
 
 [源码] `vllm/v1/engine/core_client.py` - `MPClient.__init__`
 
@@ -446,7 +533,7 @@ MPClient 先用 bind address 创建 socket，再从 `zmq.LAST_ENDPOINT` 得到�
 
 [源码] `vllm/v1/executor/multiproc_executor.py` - `MultiprocExecutor._init_executor`
 
-[源码] `vllm/distributed/device_communicators/shm_broadcast.py` - `MessageQueue`
+[源码] `vllm/distributed/device_communicators/shm_broadcast.py` - `MessageQueue`、`SpinCondition.record_read`
 
 ## 3.6 EngineCore 初始化：顺序就是契约
 
@@ -460,7 +547,7 @@ load plugins
 -> create StructuredOutputManager
 -> create Scheduler
 -> connect KV/EC aggregators
--> configure batch queue and request block hasher
+-> configure batch queue and request block hasher（hasher 另带 `num_hash_lookahead_tokens`）
 -> choose step_fn
 -> freeze startup heap / cache env reads
 ```
@@ -471,10 +558,12 @@ flowchart TD
     E --> F[注册 failure callback]
     F --> K1[收集 KV cache specs]
     K1 --> K2[决定 layout]
-    K2 --> K3[profile 可用显存]
+    K2 --> KG[全局分组 + DCP interleave]
+    KG --> K3[profile 可用显存]
     K3 --> K4[生成 KVCacheConfig]
     K4 --> K5[worker 初始化 cache]
-    K5 --> W[compile / warmup]
+    K5 --> KC[回填 CPU offload block 数]
+    KC --> W[compile / warmup]
     W --> SO[StructuredOutputManager]
     SO --> S[创建 Scheduler]
     S --> BS[确定 effective_attention_block_size]
@@ -497,14 +586,26 @@ KV cache 的真实规格来自执行侧模型层，容量又依赖加载模型�
 
 1. 从 worker 收集每层 KV spec。
 2. 根据 backend 和模型能力解析 cache layout。
-3. profile 可用内存。
-4. 生成各 worker cache config 和 scheduler 汇总 config。
-5. 更新 block 数、block size、容量与可能 auto-fit 的最大长度。
-6. 调用 executor 初始化 cache。
-7. compile 或 warm up 模型。
+3. 用 `get_global_kv_cache_groups` 合并各 worker 的 spec 并分组，据此
+   `adjust_dcp_kv_cache_interleave_size`，再通过
+   `set_kv_cache_layout(layout, cp_kv_cache_interleave_size)` 把 layout 与 DCP（decode context parallel，把长上下文的 KV 按 token 维度分到多个 rank）的 interleave 大小一起下发。
+4. profile 可用内存。
+5. `get_kv_cache_configs` 生成各 worker cache config 和 scheduler 汇总 config，直接复用第 3 步的分组。
+6. 更新 block 数、block size、容量与可能 auto-fit 的最大长度。
+7. 调用 executor 初始化 cache。
+8. 若启用 `SimpleCPUOffloadConnector` 且开了 prefix caching，向 worker 取回对齐后的 CPU block 数，
+   写回 `cache_config.simple_cpu_offload_num_blocks`。
+9. compile 或 warm up 模型。
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-27.md。
-> - [3e75ccba2](https://github.com/vllm-project/vllm/commit/3e75ccba298d0c7f045f35c39078cec74184b799)（[#62330](https://github.com/vllm-project/vllm/pull/62330)）：main 在第 2、3 步之间先用 `get_global_kv_cache_groups` 合并各 worker spec 并分组，据此 `adjust_dcp_kv_cache_interleave_size`，再通过 `set_kv_cache_layout(layout, cp_kv_cache_interleave_size)` 把 layout 与 DCP interleave 一起下发，然后才 profile；第 4 步 `get_kv_cache_configs` 直接使用这组 groups。
+第 3 步是 v0.33.0 的顺序变化（#62330，提交 `3e75ccba2`）：全局分组与 DCP interleave 必须在
+profile 之前确定，使 NIXL（跨实例传输 KV 的 connector）的 DCP interleave 大小在 profiling 开始时就是最终值；
+第 8 步（#52921）让 PP 与 spec decode 下各 worker 的 CPU offload 池大小一致，由 worker 汇报
+最终块数，缺失时直接 `assert` 失败。规划函数本身已迁到 `kv_cache_planning.py`（#61183），
+细节见第 05 章 5.5.5。
+
+[源码] `vllm/v1/engine/core.py` - `EngineCore._initialize_kv_caches`
+
+[源码] `vllm/v1/core/kv_cache_planning.py` - `get_global_kv_cache_groups`、`get_kv_cache_configs`
 
 第 05 章会展开 block 生命周期；这里要记住的是 Scheduler 创建之前，内存契约必须确定。
 
@@ -555,6 +656,11 @@ sequenceDiagram
 ```
 
 > **读图方法：** 这是“请求消息与 Utility RPC”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
+
+`profile` 这类 utility 在 v0.33.0 多带一个 `profiler_kwargs`（#51974）。它是与 `profile_prefix`
+并列的另一个字段（`profile_prefix` 仍是单独参数，不属于 `profiler_kwargs`）：`AsyncLLM.start_profile`
+收到的 `profiler_kwargs` 字典经 `EngineCoreClient.profile` → `EngineCore.profile` →
+`executor.profile` 原样透传，不在中途解释。
 
 返回值本身也可能是 Future，例如 pause 要等 engine 真正 idle。`_invoke_utility_method()`
 会注册 callback，而不是阻塞 core 主线程。
@@ -718,6 +824,58 @@ signal handler 不直接触碰可能被锁住的 queue mutex，而是通过 `Sig
 若本轮 `model_executed=False` 但 Scheduler 仍有请求，可能正在等 remote KV 或延迟 free。
 busy loop 会 sleep 1ms，让持有 GIL 的后台传输线程获得进展机会，避免控制面热循环。
 
+### 3.10.4 Watchdog：卡住时留下线程栈
+
+v0.33.0 引入可选的栈转储看门狗（#55700）。它**默认关闭**：`WatchdogConfig.dump_dir`
+为空字符串时，`start_watch_dog()` 直接返回一个什么都不做的 `NoopWatchDog`；配置了 `dump_dir`
+才会启动 `ThreadedWatchDog`，并打开 `faulthandler`。看门狗只有三个动作：
+
+- `feed()`：主线程“我还在推进”。`EngineCoreProc._process_engine_step()` 每次进入都先 `feed()`。
+- `disable()`：暂停计时的上下文管理器。`_process_input_queue()` 在阻塞等待 `input_queue.get()`
+  时包在 `with get_watch_dog().disable():` 里，因为空闲等请求不是故障。
+- `handle_failure(reason)`：把所有线程的栈追加写入 `dump_dir` 下的
+  `VLLM_STACK_DUMP_for_<name>_<pid>.log`。
+
+```mermaid
+flowchart LR
+    subgraph MAIN[主线程]
+        S[start_watch_dog engine_N] --> L[busy loop]
+        L --> I{阻塞等 input_queue?}
+        I -- 是 --> D[disable: 计时暂停]
+        I -- 否 --> F[_process_engine_step: feed]
+        D --> L
+        F --> L
+    end
+    subgraph BG[后台线程与信号]
+        T[每 check_interval 秒检查] --> C{距上次喂狗超过 timeout<br/>且本次卡顿未转储?}
+        C -- 是 --> H[handle_failure: 写线程栈]
+        SIG[收到 SIGTERM] --> H
+    end
+```
+
+> **读图方法：** 左半是 busy loop 主线程，只在“进入一步引擎推进”时喂狗，空闲阻塞时暂停计时；右半是后台线程，只比较“距离上次喂狗多久”。看门狗只记录，不重启、不杀进程。
+
+超时判定可以写成：
+
+```text
+Δ = now − last_feed_time
+转储条件：Δ > timeout，且 last_timeout_log < last_feed_time
+```
+
+其中 `now` 是单调时钟当前值，`last_feed_time` 是最近一次 `feed()` 的时刻，`timeout` 是
+`WatchdogConfig.timeout`（正整数秒），`last_timeout_log` 是上次转储时刻。第二个条件的意思是
+“同一次卡顿只转储一次”：只要中间没有新的 `feed()`，`last_timeout_log` 就不会小于 `last_feed_time`，
+后续检查周期不会重复写文件。例如 `timeout=60`，并假设检查线程足够频繁：引擎在 t=100 喂狗后卡住，t=161 的检查发现
+Δ=61>60 并转储；t=170 的检查虽然 Δ=70，但因 `last_timeout_log(161) ≥ last_feed_time(100)` 不再转储；
+t=200 恢复喂狗后，下一次卡顿才会重新转储。`disable()` 期间后台线程把 `last_feed_time` 持续刷新到
+当前时刻，所以恢复后的计时窗口从零开始。
+
+[源码] `vllm/utils/watch_dog.py` - `ThreadedWatchDog`、`start_watch_dog`、`get_watch_dog`
+
+[源码] `vllm/config/watchdog_config.py` - `WatchdogConfig`
+
+[源码] `vllm/v1/engine/core.py` - `EngineCoreProc.run_engine_core`、`_process_engine_step`
+
 ## 3.11 Batch queue：把提交与结算拆开
 
 当 `max_concurrent_batches > 1` 时，EngineCore 使用 `step_with_batch_queue()`。queue 元素为：
@@ -817,11 +975,11 @@ deferred batch 放回 queue。正确性依赖优先于最大化重叠。
 
 Pause 是 Scheduler 状态，不等于进程退出。
 
-| mode | 已在途请求 | 新请求 | Core 侧完成边界 |
-|---|---|---|---|
-| `abort` | 标记 abort，结束输出入队 | 入队但不调度 | Core 没有剩余工作，再同步设备 |
-| `wait` | running 及持有 KV 的可恢复 waiting 请求继续 drain | 未持有 KV 的新 waiting 请求暂停准入 | 可继续推进的请求与在途 batch 排空 |
-| `keep` | 保留请求；KV 是否保留还看 `clear_cache` | 入队但不调度 | 在途工作结算后同步设备 |
+| mode | 已在途请求 | 新请求（`pause_generation`，用户暂停） | 新请求（`pause_scheduler`，如 sleep） | Core 侧完成边界 |
+|---|---|---|---|---|
+| `abort` | 标记 abort，结束输出入队 | 以可重试错误拒绝 | 入队但不调度 | Core 没有剩余工作，再同步设备 |
+| `wait` | running 及持有 KV 的可恢复 waiting 请求继续 drain | 以可重试错误拒绝 | 未持有 KV 的新 waiting 请求暂停准入 | 可继续推进的请求与在途 batch 排空 |
+| `keep` | 保留请求；KV 是否保留还看 `clear_cache` | 入队但不调度 | 入队但不调度 | 在途工作结算后同步设备 |
 
 表中按普通非 DP 的 `EngineCoreProc` 路径解释。`_pause_complete()` 判断
 `not has_work()`，`has_work()` 检查调度器、batch queue 和 engines_running；它没有直接
@@ -841,17 +999,20 @@ Pause 是 Scheduler 状态，不等于进程退出。
 ```mermaid
 stateDiagram-v2
     [*] --> UNPAUSED
-    UNPAUSED --> PAUSED_NEW: abort 或 wait
+    UNPAUSED --> PAUSED_NEW: pause_scheduler abort 或 wait
+    UNPAUSED --> PAUSED_NEW_REJECT: pause_generation abort 或 wait
     UNPAUSED --> PAUSED_ALL: keep
     PAUSED_NEW --> UNPAUSED: resume
+    PAUSED_NEW_REJECT --> UNPAUSED: resume
     PAUSED_ALL --> UNPAUSED: resume
     PAUSED_NEW --> PAUSED_NEW: 新请求只排队
+    PAUSED_NEW_REJECT --> PAUSED_NEW_REJECT: 新请求被拒绝
     PAUSED_ALL --> PAUSED_ALL: 新旧请求均不 step
 ```
 
-> **读图方法：** 这是“Pause、Sleep 与 Resume”的状态图。先找初始状态，再沿箭头观察触发条件和状态变化；重点不是背状态名，而是弄清谁触发转换、转换后哪些资源需要更新。
+> **读图方法：** 这是“Pause、Sleep 与 Resume”的状态图。先找初始状态，再沿箭头观察触发条件和状态变化；重点不是背状态名，而是弄清谁触发转换、转换后哪些资源需要更新。`PAUSED_NEW_REJECT` 不是 Scheduler 的新枚举值，而是“`PAUSED_NEW` 加上 `EngineCoreProc.reject_new_requests=True`”的简称。
 
-v0.32.0 不能只按 waiting/running 标签判断是否继续：`PAUSED_NEW` 还允许持有 KV 的
+v0.33.0 同样不能只按 waiting/running 标签判断是否继续：`PAUSED_NEW` 还允许持有 KV 的
 waiting 请求 drain，避免部分完成的请求占着资源而无法排空；真正尚未开始的新请求仍等待 resume。
 具体资格由 Scheduler 判断：优先推进 `kv_holding_waiting`，只有该队列为空且 `UNPAUSED` 才取普通 `waiting`。
 `get_num_unfinished_requests` 在 `PAUSED_NEW` 只统计持有 KV 的 waiting，并扣除等待后续流式输入者；
@@ -859,8 +1020,53 @@ waiting 请求 drain，避免部分完成的请求占着资源而无法排空；
 
 [源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`、`get_num_unfinished_requests`
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
-> - [d5b36699b](https://github.com/vllm-project/vllm/commit/d5b36699b21bd7b1c4ce01afe218e3c3eaacc27e)（[#51488](https://github.com/vllm-project/vllm/pull/51488)）：`pause_generation` 的 `abort` / `wait` 模式在 main 上会以可重试的 `engine_paused` 错误拒绝暂停期间到达的新请求；`keep` 模式与 sleep 等其他暂停仍不拒绝新请求；KV 清理标记和已打开 streaming session 的输入不受影响。上文模式表中 `abort` 行“入队但不调度”与 `wait` 行“未持有 KV 的新 waiting 请求暂停准入”这两格“新请求”列，以及状态图里“新请求只排队”，在 main 上只对 `keep` 模式成立；`abort` / `wait` 下新请求会直接收到 `engine_paused` 错误。
+#### v0.33.0：用户暂停会拒绝新请求
+
+`AsyncLLM.pause_generation()` 在 v0.33.0 不再调用 `pause_scheduler`，而是走新的 utility
+`pause_generation`（#51488，提交 `d5b36699b`）。`EngineCoreProc.pause_generation()` 先执行
+原来的 `pause_scheduler(mode, clear_cache)`，再设置 `reject_new_requests = (mode != "keep")`；
+`resume_scheduler()` 把它复位为 `False`。sleep 等内部暂停仍然直接调用 `pause_scheduler`，
+所以不改变“新请求入队”的旧行为。
+
+```mermaid
+sequenceDiagram
+    participant U as 调用者
+    participant A as AsyncLLM
+    participant E as EngineCoreProc
+    participant S as Scheduler
+    U->>A: pause_generation(mode)
+    A->>E: utility pause_generation
+    E->>S: pause_scheduler(mode, clear_cache)
+    E->>E: reject_new_requests = (mode 不是 keep)
+    U->>A: generate(新请求)
+    A->>E: ADD
+    E->>E: _reject_add_while_paused
+    E-->>A: EngineCoreOutput(ERROR, engine_paused, retryable)
+    A-->>U: RetryableRequestError
+    U->>A: resume_generation()
+    E->>E: reject_new_requests = False
+```
+
+> **读图方法：** 从上到下读一次用户暂停。前半段设置两件事：调度器暂停与“拒绝新请求”开关；中间的 ADD 在 busy loop 处理输入时被拒绝；最后 resume 把开关复位。
+
+拒绝发生在 `_handle_client_request()` 处理 ADD 的位置，`_reject_add_while_paused()` 有两个豁免：
+`abort_immediately` 的请求（KV 清理标记）和 `scheduler.has_request(request_id)` 为真的请求
+（已打开的 streaming session 的后续输入），它们都不算“新工作”。被拒绝的请求会收到
+`EngineCoreOutput(finish_reason=ERROR, error=RequestError(code="engine_paused",
+retryable=True))`；前端 `RequestError.to_exception()` 把可重试错误还原为
+`RetryableRequestError`，其 `status_code` 为 `SERVICE_UNAVAILABLE`（503）。若被拒绝的请求带
+`kv_transfer_params`，EngineCore 会把它标成 `abort_immediately` 再交给 Scheduler，让 KV
+connector 释放为它保留的远端 block。前端对 `n>1` 请求的处理见 3.3.2。
+
+因此上面模式表中 `abort` / `wait` 行的“入队但不调度 / 暂停准入”只描述 `pause_scheduler`
+入口；用户暂停入口下的这两行是拒绝。状态图里的“新请求只排队”同理只属于 `PAUSED_NEW`。
+
+[源码] `vllm/v1/engine/core.py` - `EngineCoreProc.pause_generation`、`resume_scheduler`、
+`_reject_add_while_paused`
+
+[源码] `vllm/v1/engine/async_llm.py` - `AsyncLLM.pause_generation`
+
+[测试] `tests/v1/engine/test_engine_core.py` - `test_pause_generation_rejects_new_requests`
 
 [源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`、`get_num_unfinished_requests`
 
@@ -887,6 +1093,15 @@ buffers。它不保证进程所有 GPU 占用降到零；源码日志仍会报�
 Scheduler，避免权重尚未驻留就调度请求。`wake_up` 现在返回 `fully_awake`，前端
 据此更新 sleep 指标；一次部分唤醒不等于全部资源已恢复。
 
+v0.33.0 还让 NIXL pull connector 支持 sleep（#59635）：唤醒时若 `tags` 为 `None` 或包含
+`"kv_cache"`，EngineCore 会重新调用 `_set_kv_connector_handshake_metadata()`。该方法把各 worker
+的握手元数据合并成 `{(pp_rank, tp_rank): metadata}` 交给 Scheduler 侧 connector；KV cache 重新
+注册后元数据已变，不重发的话对端仍按旧地址拉取。
+
+[源码] `vllm/v1/engine/core.py` - `EngineCore._set_kv_connector_handshake_metadata`、`wake_up`
+
+[测试] `tests/v1/engine/test_engine_core.py` - `test_wake_up_republishes_kv_connector_handshake_metadata`
+
 ### 只释放 KV 物理内存的边界
 
 `release_kv_cache_memory()` 与释放某个请求的 block 引用不同：它要求 pause 已完成、
@@ -907,10 +1122,13 @@ RUNNING -> REQUESTED -> SHUTTING_DOWN
 ```
 
 正常构造完成后，信号处理设置 REQUESTED，并通过 `SignalCallback` 唤醒 input queue；
-不会直接在信号处理器中操作可能被中断线程持有的非重入 queue 锁。v0.32.0 还记录
+不会直接在信号处理器中操作可能被中断线程持有的非重入 queue 锁。自 v0.32.0 起还记录
 `shutdown_requested`：若 SIGTERM/SIGINT 在 EngineCore 构造期间到达，先保存标志，构造完成后
 在进入 busy loop 之前转为 REQUESTED；callback 只在对象和队列已就绪后安装。
 策略仍由 busy loop 的 `_handle_shutdown()` 执行，不能丢掉初始化窗口中的退出请求。
+v0.33.0 在记录请求之前多一步：收到 `SIGTERM`（不含 SIGINT）时调用
+`get_watch_dog().handle_failure(signal_name)`，看门狗启用时会先把所有线程栈写入转储文件，
+便于事后判断退出时进程停在哪里（见 3.10.4）。
 
 [源码] `vllm/v1/engine/core.py` - `EngineCoreProc.run_engine_core`
 
@@ -943,7 +1161,7 @@ engine manager、关闭 socket、结束输出线程或 asyncio task。
 
 ### 多 Engine utility 结果不能只看一个 rank
 
-v0.32.0 的 `AsyncMPClient.call_utility_all_async` 收集所有 managed engine 的结果。
+v0.33.0 的 `AsyncMPClient.call_utility_all_async` 收集所有 managed engine 的结果。
 `reset_prefix_cache_async` 与 `wake_up_async` 对结果取 all；`is_sleeping_async` 与
 `is_scheduler_paused_async` 使用 consensus helper，结果不一致时抛错而不是任取一个状态。
 这不表示所有 utility 都改成广播，仍应逐个查看方法调用的 helper。
@@ -1387,6 +1605,9 @@ Actor mixin 提供 Ray 生命周期、可见 GPU 和免握手覆盖；EngineCore
 - [ ] 在真实 NVIDIA GPU 上采集 Future、CUDA stream 与 batch queue 时间线。
 - [ ] 启动真实在线服务验证信号、ZMQ 和 EngineDeadError 传播。
 - [ ] 由独立审阅者复核后将状态改为 `verified`。
+
+2026-11-10 已对照 v0.33.0（`4ba787ec9959`）静态复核，修订清单见
+[v0.33.0 升级核对](../../meta/upgrade-v0.33.0-2026-11-10/03-engine-core.md)。
 
 本章正文已经完整，`content_complete=true`。当前机器缺少可用 vLLM GPU runtime，
 因此 `runtime_verified=false`，按项目规则保持 `draft`。

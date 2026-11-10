@@ -20,9 +20,15 @@ class SelectionTest(unittest.TestCase):
     def test_executor_backend_selection(self):
         self.assertEqual(select_executor_backend("uni"), "UniProcExecutor")
         self.assertEqual(select_executor_backend("mp"), "MultiprocExecutor")
+        self.assertEqual(select_executor_backend("ray"), "RayExecutorV2")
         self.assertEqual(
-            select_executor_backend("ray", use_ray_v2=True), "RayExecutorV2"
+            select_executor_backend("external_launcher"),
+            "ExecutorWithExternalLauncher",
         )
+        self.assertEqual(select_executor_backend("pkg.Custom"), "pkg.Custom")
+        # v0.33.0 removed the legacy Ray executor and its selection switch.
+        with self.assertRaises(TypeError):
+            select_executor_backend("ray", use_ray_v2=False)
 
     def test_registry_uses_first_supported_architecture(self):
         registry = {"LlamaForCausalLM": "llama:LlamaForCausalLM"}

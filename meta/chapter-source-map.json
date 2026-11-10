@@ -42,10 +42,13 @@
       {"path": "vllm/config/vllm.py", "symbols": ["class VllmConfig", "def __post_init__", "def max_concurrent_batches"]},
       {"path": "vllm/v1/engine/llm_engine.py", "symbols": ["class LLMEngine", "def from_engine_args", "def step"]},
       {"path": "vllm/v1/engine/async_llm.py", "symbols": ["class AsyncLLM", "async def generate", "def _run_output_handler"]},
-      {"path": "vllm/v1/engine/core_client.py", "symbols": ["class EngineCoreClient", "def make_client", "class InprocClient", "class SyncMPClient", "class AsyncMPClient", "def start_engine_core_monitor", "def call_utility_all_async", "def call_utility_consensus_async"]},
-      {"path": "vllm/v1/engine/core.py", "symbols": ["class EngineCore", "def _initialize_kv_caches", "def step", "def step_with_batch_queue", "def _process_aborts_queue", "class EngineCoreProc", "def run_busy_loop", "def process_input_sockets", "def process_output_sockets", "def pause_scheduler", "def _pause_complete", "def has_work", "def _reset_caches", "class EngineCoreActorMixin", "class EngineCoreActor", "def _initialize_effective_attention_block_size", "def release_kv_cache_memory", "def run_engine_core"]},
+      {"path": "vllm/v1/engine/core_client.py", "symbols": ["class EngineCoreClient", "def make_client", "class InprocClient", "class SyncMPClient", "class AsyncMPClient", "def start_engine_core_monitor", "def call_utility_all_async", "def call_utility_consensus_async", "class DPAsyncMPClient", "class DPLBAsyncMPClient"]},
+      {"path": "vllm/v1/engine/core.py", "symbols": ["class EngineCore", "def _initialize_kv_caches", "def step", "def step_with_batch_queue", "def _process_aborts_queue", "class EngineCoreProc", "def run_busy_loop", "def process_input_sockets", "def process_output_sockets", "def pause_scheduler", "def _pause_complete", "def has_work", "def _reset_caches", "class EngineCoreActorMixin", "class EngineCoreActor", "def _initialize_effective_attention_block_size", "def release_kv_cache_memory", "def run_engine_core", "def pause_generation", "def _reject_add_while_paused", "def _set_kv_connector_handshake_metadata", "class DPEngineCoreProc", "def _should_throttle_prefills"]},
       {"path": "vllm/v1/engine/__init__.py", "symbols": ["class EngineCoreReadyResponse", "class EngineCoreRequest", "class EngineCoreOutputs", "class EngineCoreRequestType"]},
-      {"path": "tests/v1/engine/test_engine_core.py", "symbols": ["def test_pause_synchronizes_device_before_cache_reset", "step_with_batch_queue"]},
+      {"path": "vllm/v1/engine/coordinator.py", "symbols": ["class DPCoordinatorProc"]},
+      {"path": "vllm/utils/watch_dog.py", "symbols": ["class ThreadedWatchDog", "def start_watch_dog", "def get_watch_dog"]},
+      {"path": "vllm/config/watchdog_config.py", "symbols": ["class WatchdogConfig"]},
+      {"path": "tests/v1/engine/test_engine_core.py", "symbols": ["def test_pause_synchronizes_device_before_cache_reset", "def test_pause_generation_rejects_new_requests", "def test_idle_dp_rank_announces_wave_for_new_work", "step_with_batch_queue"]},
       {"path": "tests/v1/engine/test_abort_final_step.py", "symbols": ["async def test_abort_during_final_step"]},
       {"path": "tests/v1/engine/test_startup_watch_processes.py", "symbols": ["def test_engine_core_process_shutdown_timeout"]},
       {"path": "vllm/entrypoints/common/offline.py", "symbols": ["class OfflineInferenceMixin", "def _run_engine"]},
@@ -53,15 +56,17 @@
       {"path": "vllm/distributed/device_communicators/shm_broadcast.py", "symbols": ["class MessageQueue"]}
     ],
     "04-scheduler": [
-      {"path": "vllm/v1/core/sched/scheduler.py", "symbols": ["class Scheduler", "def schedule", "def _preempt_request", "def _update_after_schedule", "def update_from_output", "def get_num_unfinished_requests", "kv_holding_waiting"]},
+      {"path": "vllm/v1/core/sched/scheduler.py", "symbols": ["class Scheduler", "def schedule", "def _preempt_request", "def _update_after_schedule", "def update_from_output", "def get_num_unfinished_requests", "kv_holding_waiting", "def _drafts_unused", "def _get_encoder_input_updates", "def _drain_deferred_loads"]},
+      {"path": "vllm/v1/core/sched/interface.py", "symbols": ["class SchedulerInterface", "def has_request"]},
       {"path": "vllm/v1/core/sched/output.py", "symbols": ["class NewRequestData", "class CachedRequestData", "class SchedulerOutput"]},
       {"path": "vllm/v1/core/sched/request_queue.py", "symbols": ["class SchedulingPolicy", "class RequestQueue", "class FCFSRequestQueue", "class PriorityRequestQueue"]},
       {"path": "vllm/v1/request.py", "symbols": ["class Request", "def num_tokens_with_spec", "def __lt__", "class RequestStatus"]},
       {"path": "vllm/config/scheduler.py", "symbols": ["class SchedulerConfig", "max_num_scheduled_tokens", "scheduler_reserve_full_isl", "prefill_schedule_interval", "max_num_active_seqs", "long_prefill_token_threshold_adaptive"]},
       {"path": "vllm/v1/core/kv_cache_manager.py", "symbols": ["class KVCacheManager", "def allocate_slots"]},
       {"path": "vllm/v1/core/sched/async_scheduler.py", "symbols": ["class AsyncScheduler"]},
-      {"path": "tests/v1/core/test_scheduler.py", "symbols": ["def test_schedule_concurrent_partial_requests", "def test_schedule_order", "def test_preempt_during_execution", "def test_priority_scheduling_basic_ordering", "def test_priority_scheduling_preemption_and_resumption_when_out_of_kv", "def test_pause_new_drains_async_kv_loads", "def test_pause_new_ignores_streaming_session_waiting_for_input"]},
-      {"path": "tests/v1/core/test_deferred_block_free.py", "symbols": ["def _setup_request_with_inflight_step", "def test_finish_defers_free_until_inflight_step_done", "def test_fence_held_across_multiple_inflight_steps"]}
+      {"path": "tests/v1/core/test_scheduler.py", "symbols": ["def test_schedule_concurrent_partial_requests", "def test_schedule_order", "def test_preempt_during_execution", "def test_priority_scheduling_basic_ordering", "def test_priority_scheduling_preemption_and_resumption_when_out_of_kv", "def test_pause_new_drains_async_kv_loads", "def test_pause_new_ignores_streaming_session_waiting_for_input", "def test_skip_drafts_only_when_no_request_can_use_them", "def test_local_prefill_interval_holds_prefill_between_bursts", "def test_no_mm_input_chunking_at_item_boundary"]},
+      {"path": "tests/v1/core/test_deferred_block_free.py", "symbols": ["def _setup_request_with_inflight_step", "def test_finish_defers_free_until_inflight_step_done", "def test_fence_held_across_multiple_inflight_steps", "def test_deferred_async_load_registers_after_inflight_step"]},
+      {"path": "tests/v1/streaming_input/test_scheduler_streaming.py", "symbols": ["def test_session_resumes_after_stop_while_preempted"]}
     ],
     "05-kv-cache": [
       {"path": "vllm/v1/kv_cache_interface.py", "symbols": ["class KVCacheSpec", "class AttentionSpec", "class FullAttentionSpec", "class MLAAttentionSpec", "class SlidingWindowSpec", "class MambaSpec", "class KVCacheTensor", "class KVCacheGroupSpec", "class KVCacheConfig", "def get_mamba_prefill_checkpoint_position", "cache_hit_alignment_tokens"]},
