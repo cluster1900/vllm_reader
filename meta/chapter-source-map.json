@@ -34,7 +34,14 @@
       {"path": "tests/v1/engine/test_abort_final_step.py", "symbols": ["async def test_abort_during_final_step"]},
       {"path": "vllm/v1/engine/admission_control.py", "symbols": ["class SharedAdmissionStats"]},
       {"path": "vllm/entrypoints/serve/utils/api_utils.py", "symbols": ["def get_max_tokens"]},
-      {"path": "vllm/v1/core/sched/utils.py", "symbols": ["def check_stop"]}
+      {"path": "vllm/v1/core/sched/utils.py", "symbols": ["def check_stop"]},
+      {"path": "vllm/entrypoints/launchers/api_server/routers.py", "symbols": ["def register_api_routers"]},
+      {"path": "vllm/entrypoints/openai/decisions/api_router.py", "symbols": ["async def create_decision"]},
+      {"path": "vllm/entrypoints/openai/decisions/serving.py", "symbols": ["class OpenAIServingDecisions", "def create_decisions"]},
+      {"path": "vllm/entrypoints/openai/decisions/protocol.py", "symbols": ["class DecisionRequest", "class PredicateQuestion", "class ChoiceQuestion", "class ScoreQuestion"]},
+      {"path": "vllm/entrypoints/generate/structured_decisions/api_router.py", "symbols": ["async def create_structured_decision"]},
+      {"path": "vllm/entrypoints/generate/structured_decisions/serving.py", "symbols": ["class ServingStructuredDecisions"]},
+      {"path": "vllm/entrypoints/openai/decisions/strategies.py", "symbols": ["class ReadStrategy", "def select_read_strategy"]}
     ],
     "03-engine-core": [
       {"path": "vllm/engine/arg_utils.py", "symbols": ["class EngineArgs", "def create_engine_config"]},
@@ -173,9 +180,9 @@
       {"path": "vllm/model_executor/models/utils.py", "symbols": ["class PPMissingLayer", "def make_layers", "def is_pp_missing_parameter"]},
       {"path": "vllm/model_executor/models/llama.py", "symbols": ["class LlamaModel", "IntermediateTensors("]},
       {"path": "vllm/v1/worker/gpu_worker.py", "symbols": ["class AsyncIntermediateTensors", "def execute_model", "irecv_tensor_dict(", "isend_tensor_dict(", "def init_device"]},
-      {"path": "vllm/v1/engine/core_client.py", "symbols": ["class DPAsyncMPClient", "class DPLBAsyncMPClient", "def get_core_engine_for_request", "def _eep_commit_pause_mode"]},
+      {"path": "vllm/v1/engine/core_client.py", "symbols": ["class DPAsyncMPClient", "class DPLBAsyncMPClient", "def get_core_engine_for_request", "def _eep_commit_pause_mode", "def prepare_elastic_ep", "def commit_elastic_ep"]},
       {"path": "vllm/v1/engine/coordinator.py", "symbols": ["class DPCoordinator", "class DPCoordinatorProc"]},
-      {"path": "vllm/v1/engine/core.py", "symbols": ["class DPEngineCoreProc", "def _has_global_unfinished_reqs"]},
+      {"path": "vllm/v1/engine/core.py", "symbols": ["class DPEngineCoreProc", "def _has_global_unfinished_reqs", "def reinitialize_distributed", "def commit_prepared_elastic_ep"]},
       {"path": "vllm/v1/worker/dp_utils.py", "symbols": ["def coordinate_batch_across_dp", "def _synchronize_dp_ranks"]},
       {"path": "vllm/v1/executor/abstract.py", "symbols": ["class Executor", "def get_class"]},
       {"path": "vllm/v1/executor/multiproc_executor.py", "symbols": ["class MultiprocExecutor", "class WorkerProc", "def collective_rpc", "def _can_start_workers_concurrently", "def _start_workers_concurrently"]},
@@ -203,9 +210,14 @@
       {"path": "tests/distributed/test_multiproc_executor.py", "symbols": ["def test_multiproc_executor_collective_rpc"]},
       {"path": "vllm/v1/worker/gpu/pp_utils.py", "symbols": ["class PPHandler", "def _sample_len", "def receive", "def broadcast_drafts"]},
       {"path": "vllm/v1/worker/gpu/sample/batch_shard.py", "symbols": ["class BatchSharder", "def shard_sampler_inputs"]},
-      {"path": "vllm/config/vllm.py", "symbols": ["def adjust_dcp_kv_cache_interleave_size", "def _validate_batch_sharded_sampling"]},
+      {"path": "vllm/config/vllm.py", "symbols": ["def adjust_dcp_kv_cache_interleave_size", "def _validate_batch_sharded_sampling", "def _resolve_extensible_kv_cache"]},
       {"path": "vllm/v1/worker/gpu/model_runner.py", "symbols": ["def sample_tokens"]},
-      {"path": "vllm/v1/worker/gpu/spec_decode/speculator_config.py", "symbols": ["def pcp_unsupported_reason"]}
+      {"path": "vllm/v1/worker/gpu/spec_decode/speculator_config.py", "symbols": ["def pcp_unsupported_reason"]},
+      {"path": "vllm/entrypoints/serve/elastic_ep/api_router.py", "symbols": ["async def scale_elastic_ep", "async def is_scaling_elastic_ep"]},
+      {"path": "vllm/entrypoints/serve/elastic_ep/middleware.py", "symbols": ["class ScalingMiddleware", "def set_elastic_ep_rank_retired"]},
+      {"path": "vllm/distributed/elastic_ep/elastic_state.py", "symbols": ["class ElasticEPScalingState", "class ScaleUpExistingEngineState"]},
+      {"path": "vllm/distributed/elastic_ep/elastic_execute.py", "symbols": ["class ElasticEPScalingExecutor"]},
+      {"path": "vllm/v1/engine/async_llm.py", "symbols": ["def scale_elastic_ep"]}
     ],
     "10-experiments": [
       {"path": "vllm/benchmarks/latency.py", "symbols": ["def add_cli_args", "def run_to_completion", "def main"]},
