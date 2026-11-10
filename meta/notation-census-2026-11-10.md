@@ -18,7 +18,7 @@
 
 ## 结果
 
-公式 403 个（01:71、04:102、05:12、06:44、07:31、08:10、09:94、10:39）；LaTeX 符号 289 种。；代码样式符号 96 种。
+公式 403 个（01:71、04:102、05:12、06:44、07:31、08:10、09:94、10:39）；LaTeX 符号 289 种；代码样式符号 96 种。
 
 1. **一个字母多种意思**（普查前）：`T`（token 数、温度、block 大小、耗时、转置）、`B`（批大小、block 大小、字节数、token 预算、布尔量、
    all-reduce 块大小）、`N`、`L`、`P`、`I`、`O`、`M`、`R`、`W`、`p`、`d`、`m`、`S`、`H`、`V`、`Q` 等 20 来个字母，
@@ -35,10 +35,13 @@
    - ch01 L891 的实验常量 `P=128`、`G=32` 与 `P`、ch10 的 goodput $G$ 冲突；
    - ch10 L909–911 的 Little 定律 `L=λW`：`L` 是层数、`W` 是 world size；
    - ch09 同一章里 $n_i$ 有两个意思：L693 的 logits 行数、L1060 的路由到 expert rank 的 token 数；ch09 通用线性层的权重 `A` 与 `W` 的分工；
-   - 行内代码里的算式也带着旧符号：ch01 L513–L553、ch07 L1104–L1105 的 `T>0`/`T=0`，ch09 L444、L488 的 `Dout/p`，ch05 L1651–L1659 的 `R`、`T`、`p`。
-4. **普查后保持不变的**：索引（$i,j,r,t$）；ch10 的 $\lambda$、$\rho$、$Q_{\mathrm{out}}$、$G$、$N_{\mathrm{GPU}}$ 等已经统一的量；
-   ch09 的 $g,\ell$、$\alpha,\beta$；$H_{\mathrm{kv,local}}$、$\mathrm{TP}$ 等；ch01 的 `n`（`SamplingParams.n`，API 参数）。
-   它们要么已经满足“一字母一义”，要么是小节内的局部字母（`notation.md` 第 3 节）。
+   - 行内代码里的算式也带着旧符号：ch01 L513–L553、ch07 L1104–L1105 的 `T>0`/`T=0`，ch09 L444、L488 的 `Dout/p`，ch05 L1651–L1659 的 `R`、`T`、`p`；
+   - 全局符号与局部字母的撞名（F0 r1 评审指出，r2 已改）：`ℓ`（ch09 本机 rank 与 ch06 在线 softmax 分母，后者改 $Z$）、`Q`（Query 矩阵与 ch09、ch10 的吞吐，后者改 $\mathrm{thr}$）、
+     `θ`（RoPE 旋转角，只在第 1 节登记，不再列为局部）、`b`（ch06 物理 block ID、ch09 偏置 $b_i$、ch10 burstiness，三者都是局部字母，不再写成全局）。
+4. **普查后保持不变的**：索引（$i,j,r,t$，局部）；ch10 的 $\lambda$、$\rho$、$G$ 等已经统一的量；
+   ch09 的全局 rank $g$ 与本机 rank $\ell$（$\ell$ 是全局符号，ch06 的 $m,\ell$ 因此改为 $m,Z$）、局部的 $\alpha,\beta$；$H_{\mathrm{kv,local}}$、$\mathrm{TP}$ 等；
+   ch01 的 `n`（`SamplingParams.n`，API 参数）。它们要么已经满足“一字母一义”，要么是小节内的局部字母（`notation.md` 第 3 节）。
+   ch10 的 $Q_{\mathrm{out}}$、$N_{\mathrm{GPU}}$、$N_{\mathrm{users}}$ 原先看似统一，但与 Query 矩阵 $Q$、“$N$ 是 token 数”冲突，所以也在改名对照表里（$\mathrm{thr}$、$n_{\mathrm{GPU}}$、$n_{\mathrm{users}}$）。
 
 ## 附：LaTeX 符号表
 

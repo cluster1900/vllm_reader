@@ -1,9 +1,48 @@
+import re
 import tempfile
 import unittest
 from pathlib import Path
 
 from scripts.math_support import ROOT, check_math
-from scripts.notation_census import census, code_symbols, formula_symbols, render
+from scripts.notation_census import WRAPPER, census, code_symbols, flatten_scripts, formula_symbols, render
+
+
+def _section(text: str, start: str, end: str) -> str:
+    return text.split(start, 1)[1].split(end, 1)[0]
+
+
+def _table_rows(section: str) -> list[list[str]]:
+    rows = []
+    for line in section.splitlines():
+        if not line.startswith("|") or set(line) <= set("|-: "):
+            continue
+        cells = [cell.strip() for cell in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+        rows.append(cells)
+    return rows
+
+
+def _normal(tex: str) -> str:
+    """One canonical spelling: `\\mathrm{blk}` and `blk` alike, no spaces, no spacing commands."""
+    tex = WRAPPER.sub(lambda m: m.group(1), flatten_scripts(tex))
+    tex = re.sub(r"\\[,;! ]", "", tex)
+    return re.sub(r"\s+", "", tex)
+
+
+def _atoms(cell: str) -> list[str]:
+    """Every symbol a table cell registers: each `$...$`, split at top-level commas, left of `=`."""
+    atoms = []
+    for tex in re.findall(r"\$([^$]+)\$", cell):
+        depth, piece, pieces = 0, "", []
+        for char in tex:
+            depth += (char == "{") - (char == "}")
+            if char == "," and depth == 0:
+                pieces.append(piece)
+                piece = ""
+            else:
+                piece += char
+        pieces.append(piece)
+        atoms.extend(_normal(piece.split("=", 1)[0]) for piece in pieces if piece.strip())
+    return atoms
 
 
 class FormulaSymbolsTest(unittest.TestCase):
@@ -81,6 +120,56 @@ class NotationGuideTest(unittest.TestCase):
         section = self.text.split("## 8 B1–B8 的优先清单", 1)[1].split("## 9 ", 1)[0]
         rows = [line for line in section.splitlines() if line.startswith("| B")]
         self.assertEqual(len(rows), 27)
+
+    def _registries(self):
+        global_rows = _table_rows(_section(self.text, "## 1 全局符号表", "## 2 命名规则"))
+        local_rows = _table_rows(_section(self.text, "## 3 局部字母表", "## 4 改名对照表"))
+        global_atoms = [a for row in global_rows if row[0] != "符号" for a in _atoms(row[0])]
+        local_atoms = [a for row in local_rows if row[0] != "章" for a in _atoms(row[1])]
+        return global_atoms, local_atoms
+
+    def test_global_symbols_are_registered_once(self):
+        global_atoms, _ = self._registries()
+        self.assertGreater(len(global_atoms), 100)
+        duplicated = sorted({a for a in global_atoms if global_atoms.count(a) > 1})
+        self.assertEqual(duplicated, [], "one letter, one meaning: registered twice in section 1")
+
+    def test_local_letters_are_not_global_symbols(self):
+        global_atoms, local_atoms = self._registries()
+        self.assertGreater(len(local_atoms), 40)
+        self.assertEqual(sorted(set(global_atoms) & set(local_atoms)), [], "local letter is also in section 1")
+
+    def test_every_renamed_symbol_is_registered(self):
+        """The rename table may only introduce symbols that section 1 or 3 defines (any column)."""
+        def keys(text: str) -> set[str]:
+            found = set()
+            for tex in re.findall(r"\$([^$]+)\$", text):
+                for key in formula_symbols(tex):
+                    key = key.replace("\\operatorname", "\\mathrm").replace("^{ }", "")  # K^{\top} is K, transposed
+                    found.add(key.replace("_{TP-1}", "_i"))  # A_{TP-1} is the last A_i
+            return found
+
+        registered = keys(_section(self.text, "## 1 全局符号表", "## 2 命名规则")) | keys(
+            _section(self.text, "## 3 局部字母表", "## 4 改名对照表"))
+        unregistered = {}
+        for row in _table_rows(_section(self.text, "## 4 改名对照表", "## 5 写法规则")):
+            if len(row) < 4 or row[0] == "旧写法":
+                continue
+            for key in keys(row[1]) - registered:
+                unregistered[key] = row[1]
+        self.assertEqual(unregistered, {}, "new notation used in section 4 but not registered in section 1 or 3")
+
+    def test_collisions_found_in_review_stay_fixed(self):
+        global_atoms, local_atoms = self._registries()
+        for symbol in ("Q", "\\ell", "\\theta"):
+            self.assertEqual(global_atoms.count(symbol) + local_atoms.count(symbol), 1, symbol)
+        for symbol in ("b", "i"):
+            self.assertNotIn(symbol, global_atoms)
+        for symbol in ("N_{gen}", "N_{req}", "N_{SLO}", "N_{GPU}", "N_{users}"):
+            self.assertNotIn(symbol, global_atoms + local_atoms)
+        for symbol in ("N_{sch,i}", "N_{drf,i}", "N_{acc,i}", "E_{max}", "cap\\_bound", "\\overline{\\Deltat}_{sys}",
+                       "\\Deltat_{clientqueue}", "n_{req}", "n_{SLO}", "n_{GPU}", "n_{users}"):
+            self.assertIn(symbol, global_atoms + local_atoms)
 
     def test_diagram_rule_covers_required_and_optional(self):
         rule = self.text.split("## 7 配图规则", 1)[1].split("## 8 ", 1)[0]
