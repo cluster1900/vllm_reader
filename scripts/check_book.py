@@ -368,8 +368,8 @@ def main() -> int:
         text = path.read_text(encoding="utf-8")
         check_markdown(path.relative_to(ROOT), text, errors)
         check_local_links(path, text, errors)
-        if path == ROOT / "glossary" / "terms.md":
-            errors.extend(f"glossary/terms.md: {error}" for error in check_math(text))
+        if path in (ROOT / "glossary" / "terms.md", ROOT / "glossary" / "notation.md"):
+            errors.extend(f"{path.relative_to(ROOT)}: {error}" for error in check_math(text))
 
     anchor_count, explicit_reference_count = check_source_map(
         chapter_metadata, chapter_texts, errors

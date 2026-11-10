@@ -22,7 +22,7 @@ READER_REPOSITORY = "https://github.com/cluster1900/vllm_reader"
 
 def source_paths(root: Path) -> list[Path]:
     return [root / "book/reading-guide.md", *sorted((root / "book").glob("*/README.md")),
-            root / "glossary/terms.md"]
+            root / "glossary/terms.md", root / "glossary/notation.md"]
 
 
 def digest(data: bytes) -> str:
