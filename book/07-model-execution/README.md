@@ -202,7 +202,7 @@ flowchart TD
 | `external_launcher` | `ExecutorWithExternalLauncher` | `torchrun` 等外部启动器 |
 | Python 类/限定名 | 自定义 `Executor` 子类 | out-of-tree 扩展 |
 
-[源码] `vllm/v1/executor/abstract.py` - `Executor.get_class`（L64；`ray` 分支 L76–L78 @ `4ba787ec`）
+[源码] `vllm/v1/executor/abstract.py` - `Executor.get_class`（L64；`ray` 分支 L76–L79 @ `4ba787ec`）
 
 ```mermaid
 flowchart TD
@@ -356,9 +356,9 @@ stateDiagram-v2
 上一节的 busy loop 在 v0.33.0 有三处行为变化。它们都发生在“Worker 进程已经存在、但还没进入稳态
 服务”或“某个 RPC 失败”的边缘，所以放在一起看。
 
-1. **spawn 模式下并发启动本地 Worker。** `52f44839f`（#60028）让 `MultiprocExecutor._init_executor`
+1. **非 fork 启动方式下并发启动本地 Worker。** `52f44839f`（#60028）让 `MultiprocExecutor._init_executor`
    先调用 `_can_start_workers_concurrently(inherited_fds)`：只有 `inherited_fds is None`（也就是
-   multiprocessing 启动方式不是 fork）、本节点 `local_world_size > 1`、平台不是 CPU、且没有开启
+   multiprocessing 启动方式不是 fork，包括 spawn/forkserver）、本节点 `local_world_size > 1`、平台不是 CPU、且没有开启
    `numa_bind` 时才返回真，此时用 `ThreadPoolExecutor` 同时拉起本地各个 `WorkerProc`；否则退回原来的
    逐个启动。fork 会把前一个 Worker 继承的 socket fd 传给后一个，CPU 后端的 OpenMP 环境和 NUMA 的
    `numactl` 包装都会逐 Worker 改写进程全局状态，这些情形不能并行。并发路径仍按 rank 顺序收集句柄，
@@ -380,7 +380,7 @@ stateDiagram-v2
 
 ```mermaid
 flowchart TD
-    START["MultiprocExecutor._init_executor"] --> CAN{"spawn and local_world_size > 1 and not CPU and not numa_bind?"}
+    START["MultiprocExecutor._init_executor"] --> CAN{"inherited_fds is None<br/>(非 fork: spawn/forkserver)<br/>且 local_world_size > 1<br/>且非 CPU、非 numa_bind?"}
     CAN -->|yes| PAR["start local WorkerProc in a thread pool"]
     CAN -->|no| SEQ["start local WorkerProc one by one"]
     PAR --> READY["wait for READY from all workers"]
@@ -446,12 +446,13 @@ flowchart TB
 [源码] `vllm/config/parallel.py` - `ParallelConfig.get_local_gpu_index`（L842）；
 `vllm/v1/worker/gpu_worker.py` - `Worker.init_device`（调用点 L454 @ `4ba787ec`）
 
-**Worker extension 生命周期钩子。** 配置了 `worker_extension_cls` 时，`WorkerWrapperBase` 现在会记住这个类
-（`de8291e24`，#59463）：`init_device()` 之后调用类上可选的 `init_worker_extension(worker)`（L366），
+**Worker extension 生命周期钩子。** 配置了 `worker_extension_cls` 时，v0.33.0 中 `WorkerWrapperBase` 会记住这个类
+（`de8291e24`，#59463）：`WorkerWrapperBase.init_device()` 在调用 `self.worker.init_device()` 之后，再调用类上可选的 `init_worker_extension(worker)`（L366），
 `shutdown()` 里先调用可选的 `destroy_worker_extension(worker)`（L256）再关闭 Worker，销毁钩子抛出的异常只记日志，
 不会阻止后续清理。两个钩子都不是必须实现的。
 
-[源码] `vllm/v1/worker/worker_base.py` - `WorkerWrapperBase.init_worker`、`WorkerWrapperBase.shutdown`（@ `4ba787ec`）
+[源码] `vllm/v1/worker/worker_base.py` - `WorkerWrapperBase.init_worker`、`WorkerWrapperBase.init_device`
+（`init_worker_extension` 在其中调用，L366）、`WorkerWrapperBase.shutdown`（`destroy_worker_extension`，L256；@ `4ba787ec`）
 
 ## 7.6 GPU Worker 启动顺序
 
@@ -512,7 +513,7 @@ Worker 缓存 `vllm_config.use_v2_model_runner`。`init_device()` 调用
 `vllm/v1/worker/gpu/model_runner.py`，false 导入 `vllm/v1/worker/gpu_model_runner.py`。Runner 构造只建立配置和缓冲区结构，随后
 `Worker.load_model()` 才在权重 allocator context 中调用 Runner 的 `load_model()`。
 V2 的 encoder-only 配置另选 `MMEncoderModelRunner`，不能把上图当作所有 Worker 类型的枚举。
-Triton 的硬性检查位置在 v0.33.0 也变了：`432b1003f`（#62576）把原来在配置校验 `_validate_v2_model_runner` 里的
+Triton（用 Python 写 GPU kernel 的编译器和语言）的硬性检查位置在 v0.33.0 也变了：`432b1003f`（#62576）把原来在配置校验 `_validate_v2_model_runner` 里的
 `ValueError("Model Runner V2 requires Triton.")` 删掉，改到 `Worker.__init__` 一开头（`gpu_worker.py` L208 @ `4ba787ec`），
 也就是 Worker 真正启动时才报；配置侧的自动选择只保留“没有 Triton 就退回 MRV1”（见 7.22）。
 
@@ -789,7 +790,7 @@ UVA（统一虚拟寻址）帮助设备访问映射后的地址，不表示主�
 
 **写入 kernel 的并行方式（v0.33.0）。** `fc2b6ab45`（#62698）把 staged write 的 Triton kernel 改成二维 grid：
 第一维是本次 staged 的写入条数（每条写入是“某一行里从某个起点开始的一段内容”），第二维是
-`ceil(最长一段 / 1024)` 个 chunk；每个 program 只写一条写入里的一个 1024 元素 chunk，
+`ceil(最长一段 / 1024)` 个 chunk；每个 program（Triton 里 grid 上的一个并行实例，大致相当于 CUDA 的一个 thread block）只写一条写入里的一个 1024 元素 chunk，
 不再在单个 program 里循环写完这一整段。单 group 的 `StagedWriteTensor`（`buffer_utils.py` L135）与多 group 的
 `FusedStagedWriter`（L245 @ `4ba787ec`）两条路径都是这样。这只改变 GPU 上的并行切分，不改变上面的
 数据搬运边界：写入内容仍走 H2D，索引/起点/长度仍走 UVA 缓冲。较长的一段写入（例如 block table 一行里的一大段 block ID）
@@ -1254,7 +1255,7 @@ v0.33.0 的自动 fallback 清单（`_get_v2_model_runner_unsupported_features`�
 
 - external launcher + `PP>1`；
 - `suffix`、`custom_class` speculation。`medusa` 与 `mlp_speculator` 两项已经从清单中消失，原因不是“V2
-  现在支持它们”，而是 `8530aed2b`（#61701，“Remove Medusa and MLP speculator support”）把这两种投机方法
+  在 v0.33.0 中支持它们”，而是 `8530aed2b`（#61701，“Remove Medusa and MLP speculator support”）把这两种投机方法
   本身从 vLLM 删除了，所以本书不再单独讨论它们；
 - 除 DFlash/DSpark 外的 parallel drafting；
 - heterogeneous-vocabulary draft models（target/draft 词表不同，V2 尚无对应 token mapping）；
@@ -1274,7 +1275,7 @@ Triton 的报错发生在 Worker 构造时（见 7.6.2）。
 MRV1 一侧也有一份“只有 V2 支持”的清单（`_get_v1_model_runner_unsupported_features`，L3089 @ `4ba787ec`），
 当前包括：prefill context parallel、`PP>1` 且 async scheduling、DSpark 与 xpress 投机解码、adaptive draft
 verification、draft lm_head 量化、Parse 3.5 MTP、混合 sliding/full 的 DFlash draft、DFlash candidate-head draft、
-diffusion 模型、batch-sharded sampling 和 Step5。命中任何一项而又只能走 MRV1 时，`_validate_v1_model_runner` 会报错。
+diffusion 模型、batch-sharded sampling 和 Step5。只要用了 MRV1（包括显式选择 V1），`VllmConfig` 校验时就会运行 `_validate_v1_model_runner`（L2096），命中任何一项即抛 `ValueError`。
 
 stock `torch.compile`、`ngram`/`ngram_gpu` 和 Elastic EP 已从这份清单移除。
 stock compile 在 MRV2 加载模型后调用共享的 `compile_model_with_stock_torch`，
@@ -1300,7 +1301,8 @@ ROCm 的模型特定 MRV1 默认例外已移除；未显式选择时走相同的
 （静态阅读，未运行上游测试）
 
 [源码] `vllm/v1/worker/gpu/spec_decode/__init__.py` - `init_speculator`：
-`use_ngram()` 选择 `NgramGPUSpeculator` 并传入持久 `RequestState`。
+`use_ngram()` 选择 `NgramGPUSpeculator` 并传入持久 `RequestState`；除 n-gram 外，`method == "dflash"` 时还按 draft 架构分到
+`XPressSpeculator`、`LiLiCorrSpeculator`、`DFlash2Speculator`，都不匹配才用 `DFlashSpeculator`（@ `4ba787ec`）。
 PCP+PP 和 Elastic EP 的迁移边界在第 09 章展开；不应把“Runner 支持”解释成所有组合支持。
 
 MRV2 目标是 permanent rows、async-first、GPU-native input metadata、Triton sampler、模块化和显式
@@ -1588,7 +1590,7 @@ D2H 分开测量。
 | `e57bb4ace`（#61712） | 删除旧 Ray compiled-graph executor | 是 | 7.3 表格、流程图与说明、`examples/ch07_execution_pipeline.py` |
 | `52e88e25e`（#62228） | 删除 `VLLM_USE_RAY_V2_EXECUTOR_BACKEND` | 是 | 7.3 |
 | `c07c59f82`（#62241） | external launcher 关闭时释放通信组 | 是 | 7.3.2 |
-| `52f44839f`（#60028） | spawn 时并发启动本地 Worker | 是 | 7.4.3 |
+| `52f44839f`（#60028） | 非 fork 启动方式下并发启动本地 Worker | 是 | 7.4.3 |
 | `1c8799197`（#55700） | Engine/Worker stack-dump watchdog | 是 | 7.4.3 |
 | `e7bb7e2f2`（#56430） | 失败回复携带 KV connector 输出 | 是 | 7.4.3 |
 | `de8291e24`（#59463） | Worker extension 生命周期钩子 | 是 | 7.5 |

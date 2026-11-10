@@ -275,7 +275,7 @@ flowchart TD
 `v1_async_sched_incompat`（`vllm/config/vllm.py` L1652 起；与 `pipeline parallelism` 并列，三者择一）：
 `use_v2_model_runner` 为真时它是 `None`，所以 MRV2 下这两条不再让 async scheduling 失败或被自动关闭；
 MRV1 下显式开启 async 会抛 `ValueError`，未显式开启则打 warning 并关闭，措辞都带上具体原因。
-这与上面“MRV1 + async + PP>1 已被拒绝”是同一个机制的一部分，不是两套规则。
+上面“MRV1 + async + PP>1 已被拒绝”由两处代码共同拒绝：`_get_v1_model_runner_unsupported_features`（经 `_validate_v1_model_runner`）与 `v1_async_sched_incompat` 里的 `pipeline parallelism`，不是两套不同的规则。
 
 ```mermaid
 flowchart LR
@@ -524,12 +524,12 @@ v0.33.0 的实现（`2fb320d83`，#61589）里 `AsyncScheduler` 已经不再覆�
 然后调用 `_update_request_with_output(..., is_stale=output_is_stale)`：逐个追加 token 并检查 stop；
 命中 stop 时修剪多余 token，只有非 stale 时才回退 `num_computed_tokens`；最后只在**非 stale 且
 `num_output_placeholders > 0`** 时，按**返回的全部 token 数**（含因 stop 被修剪的）扣减 placeholder，并断言
-不小于零（L2768）。stale 输出不再扣减，因为抢占已经清零。
+不小于零（L2769）。stale 输出不再扣减，因为抢占已经清零。
 
 [源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler._update_request_with_output`（L2744 @ `4ba787ec`）、
 `Scheduler.update_from_output`、`Scheduler._preempt_request`
 
-[源码] `vllm/v1/core/sched/async_scheduler.py` - `AsyncScheduler._update_after_schedule`（该类现在只剩
+[源码] `vllm/v1/core/sched/async_scheduler.py` - `AsyncScheduler._update_after_schedule`（v0.33.0 中该类只剩
 `__init__` 与这一个覆写）
 
 [测试] `tests/v1/core/test_async_scheduler.py` - `test_kv_pressure_preemption_with_inflight_output`
@@ -552,7 +552,7 @@ flowchart TD
 v0.33.0 里，`cache_blocks` 的调用从已删除的 `AsyncScheduler._update_request_with_output` 搬到了
 `Scheduler.update_from_output`（`2fb320d83`，#61589；`scheduler.py` L2403–L2412 @ `4ba787ec`）。
 同时满足下面三个条件才调用：输出**不是** stale；`_update_request_with_output` 之前请求状态为 `RUNNING`；
-更新前 `num_output_placeholders > 0`（异步调度）或 `num_spec_tokens > 0`（同步调度配了投机解码）。
+更新前 `num_output_placeholders > 0`，或 `Scheduler` 自身的 `self.num_spec_tokens > 0`（配置的投机 token 数，与同步/异步调度无关）。
 调用形式是：
 
 ```text
@@ -563,7 +563,7 @@ cache_blocks(request, request.num_computed_tokens
 也就是只把 8.3.1 中的 $N_{\mathrm{cacheable}}$ 之前的区间纳入可缓存边界。这里的 `has_output_placeholders` 要在
 `_update_request_with_output` **之前**记录，因为 placeholder 会在其中被扣减。与 v0.32.0 相比有两处行为变化：
 边界从 `num_computed_tokens - num_output_placeholders` 改成了 `num_computed_tokens - num_in_flight_tokens`；
-旧的异步路径对所有更新前为 `RUNNING` 的请求（包括 stale 输出）都会调用，现在 stale 输出不再触发。
+旧的异步路径对所有更新前为 `RUNNING` 的请求（包括 stale 输出）都会调用，v0.33.0 中 stale 输出不再触发。
 
 ```mermaid
 flowchart TD
@@ -571,14 +571,14 @@ flowchart TD
     H --> UP["_update_request_with_output"]
     UP --> C1{"output_is_stale?"}
     C1 -- 是 --> N["skip cache_blocks"]
-    C1 -- 否 --> C2{"status before stop == RUNNING?"}
+    C1 -- 否 --> C2{"更新前是否为 RUNNING?"}
     C2 -- 否 --> N
-    C2 -- 是 --> C3{"had placeholders or num_spec_tokens > 0?"}
+    C2 -- 是 --> C3{"是否有 placeholder 或 num_spec_tokens > 0?"}
     C3 -- 否 --> N
     C3 -- 是 --> CB["cache_blocks(request, computed - in_flight)"]
 ```
 
-> **读图方法：** 这是“`cache_blocks` 的调用条件”的流程图。从上往下依次过三个菱形，任何一个答“否”就直接走到右侧的 `skip cache_blocks`；只有三个都答“是”才会到最后一格，并用 `computed - in_flight` 作为登记边界。第一个菱形排除 stale 输出，第二个排除已被抢占或停止的请求，第三个只放行异步调度或带投机解码的情形。
+> **读图方法：** 从上往下依次过三个菱形。第一个菱形（output_is_stale?）答“是”就跳过；答“否”才继续。第二个（更新前是否为 RUNNING）和第三个（是否有 placeholder 或 num_spec_tokens > 0）必须都答“是”，才会走到 cache_blocks(request, computed - in_flight)。任一为“否”，直接走到 skip cache_blocks。第二个菱形排除更新前已不是 RUNNING 的请求（例如已被抢占）。
 
 [源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.update_from_output`（`cache_blocks` 调用 L2412 @ `4ba787ec`）
 
@@ -1444,10 +1444,10 @@ flowchart TD
 `_capture_stream` / `capture`
 
 v0.33.0 还修了 DBO 运行期的两处细节。`2c19f6793`（#63372）：`UBatchRunner` 把每个微批的起始 token 偏移
-`token_offsets` 传给微批线程（`ubatch_utils.py` L465），routed-experts capturer 写 `device_buffer` 时加上
-`dbo_current_ubatch_token_offset()`（`routed_experts_capturer.py` L97），否则各微批都从第 0 行写，会互相覆盖。
+`token_offsets` 传给微批线程（`vllm/v1/worker/gpu/ubatch_utils.py` L465），routed-experts capturer 写 `device_buffer` 时加上
+`dbo_current_ubatch_token_offset()`（`vllm/model_executor/layers/fused_moe/routed_experts_capturer.py` L97），否则各微批都从第 0 行写，会互相覆盖。
 `66bf93154`（#63476）：微批线程出错时，报告的是**最先记录**的失败（`failed = next(iter(errors))`，
-`ubatch_utils.py` L524 @ `4ba787ec`），而不是编号最小的微批。
+`vllm/v1/worker/gpu/ubatch_utils.py` L524 @ `4ba787ec`），而不是编号最小的微批。
 
 > **main 上的变化（未发版）**：本书正文已升到 v0.33.0（`4ba787ec`）；以下提交**不在** v0.33.0 祖先链内（#63372、#63476 已在 v0.33.0 中并入上文），暂不写入正文，留待后续基线处理。
 > - main 2026-10-28～10-29：[cdd2750cd5](https://github.com/vllm-project/vllm/commit/cdd2750cd5e7d90849282a16bc46c21bbc58bcbd)（[#61464](https://github.com/vllm-project/vllm/pull/61464)） 允许 DBO 与 speculative decoding / DCP 组合（见 ch07 注记）；[d7f68d4c7d](https://github.com/vllm-project/vllm/commit/d7f68d4c7d31004e257b7b2ff142b4edd83e0d8c)（[#62748](https://github.com/vllm-project/vllm/pull/62748)） idle 步跳过 sampler staged writes；[458334f00f](https://github.com/vllm-project/vllm/commit/458334f00f7cbff7c8a1feae449656aa7343c476)（[#63819](https://github.com/vllm-project/vllm/pull/63819)） `warmup_kernels` 末尾调用 `acceptance_estimator.warmup()`（`warmup.py` L255–L259 @ `36d4ef654`），并固定 DFlash prepare `BLOCK_SIZE=128`。详见 meta/main-tracking-2026-10-29.md。
@@ -1744,9 +1744,9 @@ FULL graph 绑定 KV pointer，profiling 只捕获最大的少数 descriptor，�
 v0.33.0 在这条路径上有四处与旧正文相比的变化：
 
 1. **最小 KV cache 的构造方式。** `b54458740`（#53558）引入可插拔的 `KVCacheConfigBuilder`。
-   `_init_minimal_kv_cache_for_profiling`（`cudagraph_utils.py` L1042）现在先
+   `_init_minimal_kv_cache_for_profiling`（`cudagraph_utils.py` L1042）在 v0.33.0 中先
    `get_kv_cache_config_builder(vllm_config)`，再用 `get_kv_cache_groups_from_builder` 取 groups，最后
-   `builder.get_kv_cache_config_from_groups(..., num_blocks=min_blocks)`（L1048）；旧版先临时改写
+   `builder.get_kv_cache_config_from_groups(..., num_blocks=min_blocks)`（L1057）；旧版先临时改写
    `cache_config.num_gpu_blocks_override` 再恢复的做法已经删除。`min_blocks` 的取法没变。
 2. **什么时候需要 profile。** `profile_cudagraph_memory` 只在 `cudagraph_mode == NONE` 且
    `runner.needs_cudagraph_capture()` 也为假时才直接返回 0；并且是否还有 graph 要捕获统一问
@@ -2199,7 +2199,6 @@ flowchart TB
 
 没有进入 v0.33.0 祖先链、因此仍只以注记保留的 main 变化有：#63219、#64279、#51012、#61464、#62748、
 #63819、#63778。
-
 
 ## 第一遍自检
 
