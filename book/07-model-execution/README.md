@@ -6,7 +6,7 @@ source_path: ../vllm
 source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
 source_branch: v0.33.0
 source_dirty: false
-verified_at: 2026-10-19
+verified_at: 2026-11-10
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -45,12 +45,18 @@ flowchart TD
 > **读图方法：** 阅读“本章定位”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
 这一段调用链看起来只是“跑模型”，实际上同时跨越五类边界：编排、进程、设备、并行和状态。
-本章绑定源码 revision `5df63a7203cdb9328d824a27b682e77c7b9928be`，继续使用以下标签：
+本章绑定源码 revision `4ba787ec9959e566d3b587a796dff07673324da5`（vLLM v0.33.0 tag 所指提交；提交日期 2026-10-31，tag 日期 2026-11-01），继续使用以下标签：
 
 - **源码事实**：当前 revision 可直接定位的行为。
 - **设计意图**：源码注释或同 revision 设计文档表达的目标。
 - **设计含义**：由多处源码共同推出的解释。
 - **教学模型**：随书纯 Python 程序，只验证契约，不模拟 CUDA 性能。
+
+> **版本说明（v0.32.0 → v0.33.0）：** 旧正文基线是 v0.32.0（`5df63a72…`）。v0.32.0 位于 release 分支，
+> 与 v0.33.0 的 merge-base 是 `fe341a53`，所以只有 `fe341a53..4ba787ec` 里真正在 v0.33.0 祖先链内的
+> 提交才写入正文，逐条用 `git merge-base --is-ancestor <commit> 4ba787ec` 核验，清单见 7.32。
+> 2026-11-10 已按这个 revision 对本章涉及的源码文件做静态复核（读代码与 diff，没有运行 GPU 或上游测试）。
+> 不在 v0.33.0 祖先链内的 main 变化仍以“main 上的变化（未发版）”注记保留，留待后续基线再处理。
 
 ## 阅读目标
 
@@ -192,20 +198,18 @@ flowchart TD
 |---|---|---|
 | `uni` | `UniProcExecutor` | Worker 与 Executor 同一进程 |
 | `mp` | `MultiprocExecutor` | multiprocessing Worker |
-| `ray` | `RayDistributedExecutor` 或 `RayExecutorV2` | Ray actor 编排 |
+| `ray` | `RayExecutorV2` | Ray actor 编排（v0.33.0 中只剩 V2） |
 | `external_launcher` | `ExecutorWithExternalLauncher` | `torchrun` 等外部启动器 |
 | Python 类/限定名 | 自定义 `Executor` 子类 | out-of-tree 扩展 |
 
-[源码] `vllm/v1/executor/abstract.py` - `Executor.get_class`
+[源码] `vllm/v1/executor/abstract.py` - `Executor.get_class`（L64；`ray` 分支 L76–L79 @ `4ba787ec`）
 
 ```mermaid
 flowchart TD
     B["distributed_executor_backend"] --> UNI{"value?"}
     UNI -->|uni| U["UniProcExecutor"]
     UNI -->|mp| M["MultiprocExecutor"]
-    UNI -->|ray| RV{"use Ray V2 executor?"}
-    RV -->|false| R1["RayDistributedExecutor"]
-    RV -->|true| R2["RayExecutorV2"]
+    UNI -->|ray| R2["RayExecutorV2"]
     UNI -->|external_launcher| X["ExecutorWithExternalLauncher"]
     UNI -->|qualified name| O["resolve and validate subclass"]
 ```
@@ -214,6 +218,13 @@ flowchart TD
 
 共同初始化先保存配置分区，再调用具体 `_init_executor()`。EngineCore 之后仍使用统一接口执行显存
 探测、KV 初始化、warmup、`execute_model()` 和 `sample_tokens()`。
+
+**v0.33.0 对 `ray` 分支的改动。** v0.32.0 的 `get_class()` 还会读环境变量
+`VLLM_USE_RAY_V2_EXECUTOR_BACKEND`，在旧的 Ray compiled-graph 实现 `RayDistributedExecutor` 与
+`RayExecutorV2` 之间二选一。`e57bb4ace`（#61712）删除了旧实现及其 Ray 通信器、`ray_utils` 辅助模块和
+`VLLM_USE_RAY_COMPILED_DAG_*` 一类环境变量；`52e88e25e`（#62228）再删除这个选择开关本身。
+所以在 `4ba787ec` 中 `ray` 只会得到 `RayExecutorV2`，读到旧文章或旧 issue 里的
+`RayDistributedExecutor` 时，它在当前 revision 里已经不存在。Ray 后端的 actor 拓扑见第 09 章。
 
 ### 7.3.1 UniProc 并不等于没有 Worker
 
@@ -247,6 +258,11 @@ sequenceDiagram
 运行条件。源码测试通过 `torchrun` 检查各 rank 的 KV 配置与生成结果一致。
 
 [测试] `tests/distributed/test_torchrun_example.py` - external launcher offline inference
+
+关闭路径在 v0.33.0 也有变化：`ExecutorWithExternalLauncher.shutdown()` 在 `super().shutdown()` 之后调用
+`destroy_model_parallel()`（`uniproc_executor.py` L219，类定义 L161 @ `4ba787ec`，`c07c59f82`，#62241），
+像 `MultiprocExecutor` 的 Worker 一样提前释放 vLLM 自己的 TP/PP/DP/EP 通信组。world group 与默认 process group
+可能属于外部启动器，所以不在释放范围内。
 
 这解释了 `rpc_rank` 与 global `rank` 为何不能永远视为同一值。还要区分 Runner 能力边界：
 external launcher 的纯 TP 路径可以使用 MRV2；只有与 `PP>1` 组合时，当前自动选择才把它列为
@@ -335,6 +351,59 @@ stateDiagram-v2
 
 [测试] `tests/distributed/test_multiproc_executor.py` - 初始化、RPC、rank reply 与 PP 覆盖
 
+### 7.4.3 v0.33.0 新增：并发启动、watchdog 与带 KV 输出的失败回复
+
+上一节的 busy loop 在 v0.33.0 有三处行为变化。它们都发生在“Worker 进程已经存在、但还没进入稳态
+服务”或“某个 RPC 失败”的边缘，所以放在一起看。
+
+1. **非 fork 启动方式下并发启动本地 Worker。** `52f44839f`（#60028）让 `MultiprocExecutor._init_executor`
+   先调用 `_can_start_workers_concurrently(inherited_fds)`：只有 `inherited_fds is None`（也就是
+   multiprocessing 启动方式不是 fork，包括 spawn/forkserver）、本节点 `local_world_size > 1`、平台不是 CPU、且没有开启
+   `numa_bind` 时才返回真，此时用 `ThreadPoolExecutor` 同时拉起本地各个 `WorkerProc`；否则退回原来的
+   逐个启动。fork 会把前一个 Worker 继承的 socket fd 传给后一个，CPU 后端的 OpenMP 环境和 NUMA 的
+   `numactl` 包装都会逐 Worker 改写进程全局状态，这些情形不能并行。并发路径仍按 rank 顺序收集句柄，
+   即使某个启动失败，也把已创建的句柄放进待就绪列表，以便清理时终止它们。创建全部 Worker 之后才等
+   `READY`，这一点与以前相同。
+2. **可选的 stack-dump watchdog。** `1c8799197`（#55700）新增 `WatchdogConfig`（`timeout` 默认 300 秒、
+   `check_interval` 默认 10 秒、`dump_dir` 默认为空）。`dump_dir` 为空表示不启用。启用后，EngineCore
+   进程（`start_watch_dog(f"engine_{dp_rank}", …)`）和每个 `WorkerProc`（`worker_{rank}`）各起一个后台线程；
+   主循环每处理一步或一个 RPC 就 `feed()`，阻塞等待输入时包在 `disable()` 里，超过 `timeout` 没有
+   喂食就把所有线程的栈追加写到 `VLLM_STACK_DUMP_for_<name>_<pid>.log`。它只负责留下诊断信息，
+   不会杀进程或重启。Worker 发现父进程退出（death pipe 关闭）和 EngineCore 收到 `SIGTERM` 时，也会通过 `handle_failure` 记一次栈。
+3. **失败回复可以携带 KV connector 输出。** 开启 `enable_fault_tolerance`（默认 `False`）的 P/D 分离
+   部署里，一个 step 失败时，已经发生的 KV 传输不能被丢掉，否则对应 block 会泄漏。`e7bb7e2f2`（#56430）
+   为 `WorkerProc.ResponseStatus` 增加 `FAILURE_WITH_KV_OUTPUT`，`AsyncModelRunnerOutput` 增加抽象方法
+   `get_kv_connector_output()`；`enqueue_output` 在 `get_output()` 抛错且 connector 输出非空时，把
+   `KVConnectorOutput` 作为失败回复发出。Executor 侧的 `get_response` 看到这个状态时：没开 fault
+   tolerance 或已经 `is_failed`，仍然直接抛 `RuntimeError`；否则先把各 rank 的 KV 输出交给
+   `kv_output_aggregator.ft_defer_kv_connector_outputs`，再抛 `RuntimeError("One or more workers failed")`。
+
+```mermaid
+flowchart TD
+    START["MultiprocExecutor._init_executor"] --> CAN{"inherited_fds is None<br/>(非 fork: spawn/forkserver)<br/>且 local_world_size > 1<br/>且非 CPU、非 numa_bind?"}
+    CAN -->|yes| PAR["start local WorkerProc in a thread pool"]
+    CAN -->|no| SEQ["start local WorkerProc one by one"]
+    PAR --> READY["wait for READY from all workers"]
+    SEQ --> READY
+    READY --> LOOP["worker busy loop"]
+    LOOP --> FEED["feed watchdog per RPC (if dump_dir set)"]
+    LOOP --> RPC["execute RPC"]
+    RPC --> ERR{"get_output failed with non-empty KV output?"}
+    ERR -->|no, ok or plain error| REPLY["SUCCESS or FAILURE reply"]
+    ERR -->|yes| KVF["FAILURE_WITH_KV_OUTPUT reply"]
+    KVF --> FT{"fault tolerance on and not is_failed?"}
+    FT -->|no| RAISE["raise RuntimeError"]
+    FT -->|yes| DEFER["ft_defer_kv_connector_outputs then raise"]
+```
+
+> **读图方法：** 这是“并发启动、watchdog 与失败回复”的流程图，分成启动和失败两段。上半段看启动判定菱形：四个条件都满足才并行，否则退回串行，两条路在 `READY` 汇合；下半段从 busy loop 往下，看 RPC 出错时是否带着非空 KV 输出，带着就走 `FAILURE_WITH_KV_OUTPUT`，再由 fault tolerance 开关决定是直接抛错还是先把 KV 输出交给聚合器暂存。watchdog 只是旁路，不改变任何分支。
+
+[源码] `vllm/v1/executor/multiproc_executor.py` - `MultiprocExecutor._can_start_workers_concurrently`（L322，调用点 L221 @ `4ba787ec`）
+
+[源码] `vllm/utils/watch_dog.py` - `ThreadedWatchDog`（L41）；`vllm/config/watchdog_config.py` - `WatchdogConfig`（L13）；`WorkerProc` 启动点 `multiproc_executor.py` L1047，EngineCoreProc 启动点 `vllm/v1/engine/core.py` L1569 @ `4ba787ec`
+
+[源码] `vllm/v1/executor/multiproc_executor.py` - `WorkerProc.ResponseStatus`（L1094）、`WorkerProc.enqueue_output`（L1096）、`MultiprocExecutor.collective_rpc.get_response`（L498，状态判断 L511 @ `4ba787ec`）
+
 ## 7.5 WorkerWrapper 与三种 rank
 
 `WorkerWrapperBase` 先保存 `rpc_rank`/`global_rank`，等每进程环境和插件就绪后才在
@@ -369,6 +438,22 @@ flowchart TB
 
 简单布局中三者可能相同，external launcher、多 Executor 或复杂 DP 下不能依赖这种巧合。
 
+`local_rank` 到“可见设备索引”的换算，在 v0.33.0 集中到 `ParallelConfig.get_local_gpu_index()`：
+`be4ce2e50`（#61237）把原本内联在 `Worker.init_device()` 里的 DP 偏移算式收进这个方法，供 NUMA 绑定共用。
+当 backend 不是 `ray`/`external_launcher`、`data_parallel_backend` 不是 `ray` 且单 DP 副本不跨节点时，
+返回 `local_rank + dp_local_rank * world_size`，其余情形直接返回 `local_rank`。
+
+[源码] `vllm/config/parallel.py` - `ParallelConfig.get_local_gpu_index`（L842）；
+`vllm/v1/worker/gpu_worker.py` - `Worker.init_device`（调用点 L454 @ `4ba787ec`）
+
+**Worker extension 生命周期钩子。** 配置了 `worker_extension_cls` 时，v0.33.0 中 `WorkerWrapperBase` 会记住这个类
+（`de8291e24`，#59463）：`WorkerWrapperBase.init_device()` 在调用 `self.worker.init_device()` 之后，再调用类上可选的 `init_worker_extension(worker)`（L366），
+`shutdown()` 里先调用可选的 `destroy_worker_extension(worker)`（L256）再关闭 Worker，销毁钩子抛出的异常只记日志，
+不会阻止后续清理。两个钩子都不是必须实现的。
+
+[源码] `vllm/v1/worker/worker_base.py` - `WorkerWrapperBase.init_worker`、`WorkerWrapperBase.init_device`
+（`init_worker_extension` 在其中调用，L366）、`WorkerWrapperBase.shutdown`（`destroy_worker_extension`，L256；@ `4ba787ec`）
+
 ## 7.6 GPU Worker 启动顺序
 
 > **本节先看：** 这一小节先用图建立“GPU Worker 启动顺序”的整体路径。先找输入、关键状态和输出，再阅读图后的源码解释，不必一开始记住全部节点。
@@ -384,6 +469,7 @@ sequenceDiagram
     W->>W: resolve local rank and device
     W->>D: initialize distributed environment
     W->>W: set random seed
+    W->>G: create cuBLAS/cuBLASLt handles
     W->>G: GC and empty cache
     W->>W: query loader external weight memory
     W->>G: memory snapshot and engine budget
@@ -396,6 +482,12 @@ sequenceDiagram
 > **读图方法：** 这是“GPU Worker 启动顺序”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.init_device`
+
+> **v0.33.0 补充：** 同样的“先占住、再快照”逻辑也用于 cuBLAS。`9cede34a6`（#61044）在 `set_random_seed` 之后、
+> `MemorySnapshot` 之前，用一个 16×16 的 `torch.mm`（走 cuBLAS）和一个带 bias 的 `torch.nn.functional.linear`
+> （走 cuBLASLt）预先创建 handle（`gpu_worker.py` L527 @ `4ba787ec`）。原因是 cuBLAS 直接向 CUDA 要 handle 内存，
+> torch 看不到，也不会像自己的 `cudaMalloc` 失败时那样先释放空闲缓存再重试；profiling 可能把 torch 缓存涨到
+> 显存已满，之后第一次 cuBLAS 调用就会 OOM。提前创建后，handle 内存和 NCCL 缓冲一样计入快照基线。
 
 ### 7.6.1 NCCL 为什么早于显存快照
 
@@ -421,6 +513,9 @@ Worker 缓存 `vllm_config.use_v2_model_runner`。`init_device()` 调用
 `vllm/v1/worker/gpu/model_runner.py`，false 导入 `vllm/v1/worker/gpu_model_runner.py`。Runner 构造只建立配置和缓冲区结构，随后
 `Worker.load_model()` 才在权重 allocator context 中调用 Runner 的 `load_model()`。
 V2 的 encoder-only 配置另选 `MMEncoderModelRunner`，不能把上图当作所有 Worker 类型的枚举。
+Triton（用 Python 写 GPU kernel 的编译器和语言）的硬性检查位置在 v0.33.0 也变了：`432b1003f`（#62576）把原来在配置校验 `_validate_v2_model_runner` 里的
+`ValueError("Model Runner V2 requires Triton.")` 删掉，改到 `Worker.__init__` 一开头（`gpu_worker.py` L208 @ `4ba787ec`），
+也就是 Worker 真正启动时才报；配置侧的自动选择只保留“没有 Triton 就退回 MRV1”（见 7.22）。
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker._init_workspace_and_model_runner`、
 `Worker._make_model_runner`
@@ -505,10 +600,12 @@ $$
 - `M_nonKV` 包含权重及 profile 期间非 KV 消耗；
 - `M_graph,applied` 是实际扣除的 CUDA Graph 内存估算。固定 revision 中，环境变量
   `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` 默认值为 `1`，即默认应用估算；显式设为 `0`
-  才不扣此项。估算本身还要求 CUDA/ROCm 或 XPU 平台和非 `NONE` 的 graph mode，不能把开关开启
+  才不扣此项。估算本身还要求 CUDA/ROCm 或 XPU 平台，并且满足下面两条之一：
+  `cudagraph_mode` 不是 `NONE`；或者使用 MRV2、开启 `cudagraph_mm_encoder` 且没有 `enforce_eager`
+  （`7128f568a`，#58243：encoder graph 即使 decoder graph 被关掉也要预留显存）。不能把开关开启
   等同于必有非零预留。
 
-[源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`
+[源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`（估算条件 L707–L717 @ `4ba787ec`）
 
 [源码] `vllm/envs.py` - `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS`
 
@@ -549,23 +646,41 @@ profile run 以编译最大 batch，但跳过自动 memory profiling，且该容
 flowchart TD
     ID["init_device"] --> LM["load_model"]
     LM --> SPEC["collect KV specs"]
-    SPEC --> LAYOUT["resolve and publish KV layout"]
-    LAYOUT --> PM["determine_available_memory"]
+    SPEC --> LAYOUT["resolve KV layout"]
+    LAYOUT --> DCP["finalize DCP interleave size"]
+    DCP --> PUB["set_kv_cache_layout on workers"]
+    PUB --> PM["determine_available_memory"]
     PM --> PLAN["EngineCore chooses config"]
     PLAN --> IKV["initialize_from_config"]
     IKV --> WARM["compile / warmup / capture"]
     WARM --> RUN["serve steps"]
 ```
 
-> **读图方法：** 这张图用于压缩“KV Cache 初始化与 warmup”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
+> **读图方法：** 这张图用于压缩“KV Cache 初始化与 warmup”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。注意中间新增的两个节点：KV layout 与 DCP interleave size 都在 profiling 之前由 EngineCore 定好，再一并发给所有 Worker。
 
 先加载模型并收集 KV specs，才能确定 layout；先 profile，才能确定最终池容量。某些
 profiling 路径已经会创建最小临时 KV 并估算 graph，不能把图理解成 profile 时绝无
-KV 或 capture。最终缓存初始化后，服务前的 warmup/capture 再使用正式布局。
+KV 或 capture。v0.33.0 起这个最小 KV 的配置由 `KVCacheConfigBuilder` 生成（`b54458740`，#53558；MRV1 在
+`gpu_model_runner.py` L6153，MRV2 的做法见第 08 章 8.17.1）。最终缓存初始化后，服务前的 warmup/capture 再使用正式布局。
 `initialize_from_config()` 先记录 block 数/layout 和由 EngineCore 解析的
 `hash_block_size`、`cache_hit_alignment_tokens`，再初始化 KV
 connector，然后调用 Runner `initialize_kv_cache()`。warmup 覆盖 compile sizes、kernel warmup、MRV2
 额外 warmup 和非 eager 下的 graph capture。
+
+**v0.33.0 的 profiling 前置步骤。** `EngineCore._initialize_kv_caches`（L251）在 profiling 之前依次做三件事：
+`resolve_kv_cache_layout`（L286）、`VllmConfig.adjust_dcp_kv_cache_interleave_size`（L293）、
+`model_executor.set_kv_cache_layout(layout.name, cp_kv_cache_interleave_size)`（L294）。
+`3e75ccba2`（#62330）把 NIXL P/D 场景下的 DCP interleave 从 `initialize_from_config()` 里初始化 KV connector 时
+由各 Worker 各自调整，改成 EngineCore 在 profiling 前用全局 KV cache groups 统一确定，Worker 端的
+`WorkerBase.set_kv_cache_layout(kv_cache_layout, cp_kv_cache_interleave_size)`（`worker_base.py` L112）只负责赋值；
+sparse indexer 也不再懒加载缓存这个值。`Executor.set_kv_cache_layout` 因此多了一个参数。
+最终缓存初始化之后（L372），若启用了 `SimpleCPUOffloadConnector` 且开启 prefix caching，EngineCore 还会向
+Executor 取回各 Worker 对齐后的 CPU offload block 数（`get_simple_cpu_offload_num_blocks`，L380，`30aded62d`，
+#52921），保证 PP/speculative decoding 下各 Worker 的池大小一致，再写入 `cache_config`。
+
+[源码] `vllm/v1/engine/core.py` - `EngineCore._initialize_kv_caches`（@ `4ba787ec`）
+
+[源码] `vllm/config/vllm.py` - `VllmConfig.adjust_dcp_kv_cache_interleave_size`（L3339）
 
 [源码] `vllm/v1/engine/core.py` - `EngineCore._initialize_kv_caches`
 
@@ -573,8 +688,7 @@ connector，然后调用 Runner `initialize_kv_cache()`。warmup 覆盖 compile 
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.compile_or_warm_up_model`
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-27.md。
-> - [3e75ccba2](https://github.com/vllm-project/vllm/commit/3e75ccba298d0c7f045f35c39078cec74184b799)（[#62330](https://github.com/vllm-project/vllm/pull/62330)）：NIXL P/D 的 DCP interleave 原在 `initialize_from_config()` 初始化 KV connector（`ensure_kv_transfer_initialized`）时由各 worker 调整；main 改为 EngineCore 在 profiling 前统一确定，worker 只在 `set_kv_cache_layout` 中赋值，sparse indexer 也不再懒加载缓存该值。
+> **main 上的变化（未发版）**：本书正文已升到 v0.33.0（`4ba787ec`）；以下提交**不在** v0.33.0 祖先链内（#62330 已在 v0.33.0 中并入上文），暂不写入正文，留待后续基线处理。详见 meta/main-tracking-2026-10-27.md、meta/main-tracking-2026-10-28.md。
 > - main 2026-10-27～10-28：[dc4d977d97](https://github.com/vllm-project/vllm/commit/dc4d977d97f9cfaa7c6dc2de7fd94a77204a6914)（[#63778](https://github.com/vllm-project/vllm/pull/63778)）：`Worker.determine_available_memory` 在 V2 runner 下只要平台为 CUDA-alike/XPU 就调用 `model_runner.profile_cudagraph_memory()`（`gpu_worker.py` L716–L720 @ `0106c8abc`；L715 为 `cudagraph_memory_estimate = 0`），不再在 Worker 侧要求 `cudagraph_mode != NONE` 或展开 `cudagraph_mm_encoder` 条件；是否真正 profile 由 runner 自决（encoder graph 不依赖 cudagraph_mode）。[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：Worker/EngineCore 子进程可通过 `numa_utils.configure_subprocess` 做 best-effort NUMA 绑定（默认 `numa_bind=None`）。详见 meta/main-tracking-2026-10-28.md。
 
 ## 7.11 SchedulerOutput 到长期请求状态
@@ -674,8 +788,15 @@ UVA（统一虚拟寻址）帮助设备访问映射后的地址，不表示主�
 
 [源码] `vllm/v1/worker/gpu/buffer_utils.py` - `FusedStagedWriter.apply`
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
-> - [fc2b6ab45](https://github.com/vllm-project/vllm/commit/fc2b6ab45ed3e498b52d74fd880a8b40a65ba3a7)（[#62698](https://github.com/vllm-project/vllm/pull/62698)）：staged write 的 Triton kernel 在 main 上改为二维 grid（行数 × 按 1024 元素切出的 chunk 数），每个 program 只写一个 chunk，不再在单个 program 内循环写完整行；单 group 与 `FusedStagedWriter` 两条路径都改了。
+**写入 kernel 的并行方式（v0.33.0）。** `fc2b6ab45`（#62698）把 staged write 的 Triton kernel 改成二维 grid：
+第一维是本次 staged 的写入条数（每条写入是“某一行里从某个起点开始的一段内容”），第二维是
+`ceil(最长一段 / 1024)` 个 chunk；每个 program（Triton 里 grid 上的一个并行实例，大致相当于 CUDA 的一个 thread block）只写一条写入里的一个 1024 元素 chunk，
+不再在单个 program 里循环写完这一整段。单 group 的 `StagedWriteTensor`（`buffer_utils.py` L135）与多 group 的
+`FusedStagedWriter`（L245 @ `4ba787ec`）两条路径都是这样。这只改变 GPU 上的并行切分，不改变上面的
+数据搬运边界：写入内容仍走 H2D，索引/起点/长度仍走 UVA 缓冲。较长的一段写入（例如 block table 一行里的一大段 block ID）
+因此不再被一个 program 串行写完。
+
+> **main 上的变化（未发版）**：本书正文已升到 v0.33.0（`4ba787ec`）；以下提交**不在** v0.33.0 祖先链内（#62698 已在 v0.33.0 中并入下文），暂不写入正文，留待后续基线处理。详见 meta/main-tracking-2026-10-27.md。
 > - main 2026-10-25～10-27：[78e2f7960](https://github.com/vllm-project/vllm/commit/78e2f796019384b07c9f9b6d8a371e3ea958b33a)（[#63633](https://github.com/vllm-project/vllm/pull/63633)） 删除写入内容的 `async_tensor_h2d` 分支，默认 GPU-base 路径的写入内容也经 `UvaBufferPool.copy_chunks_to_uva` 进入 UVA 缓冲；上文“把实际写入内容通过 H2D 复制”与下图 `non-blocking H2D` 节点在 main 上不再成立。暂存改用 `array.array`，1-D ndarray/array 按引用保留到 `apply_write`，期间不得修改。
 
 ```mermaid
@@ -687,12 +808,13 @@ flowchart TD
     DIFF --> INDEX["indices / starts / lengths"]
     INDEX --> UVA["rotating UVA buffers"]
     UVA -->|GPU reads mapped metadata| APPLY
-    APPLY --> NEW["updated GPU state"]
+    APPLY --> GRID["2-D grid: writes x 1024-element chunks"]
+    GRID --> NEW["updated GPU state"]
 ```
 
-> **读图方法：** 阅读“StagedWriteTensor 与 async-first”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
+> **读图方法：** 阅读“StagedWriteTensor 与 async-first”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。新增的 `GRID` 节点只说明 kernel 内部怎样切活：一条写入拆成多个 1024 元素的 chunk 并行写，上游的 H2D 与 UVA 两条输入线不变。
 
-v0.32.0 还需要区分两类索引和状态驻留：请求 `idx_mapping` 使用 int64，展开后的
+v0.33.0 还需要区分两类索引和状态驻留：请求 `idx_mapping` 使用 int64，展开后的
 请求内位置 `expanded_local_pos` 仍为 int32。`RequestState.all_token_ids` 默认选择 UVA，
 但 n-gram speculation 会令 `use_dense_all_token_ids=True`，保存在 GPU 以便反复扫描；
 不能把“MRV2 token 历史永远在主机内存”当作固定事实。
@@ -727,7 +849,7 @@ flowchart TB
 
 `query_start_loc[i]:query_start_loc[i+1]` 是请求 i 的 query 区间。block tables、slot mappings、seq
 lengths 与 backend metadata 必须使用同一请求顺序。Flat ragged representation 避免大面积 padding，
-也允许 prefill/decode 混合。v0.32.0 的持久 block table 保存 manager-block IDs；
+也允许 prefill/decode 混合。v0.33.0 的持久 block table 保存 manager-block IDs；
 需要较小 kernel blocks 的 attention group 在 metadata 构造边界转换自己的表和 KV views，
 不能把 kernel-block 展开重新塞回通用输入 batch。具体寻址见第 06 章。
 
@@ -736,6 +858,15 @@ lengths 与 backend metadata 必须使用同一请求顺序。Flat ragged repres
 
 MRV2 主干顺序是 update requests、处理 zero-work、gather state、决定 graph/DP padding、准备 inputs、
 gather block tables/slot mappings、构建 attention metadata、forward。
+
+“update requests”在 v0.33.0 多了一小步（`373614f66`，#57368）：`SchedulerOutput.encoder_input_updates`
+（`output.py` L268）按 `req_id → {input_id: 载荷或 None}` 告诉 Runner，已经消费完的多模态 CPU 载荷可以释放（置 `None`），
+或在 KV 加载回滚后需要重新编码时把载荷放回。MRV2 在 `add_requests`/`update_requests` 之后、
+`block_tables.apply_staged_writes()` 之前逐请求调用 `EncoderCache.update_encoder_inputs`
+（`model_runner.py` L1784），它只替换该请求 `mm_features` 里对应条目的 `data`，GPU 上的 encoder embedding 和
+identifier/placeholder 元数据都不动。
+
+[源码] `vllm/v1/worker/gpu/mm/encoder_cache.py` - `EncoderCache.update_encoder_inputs`（L29 @ `4ba787ec`）
 
 ```mermaid
 flowchart TD
@@ -797,6 +928,33 @@ sequenceDiagram
 
 Worker 在新 forward 前等待上一 step 尚未完成的 PP send handle，避免覆写发送方仍在读取的 buffer。
 非首 rank 用 `irecv_tensor_dict()`，Runner 返回 intermediates 后再 non-blocking send。
+
+MRV2 里采样结果的回传由 `PPHandler`（`pp_utils.py` L55）负责：末 rank 用独立的 NCCL 子通信组
+在侧 stream 上广播 sampled tokens 与 `(num_sampled, num_rejected)`，非末 rank 的 `receive()` 提前登记一个
+`PendingRecv`，要等 `pp_size` 个 step 之后才由 `get_prev_sampled_outputs()` 消费。
+有 speculative decoding 时，广播宽度由 `_sample_len`（L104）决定：本步有 draft 则为 `num_speculative_steps + 1`，
+否则为 1，所有 rank 必须一致。`2b4332115`（#64458，main 上的 `d8fdf4f61` 被 cherry-pick 进 v0.33.0）还补上了
+draft 本身的广播：末 rank 在 proposer 跑完后调用 `broadcast_drafts()`（L165），非末 rank 的
+`receive(input_batch, recv_drafts=...)`（L176）按同样的条件接收，这样非末 rank 才能用真实 draft token id
+更新自己的 `req_states.draft_tokens`。两端的条件必须对齐：Runner 里 `recv_drafts` 取 `num_spec_tokens > 0`
+（`model_runner.py` L2176），`broadcast_drafts` 的调用也受 `num_spec_tokens > 0` 保护（L2341 @ `4ba787ec`），
+本步没有提出 draft（例如 7.20 的 `skip_drafts`）时双方都不发也不收。
+
+```mermaid
+sequenceDiagram
+    participant L as PP last rank
+    participant N as PP non-last rank
+    L->>L: sample target tokens
+    L-->>N: broadcast sampled_tokens, num_sampled, num_rejected
+    L->>L: propose drafts
+    L-->>N: broadcast_drafts (only if num_spec_tokens > 0)
+    N->>N: receive(recv_drafts = num_spec_tokens > 0)
+    Note over N: consumed pp_size steps later by get_prev_sampled_outputs
+```
+
+> **读图方法：** 这是“PP 采样结果与 draft 回传”的时序图。先看左边的末 rank 依次发出两次广播：先是采样结果，等 proposer 跑完再发 draft；再看右边的非末 rank 用同一个条件决定是否接收 draft。最下面的注释提醒：接收到的数据不是当步使用，而是 `pp_size` 个 step 之后才被消费，所以两端“发不发、收不收”的条件错一个就会让 NCCL 广播对不上。
+
+[源码] `vllm/v1/worker/gpu/pp_utils.py` - `PPHandler.receive`、`PPHandler.broadcast`、`PPHandler.broadcast_drafts`（@ `4ba787ec`）
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.execute_model`
 
@@ -877,6 +1035,12 @@ MRV1 先按配置保存 raw logits 或 raw logprobs，再将待处理 logits 转
 
 [源码] `vllm/v1/sample/sampler.py` - `Sampler.sample`
 
+上面描述的是通用路径。v0.33.0 在 `Sampler.forward` 最前面多了一个很窄的早退分支（`sampler.py` L136 @ `4ba787ec`，
+`e71172335`，#58800）：`mixed_sample_eligible`（L23）要求 ROCm aiter 已启用且设备是 gfx1250、不预测 bonus token、
+全部请求都是随机采样、没有 top-k/top-p、没有 logprobs、没有惩罚/允许 token 掩码/禁用词/logits processor、
+也没有被跟踪的 thinking budget。全部满足时直接用融合的 aiter kernel 从未缩放的 raw logits 采样并返回，
+不再经过后面的处理链。CUDA 以及其他 ROCm 设备不会走到这里。
+
 ```mermaid
 flowchart TD
     L["raw logits"] --> MASK["constraints and bias"]
@@ -952,7 +1116,7 @@ sequenceDiagram
 
 > **读图方法：** 这是“Grammar mask 的汇合点”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-29～10-30（36d4ef654..2eae56c4b）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-30.md。
+> **main 上的变化（未发版）**：本书正文已升到 v0.33.0（`4ba787ec`）；以下提交**不在** v0.33.0 祖先链内，暂不写入正文，留待后续基线处理。详见 meta/main-tracking-2026-10-30.md。
 > - [322f90a2a](https://github.com/vllm-project/vllm/commit/322f90a2a356a83276bc07236e0e620a4e4fc93a)（[#63219](https://github.com/vllm-project/vllm/pull/63219)）：`GrammarOutput` 删除 `num_acceptable_drafts`（`output.py` L341–L346）；`DraftTokensHandler` 按 req_id 保留 draft（`spec_decode/utils.py` L51–L131），`execute_model` 开头 `begin_step`（`model_runner.py` L1794–L1795），移除时 `discard`（L1198–L1199）。删除 `grammar_invalid_drafts`。PP + structured output 不再依赖当前 batch 整表 draft。
 
 ## 7.20 MRV2 sample_tokens 时间线
@@ -972,16 +1136,30 @@ flowchart TD
     SAMPLE --> BC["broadcast tokens"]
     SAMPLE --> LP["prompt logprobs"]
     LP --> ASYNC["start async D2H"]
-    ASYNC --> POST["postprocess request state"]
+    ASYNC --> KVC["collect KV transfer results"]
+    KVC --> POST["postprocess request state"]
     POST --> DRAFT["optional draft proposal"]
+    DRAFT --> DBC["broadcast drafts if proposed"]
+    DBC --> FIN["finalize KV step"]
 ```
 
-> **读图方法：** 这是“MRV2 sample_tokens 时间线”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
-
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-29～10-30（36d4ef654..2eae56c4b）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-30.md。
-> - [d8fdf4f61](https://github.com/vllm-project/vllm/commit/d8fdf4f61bb606e2eb216230cd821096b2a64d3e)（[#64458](https://github.com/vllm-project/vllm/pull/64458)）：`PPHandler._sample_len` 有 draft 时宽为 `max_sample_len`、否则 1（`pp_utils.py` L104–L106）；`receive(..., recv_drafts=)` 与 last rank `broadcast_drafts` 对齐；draft 经 `post_update` 写入 `req_states.draft_tokens`。
+> **读图方法：** 这是“MRV2 sample_tokens 时间线”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。末端的 `KVC → … → DBC → FIN` 是 v0.33.0 的顺序：KV 传输结果在 drafter 运行之前收集，保存动作推迟到 drafter 之后。
 
 [源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.sample_tokens`
+
+**v0.33.0 的两处顺序变化。**
+
+- **KV 传输结果先于 drafter。** `0c5dd18e7`（#62041）让 `sample_tokens` 在有 speculator 时用
+  `kv_connector.post_forward(finished_req_ids, defer_finalize=True)` 先收集 KV 传输结果，等 drafter 跑完再调用
+  `kv_connector.finalize_step()`（`model_runner.py` L2258 与 L2344 @ `4ba787ec`）。没有 speculator 时不推迟。
+- **没有请求能用 draft 时整步跳过。** `856b98415`（#62784）在 `SchedulerOutput` 里新增 `skip_drafts`
+  （`output.py` L325）。Runner 在 `execute_model` 里取 `skip_drafts`（有 DP 同步状态时取
+  `dp_sync_state.skip_drafts`，即所有 DP rank 都跳过才跳过；否则取调度输出里的值，L2118），为真时
+  `num_spec_tokens_to_schedule` 记为 0，也就不提 draft，同时 PP 的 `broadcast_drafts` 与 `recv_drafts` 随之关闭。
+  Scheduler 侧：`self.can_skip_drafts = num_lookahead_tokens > 0 and use_v2_model_runner`（`scheduler.py` L319）；
+  每个被调度请求用 `_drafts_unused`（L502）判断本步之后的 draft 是否用不上（非末尾 prefill chunk，或本步采样后
+  必然达到 `max_tokens`），只要有一个请求用得上，`drafts_needed` 就保持为真，整批都用不上才在 L1748
+  置 `skip_drafts=True` @ `4ba787ec`。
 
 辅助输出通过 `aux_output_connector.begin_step()` 注册，再由 `prepare_output()` 产生
 `pending_aux_output` 交给 `AsyncOutput`；不再把 `routed_experts` 放在 `ExecuteModelState` 中。
@@ -1022,7 +1200,7 @@ flowchart LR
 > **读图方法：** 阅读“ModelRunnerOutput 与异步输出”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
 
 `sampled_token_ids` 是二维变长结构，因为 speculative/jump decoding 可让不同请求本轮生成不同数量。
-v0.32.0 的 `SamplingMaskLists.slice_request()` 也按 `cu_num_generated_tokens` 和 CSR
+v0.33.0 的 `SamplingMaskLists.slice_request()` 也按 `cu_num_generated_tokens` 和 CSR
 `offsets` 切出多位置掩码，不再假设一个请求只生成一个位置。
 zero-work、非末 PP rank 或 connector-only 路径可合法为空；异常由独立 failure 通道传播。
 
@@ -1062,7 +1240,7 @@ flowchart TD
     WM -->|yes, overrides V2=0| T
     WM -->|no| ENV{"VLLM_USE_V2_MODEL_RUNNER set?"}
     ENV -->|yes| RET["return explicit boolean"]
-    ENV -->|no| TRI{"Triton available?"}
+    ENV -->|no| TRI{"Triton available, or platform unspecified?"}
     TRI -->|no| F2["MRV1"]
     TRI -->|yes| UNS{"unsupported V2 features?"}
     UNS -->|yes| F3["MRV1 with warning"]
@@ -1073,20 +1251,31 @@ flowchart TD
 
 [源码] `vllm/config/vllm.py` - `VllmConfig.use_v2_model_runner`
 
-v0.32.0 的自动 fallback 清单包括：
+v0.33.0 的自动 fallback 清单（`_get_v2_model_runner_unsupported_features`，L3053 @ `4ba787ec`）包括：
 
 - external launcher + `PP>1`；
-- `suffix`、`medusa`、`mlp_speculator`、`custom_class` speculation；
+- `suffix`、`custom_class` speculation。`medusa` 与 `mlp_speculator` 两项已经从清单中消失，原因不是“V2
+  在 v0.33.0 中支持它们”，而是 `8530aed2b`（#61701，“Remove Medusa and MLP speculator support”）把这两种投机方法
+  本身从 vLLM 删除了，所以本书不再单独讨论它们；
 - 除 DFlash/DSpark 外的 parallel drafting；
 - heterogeneous-vocabulary draft models（target/draft 词表不同，V2 尚无对应 token mapping）；
 - u-batching/DBO 的限制。未显式选择 Runner 时，DBO 仍进入 fallback；显式 V2 还要
   通过 LoRA、speculation、PP、CP、多模态、hybrid 和 graph mode 等组合校验。
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-28～10-29（0106c8abc..36d4ef654）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-29.md。
+> **main 上的变化（未发版）**：本书正文已升到 v0.33.0（`4ba787ec`）；以下提交**不在** v0.33.0 祖先链内，暂不写入正文，留待后续基线处理。详见 meta/main-tracking-2026-10-29.md。
 > - [cdd2750cd5](https://github.com/vllm-project/vllm/commit/cdd2750cd5e7d90849282a16bc46c21bbc58bcbd)（[#61464](https://github.com/vllm-project/vllm/pull/61464)）：`_get_dbo_unsupported_features` **移除** “dual batch overlap with speculative decoding”，且 decode CP 不再列入；仅保留 prefill CP（`vllm/config/vllm.py` L3247–L3270 @ `36d4ef654`）。启用 DBO+spec 时调用 `_raise_dbo_thresholds_for_spec_decode`（L3225–L3245）把 `dbo_*_token_threshold` 抬到至少 `num_ubatches * uniform_decode_query_len`。上文“显式 V2 还要通过……speculation……CP……组合校验”中 speculation / DCP 两项在 main 上已不再作为 DBO 硬禁令；升级时须改写正文。
 > - [d7f68d4c7d](https://github.com/vllm-project/vllm/commit/d7f68d4c7d31004e257b7b2ff142b4edd83e0d8c)（[#62748](https://github.com/vllm-project/vllm/pull/62748)）：`sampler.apply_staged_writes()` 仅在本步有 `scheduled_new_reqs` 时调用（`model_runner.py` L1298–L1302 @ `36d4ef654`）。
 > - [06e172b5cf](https://github.com/vllm-project/vllm/commit/06e172b5cf8845c80c40a6eaaecbcbde3e38e8df)（[#59341](https://github.com/vllm-project/vllm/pull/59341)）：MRV2 lm_head LoRA 的 `prompt_lora_mapping` 按 `num_logits`（每请求 1+drafts 行）展开（`lora_utils.py` L99–L104；调用处 L1913）。
 > - [65faf4efa0](https://github.com/vllm-project/vllm/commit/65faf4efa0281fc2e04096a28cd35fb8dc7d3218)（[#63237](https://github.com/vllm-project/vllm/pull/63237)）：routed experts capturer 在 `profile_run` 中、KV cache profiling 之前初始化。
+
+关于 Triton：自动选择路径里，没有 Triton 且平台已确定时会告警并选 MRV1（`use_v2_model_runner`，L752）；
+平台为 unspecified（例如只做配置、没有设备）时不做这个回退（`432b1003f`，#62576）。显式选择 V2 而没有
+Triton 的报错发生在 Worker 构造时（见 7.6.2）。
+
+MRV1 一侧也有一份“只有 V2 支持”的清单（`_get_v1_model_runner_unsupported_features`，L3089 @ `4ba787ec`），
+当前包括：prefill context parallel、`PP>1` 且 async scheduling、DSpark 与 xpress 投机解码、adaptive draft
+verification、draft lm_head 量化、Parse 3.5 MTP、混合 sliding/full 的 DFlash draft、DFlash candidate-head draft、
+diffusion 模型、batch-sharded sampling 和 Step5。只要用了 MRV1（包括显式选择 V1），`VllmConfig` 校验时就会运行 `_validate_v1_model_runner`（L2096），命中任何一项即抛 `ValueError`。
 
 stock `torch.compile`、`ngram`/`ngram_gpu` 和 Elastic EP 已从这份清单移除。
 stock compile 在 MRV2 加载模型后调用共享的 `compile_model_with_stock_torch`，
@@ -1112,7 +1301,8 @@ ROCm 的模型特定 MRV1 默认例外已移除；未显式选择时走相同的
 （静态阅读，未运行上游测试）
 
 [源码] `vllm/v1/worker/gpu/spec_decode/__init__.py` - `init_speculator`：
-`use_ngram()` 选择 `NgramGPUSpeculator` 并传入持久 `RequestState`。
+`use_ngram()` 选择 `NgramGPUSpeculator` 并传入持久 `RequestState`；除 n-gram 外，`method == "dflash"` 时还按 draft 架构分到
+`XPressSpeculator`、`LiLiCorrSpeculator`、`DFlash2Speculator`，都不匹配才用 `DFlashSpeculator`（@ `4ba787ec`）。
 PCP+PP 和 Elastic EP 的迁移边界在第 09 章展开；不应把“Runner 支持”解释成所有组合支持。
 
 MRV2 目标是 permanent rows、async-first、GPU-native input metadata、Triton sampler、模块化和显式
@@ -1335,6 +1525,8 @@ flowchart TD
 - `vllm/v1/worker/worker_base.py`：`WorkerBase`、`WorkerWrapperBase`。
 - `vllm/v1/worker/gpu_worker.py`：device、`_make_model_runner`、load、profile、KV init、warmup、execute/sample。
 - `vllm/v1/worker/utils.py`：`request_memory` 与 `AttentionGroup` 的布局转换。
+- `vllm/utils/watch_dog.py`、`vllm/config/watchdog_config.py`：stack-dump watchdog（7.4.3）。
+- `vllm/v1/engine/core.py`：`EngineCore._initialize_kv_caches` 的 layout/DCP interleave/CPU offload 顺序（7.10）。
 
 ### Model 与权重
 
@@ -1353,6 +1545,8 @@ flowchart TD
 - `vllm/v1/worker/gpu_model_runner.py`：MRV1 execute/sample。
 - `vllm/v1/worker/gpu/model_runner.py`：MRV2 execute/sample 与 `ExecuteModelState`。
 - `vllm/v1/worker/gpu/input_batch.py`、`vllm/v1/worker/gpu/states.py`：MRV2 inputs/state。
+- `vllm/v1/worker/gpu/pp_utils.py`：`PPHandler` 的 sampled token 与 draft 广播（7.15）。
+- `vllm/v1/worker/gpu/mm/encoder_cache.py`：`EncoderCache.update_encoder_inputs`（7.13）。
 - `vllm/v1/worker/gpu/spec_decode/__init__.py`：`init_speculator`，包括 GPU n-gram。
 - `vllm/v1/sample/sampler.py`：MRV1 Sampler。
 - `vllm/v1/worker/gpu/sample/sampler.py`：MRV2 Sampler。
@@ -1381,6 +1575,41 @@ flowchart LR
 第 08 章深入 dispatch、stable buffers、compile ranges、CUDA Graph 与 async scheduling；第 09 章展开
 TP/PP/DP/EP/PCP/DCP groups 和 collectives；第 10 章将 prepare、forward、sample、communication 与
 D2H 分开测量。
+
+## 7.32 v0.32.0 → v0.33.0 变更核验表
+
+下表列出本章正文为 v0.33.0 改写时依据的全部上游提交，目的是让读者能自己复核“这条改动确实在 v0.33.0 里”。
+核验方法是：在上游仓库里对每个提交运行 `git merge-base --is-ancestor <提交> 4ba787ec9959e566d3b587a796dff07673324da5`，
+下表“祖先链”一列全部为“是”（2026-11-10 运行）。v0.32.0（`5df63a72`）位于 release 分支，所以不能拿它的
+祖先关系判断；各提交对旧正文的影响，是对照 `git diff 5df63a72 4ba787ec` 与旧正文得到的结论。
+#64458 在 v0.33.0 中的提交是 cherry-pick `2b4332115`，main 上的原提交 `d8fdf4f61` 不在祖先链内。
+
+| 提交（PR） | 主题 | 祖先链 | 本章位置 |
+|---|---|---|---|
+| `8530aed2b`（#61701） | 删除 Medusa 与 MLP speculator | 是 | 7.22 fallback 清单 |
+| `e57bb4ace`（#61712） | 删除旧 Ray compiled-graph executor | 是 | 7.3 表格、流程图与说明、`examples/ch07_execution_pipeline.py` |
+| `52e88e25e`（#62228） | 删除 `VLLM_USE_RAY_V2_EXECUTOR_BACKEND` | 是 | 7.3 |
+| `c07c59f82`（#62241） | external launcher 关闭时释放通信组 | 是 | 7.3.2 |
+| `52f44839f`（#60028） | 非 fork 启动方式下并发启动本地 Worker | 是 | 7.4.3 |
+| `1c8799197`（#55700） | Engine/Worker stack-dump watchdog | 是 | 7.4.3 |
+| `e7bb7e2f2`（#56430） | 失败回复携带 KV connector 输出 | 是 | 7.4.3 |
+| `de8291e24`（#59463） | Worker extension 生命周期钩子 | 是 | 7.5 |
+| `be4ce2e50`（#61237） | `get_local_gpu_index` | 是 | 7.5 |
+| `9cede34a6`（#61044） | 快照前创建 cuBLAS handle | 是 | 7.6 |
+| `432b1003f`（#62576） | MRV2 Triton 检查移到 Worker 构造 | 是 | 7.6.2、7.22 |
+| `7128f568a`（#58243） | encoder graph 显存估算条件 | 是 | 7.9 |
+| `3e75ccba2`（#62330） | DCP interleave 在 profiling 前由 EngineCore 确定 | 是 | 7.10 |
+| `30aded62d`（#52921） | 对齐 CPU offload 池大小 | 是 | 7.10 |
+| `b54458740`（#53558） | 最小 KV 配置改由 `KVCacheConfigBuilder` 生成 | 是 | 7.10 |
+| `fc2b6ab45`（#62698） | staged write 二维 grid | 是 | 7.12.1 |
+| `e71172335`（#58800） | MRV1 `Sampler` 的 gfx1250 融合采样早退 | 是 | 7.18 |
+| `373614f66`（#57368） | `encoder_input_updates` | 是 | 7.13 |
+| `2b4332115`（#64458） | PP draft/sampled-token 广播 | 是 | 7.15 |
+| `0c5dd18e7`（#62041） | KV 传输结果先于 drafter 收集 | 是 | 7.20 |
+| `856b98415`（#62784） | `skip_drafts` | 是 | 7.20 |
+
+没有进入 v0.33.0 祖先链、因此仍只以注记保留的 main 变化有：#63778、#61258、#63633、#63219、
+#61464、#62748、#59341、#63237。
 
 ## 本章小结
 
