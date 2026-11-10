@@ -551,7 +551,8 @@ flowchart TD
 v0.33.0 里，`cache_blocks` 的调用从已删除的 `AsyncScheduler._update_request_with_output` 搬到了
 `Scheduler.update_from_output`（`2fb320d83`，#61589；`scheduler.py` L2372–L2390 @ `05caae03`）。
 同时满足下面三个条件才调用：输出**不是** stale；`_update_request_with_output` 之前请求状态为 `RUNNING`；
-更新前 `num_output_placeholders > 0`，或 `Scheduler` 自身的 `self.num_spec_tokens > 0`（配置的投机 token 数，与同步/异步调度无关）。
+并且以下三者之一成立：更新前 `num_output_placeholders > 0`；`Scheduler` 自身的 `self.num_spec_tokens > 0`（配置的投机 token 数，与同步/异步调度无关）；
+或者模型含 Mamba 层（`has_mamba_layers`）、**没有**开启 async scheduling 且开启了 prefix caching——`05caae03` 新增的第三个分支，让同步调度下的 Mamba 状态也在退役或完成前发布。
 调用形式是：
 
 ```text
@@ -572,12 +573,12 @@ flowchart TD
     C1 -- 是 --> N["skip cache_blocks"]
     C1 -- 否 --> C2{"更新前是否为 RUNNING?"}
     C2 -- 否 --> N
-    C2 -- 是 --> C3{"是否有 placeholder 或 num_spec_tokens > 0?"}
+    C2 -- 是 --> C3{"有 placeholder，或 num_spec_tokens > 0，<br/>或 Mamba + 同步调度 + prefix caching?"}
     C3 -- 否 --> N
     C3 -- 是 --> CB["cache_blocks(request, computed - in_flight)"]
 ```
 
-> **读图方法：** 从上往下依次过三个菱形。第一个菱形（output_is_stale?）答“是”就跳过；答“否”才继续。第二个（更新前是否为 RUNNING）和第三个（是否有 placeholder 或 num_spec_tokens > 0）必须都答“是”，才会走到 cache_blocks(request, computed - in_flight)。任一为“否”，直接走到 skip cache_blocks。第二个菱形排除更新前已不是 RUNNING 的请求（例如已被抢占）。
+> **读图方法：** 从上往下依次过三个菱形。第一个菱形（output_is_stale?）答“是”就跳过；答“否”才继续。第二个（更新前是否为 RUNNING）和第三个（有 placeholder、num_spec_tokens > 0，或 Mamba 同步调度且开启 prefix caching 三者之一）必须都答“是”，才会走到 cache_blocks(request, computed - in_flight)。任一为“否”，直接走到 skip cache_blocks。第二个菱形排除更新前已不是 RUNNING 的请求（例如已被抢占）。
 
 [源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.update_from_output`（`cache_blocks` 调用 L2390 @ `05caae03`）
 

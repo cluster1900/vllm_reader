@@ -1156,8 +1156,11 @@ flowchart LR
 `scheduled_new_reqs` 携带首次发送给 worker 的完整请求数据。Worker 会缓存这些数据，
 之后 `scheduled_cached_reqs` 只发送变化部分，降低每 step 的 CPU/IPC 开销。
 
-V2 Model Runner 会把 resumed request 合并进 new request 路径；旧路径可以在 cached data
-中表达 resumed 差异。读源码时要确认当前 runner 分支。
+被抢占后恢复的请求（resumed）现在统一作为 `NewRequestData` 重新发送：源码注释写明“A resumed request is re-sent in full, like a new one:
+its blocks were freed and its worker state dropped at preemption”（`scheduler.py:1558-1559`）；`NewRequestData.prefill_token_ids`
+（`output.py:50-51`）装的是“要 prefill 的全部 token：prompt，恢复时再加上已生成的 token”。`CachedRequestData`（`output.py:139-147`）
+只剩 `req_ids`、`new_token_ids`、`new_block_ids`、`num_computed_tokens`、`num_output_tokens` 五个字段，不再有 resumed 标记。
+第一代 Runner 曾在 cached data 里表达 resumed 差异，它已随 #63373 删除，现在只有这一条路径。
 
 ### 4.17.2 核心字段
 
@@ -1169,7 +1172,6 @@ V2 Model Runner 会把 resumed request 合并进 new request 路径；旧路径�
 | `total_num_scheduled_tokens` | 上述值之和，用于不变量和执行判断 |
 | `scheduled_spec_decode_tokens` | 本轮要验证的 draft token |
 | `scheduled_encoder_inputs` | 需要执行的多模态 encoder item |
-| `num_common_prefix_blocks` | 已弃用的兼容字段，内置 Scheduler 不再填写，默认空列表 |
 | `finished_req_ids` | 两轮之间完成、需通知 worker 清理的请求 |
 | `preempted_req_ids` | 本轮抢占、需重置 worker 状态的请求 |
 | `new_block_ids_to_zero` | 新 block 使用前需要清零的 id |
@@ -1179,13 +1181,11 @@ V2 Model Runner 会把 resumed request 合并进 new request 路径；旧路径�
 | `encoder_input_updates` | MRV2（V2 Model Runner）专用：按请求下发 encoder 输入 CPU payload 的释放或恢复（v0.33.0） |
 | `skip_drafts` | 本轮之后提出的 draft 一定用不上，drafter 可以跳过（v0.33.0） |
 
-自 v0.32.0 起已删除 cascade attention 的执行与公共前缀统计链；保留字段不代表该优化仍可达。
-`KVCacheManager.get_num_common_prefix_blocks()` 也只是给树外调用者保留的全零兼容接口。
+自 v0.32.0 起已删除 cascade attention 的执行与公共前缀统计链。v0.33.0 还留着的兼容字段 `SchedulerOutput.num_common_prefix_blocks`
+和接口 `KVCacheManager.get_num_common_prefix_blocks()`（只返回全零）在 `05caae03` 里都已删除，现在的 `output.py` 与 `kv_cache_manager.py` 里找不到它们。
 此外旧的 `block_table_updates` 字段已删除，不应再把完整行替换画成内置输出协议的一部分。
 
 [源码] `vllm/v1/core/sched/output.py` - `SchedulerOutput`
-
-[源码] `vllm/v1/core/kv_cache_manager.py` - `get_num_common_prefix_blocks`
 
 SchedulerOutput 把控制面决定转换为第 07 章 Model Runner 能消费的增量协议。
 
@@ -1492,65 +1492,65 @@ EngineCore 在请求进入 Scheduler 之前就以可重试的 `engine_paused` �
 `SchedulerInterface` 为此新增 `has_request(request_id)`：包含等待下一段输入的 streaming
 会话，用来让这些会话的后续输入不被误拒。详见第 03 章 3.12。
 
-### 4.21.2 Prefill 节拍：DP 对齐与本地节拍
+### 4.21.2 Prefill 节拍：由 EngineCore 计数，Scheduler 只执行
 
 `prefill_schedule_interval`（记 $I$）的含义在 v0.33.0 变宽（#54627，提交 `ed3050add`）：
 “只在每 $I$ 步里放一步 prefill，其余步只做 decode；$I=1$ 表示每步都可以 prefill。”
 延期的那一步**完全没有 prefill**，连已被接纳的长 prompt 的后续 chunk 也不推进，所以长 prompt
-最多要多花约 $I$ 倍的步数。谁来执行这个节拍，取决于部署形态：
+最多要多花约 $I$ 倍的步数。
+
+v0.33.0 里这个节拍由 Scheduler 自己计数（本地节拍，含 `last_prefill_step`）。#66224（`f1d17fe83`，2026-11-09）把它简化：
+**计数移到 EngineCore，Scheduler 只接收一个布尔值**。`Scheduler.schedule(throttle_prefills: bool = False)`（`scheduler.py:686`）不再自己数步，
+`local_prefill_interval`、`last_prefill_step` 这些字段都已不存在。谁来给出这个布尔值：
 
 | 形态 | 谁驱动 | 说明 |
 |---|---|---|
-| 非 DP | Scheduler 本地节拍 | v0.32.0 中是空操作，v0.33.0 起生效 |
-| 稠密模型 DP rank | Scheduler 本地节拍 | `reconfigure_for_independent_dp_rank` 已把 `data_parallel_size` 设为 1，各 rank 各自计数；源码注释标明这是行为变化 |
-| MoE DP（size>1） | `DPEngineCoreProc` 的 `step_counter % I != 0` | 各 rank 的 `step_counter` 相同；Scheduler 内 `local_prefill_interval=1`，本地节拍不介入 |
+| 非 DP、稠密模型 DP rank | `EngineCore._should_throttle_prefills`（`core.py:712-716`） | $I>1$ 且 `num_executed_steps % I != 0`；`num_executed_steps` 只统计真正调度了 token 的步（`core.py:729-730`），空 `schedule()` 不计；各 rank 各自计数 |
+| MoE DP（size>1） | `DPEngineCoreProc._should_throttle_prefills`（`core.py:2748-2755`） | $I>1$ 且 `step_counter % I != 0`；各 DP rank 的 `step_counter` 相同，所以 prefill 对齐在同一步，注释写明新 wave 从 0 开始，空闲后第一步立即放行 |
 
-本地节拍的判定可以写成：
+Scheduler 拿到 `throttle_prefills` 后，是否真的延期还要再判一次（`scheduler.py:733-735`）：
 
 $$
-\text{defer}\iff I>1\ \wedge\ \neg B\ \wedge\ (N+1)-\ell<I\ \wedge\ \exists\,\text{running decode}
+\text{defer}\iff \text{throttle}\ \wedge\ \neg B\ \wedge\ \exists\,\text{running decode},\qquad
+\text{throttle}\iff I>1\ \wedge\ (N \bmod I)\neq 0
 $$
 
-符号含义：$I$ 是 `local_prefill_interval`；$B$ 是 `prefill_capacity_bound`（上一轮放行 prefill 后，waiting 队列里仍有没被接纳的请求，即容量已经占满时为真；源码为 `num_waiting > len(deferred_waiting)`）；$N$ 是 `num_executed_steps`（只统计真正调度了 token 的步数，空
-`schedule()` 不计）；$\ell$ 是 `last_prefill_step`（最近一次带 prefill 的步序号，初始化为
-$-I$，所以第一步不会被拦）；“running decode”指 `running` 里至少有一个不是 prefill chunk 的请求。
+符号含义：$I$ 是 `prefill_schedule_interval`；$N$ 是上面说的步计数（`num_executed_steps` 或 `step_counter`，无单位的非负整数）；
+$B$ 是 `prefill_capacity_bound`（上一轮放行 prefill 后，waiting 队列里仍有没被接纳的请求，即容量已经占满时为真；
+源码为 `num_waiting > len(deferred_waiting)`，`scheduler.py:1620`）；“running decode”指 `running` 里至少有一个不是 prefill chunk 的请求。
 
-白话：从最近一次带 prefill 的步算起，不足 $I$ 个已执行步时，如果还有 decode 可做，就把这一步让给
-decode；一旦容量被 prefill 占满（$B$ 为真）或根本没有 decode 可做，就放行，避免模型空转或
-waiting 队列无限增长。例：$I=4$，第 1 步带 prefill（$\ell=1$）。第 2、3、4 步的 $(N+1)-\ell$ 分别
-为 1、2、3，均小于 4 且有 decode，被延期；第 5 步为 4，不再小于 4，放行 prefill 并把 $\ell$ 更新为 5。
-因此 prefill 最多在第 1、5、9…步出现。仅为异步 KV 加载而推迟的请求（`num_new_tokens=0`）不会重置
-$\ell$，因为那一步没有真正做 prefill。
+白话：每 $I$ 步里只有 $N$ 能被 $I$ 整除的那一步放行 prefill，其余步“让给 decode”；但如果上一次放行后 waiting 队列还堆着请求（容量被
+prefill 占满，$B$ 为真），或者根本没有 decode 可做，就不延期，避免模型空转或 waiting 队列无限增长。
+例：$I=4$，$N=0$ 的那一步放行；$N=1,2,3$ 被延期（前提是还有 decode 且 $B$ 为假）；$N=4$ 再放行。所以
+prefill 最多在第 1、5、9…步出现。与 v0.33.0 的本地节拍不同，放行点现在只由 $N \bmod I$ 决定，不再从“最近一次真正带 prefill 的步”重新起算。
+
+延期时 Scheduler 做两件事：正在 running 的 prefill chunk 本步跳过（`scheduler.py:783`），waiting 里需要本地 prefill 计算的请求就此停止接纳
+（`:1285`）；decode 仍然照跑。只在没有延期的步上刷新 $B$（`:1618-1620`）。
 
 ```mermaid
 flowchart TD
-    S[schedule 开始] --> M{DP size > 1 的 MoE rank?}
-    M -->|是| E[由 EngineCore 的 step_counter 决定是否 throttle]
-    M -->|否| I{interval > 1?}
-    I -->|否| ALL[不延期]
-    I -->|是| B{prefill_capacity_bound?}
+    EC["EngineCore 每步计数 N（只统计调度了 token 的步）"] --> T{"I > 1 且 N mod I != 0 ?"}
+    T -->|否| ALL["不延期：本步可以 prefill"]
+    T -->|是| B{"prefill_capacity_bound?"}
     B -->|是| ALL
-    B -->|否| W{N+1-ℓ < I ?}
-    W -->|否| ALL
-    W -->|是| D{存在 running decode?}
+    B -->|否| D{"存在 running decode?"}
     D -->|否| ALL
-    D -->|是| DEF[defer_prefills = True：只做 decode]
-    ALL --> U[若本步有 prefill：ℓ = 已执行步数]
-    DEF --> V[本步无 prefill，ℓ 不变]
+    D -->|是| DEF["defer_prefills = True：本步只做 decode"]
+    ALL --> U["非延期步：重算 prefill_capacity_bound"]
+    DEF --> V["延期步：prefill_capacity_bound 不变"]
 ```
 
-> **读图方法：** 先看是不是 MoE DP（那种情况交给 EngineCore）；然后依次排除四个“放行”理由：节拍未开、容量被占满、已满 $I$ 步、没有 decode 可做。四个都不成立才延期。右下两个框说明 $\ell$ 只在真正带 prefill 的步上刷新。
+> **读图方法：** 顶部的方框是 EngineCore 一侧的计数（MoE DP 时用各 rank 相同的 `step_counter`，否则用 `num_executed_steps`）；其下三个菱形是 Scheduler 一侧的三个“放行”理由：节拍到点、容量被占满、没有 decode 可做。三个都不成立才延期。最下面两个框说明 $B$ 只在没有延期的步上刷新。
 
-[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.__init__`、`schedule`
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule`
 
-[源码] `vllm/v1/engine/core.py` - `DPEngineCoreProc._should_throttle_prefills`
+[源码] `vllm/v1/engine/core.py` - `EngineCore._should_throttle_prefills`、`DPEngineCoreProc._should_throttle_prefills`
 
 [源码] `vllm/config/scheduler.py` - `SchedulerConfig.prefill_schedule_interval`
 
-[测试] `tests/v1/core/test_scheduler.py` - `test_local_prefill_interval_holds_prefill_between_bursts`、
-`test_empty_schedule_does_not_advance_the_prefill_cadence`、
-`test_local_prefill_interval_never_idles_the_model`、
-`test_local_prefill_interval_left_to_engine_under_dp`
+[测试] `tests/v1/engine/test_engine_core.py` - `test_prefill_interval_counts_only_executed_steps`
+
+[测试] `tests/v1/distributed/test_async_llm_dp.py` - `test_dp_prefill_schedule_interval`
 
 ### 4.21.3 `has_requests()` 不只看用户是否未完成
 

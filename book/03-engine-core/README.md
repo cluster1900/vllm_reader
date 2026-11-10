@@ -207,7 +207,12 @@ MRV2（V2 Model Runner，新一代 Model Runner）的 draft-model speculator 改
 metadata 的 `max_seq_len` 取“draft 上限”与 `max_model_len` 的较小值（#60513，提交
 `636da2476`）。
 
-[源码] `vllm/v1/worker/gpu/spec_decode/speculator.py` - 读取 `max_model_len` 的 draft metadata 构造
+`05caae03` 里这条链更完整：`DraftModelSpeculator.max_model_len` 是 property，每次读 `model_config.max_model_len`；
+CUDA graph 里的 draft 步改读一个 GPU 标量 `max_model_len_gpu`。EngineCore 在 auto-fit 把 `max_model_len` 改小后
+调用 `collective_rpc("update_max_model_len", ...)`（`vllm/v1/engine/core.py:364`），经 Worker、MRV2 Runner（`gpu/model_runner.py:378-382`）
+传到 `speculator.update_max_model_len`，对 `max_model_len_gpu` 做 `fill_`（`speculator.py:272-273`），这样 capture 之后的缩小也作用于 graph replay。
+
+[源码] `vllm/v1/worker/gpu/spec_decode/speculator.py` - 读取 `max_model_len` 的 draft metadata 构造、`update_max_model_len`
 
 多进程模式下，EngineCore 通过 `EngineCoreReadyResponse` 把最终的
 `max_model_len`、`num_gpu_blocks`、`block_size`、dtype 和并行大小回传给 client；client
@@ -616,10 +621,10 @@ profile 之前确定，使 NIXL（跨实例传输 KV 的 connector）的 DCP int
 - 值为 1：`step_fn = step`。
 - 值大于 1：创建有界 deque，`step_fn = step_with_batch_queue`。
 
-设 `P` 为 PP stage 数（至少 1）。关闭 async scheduling 时容量为 `P`；开启时，
-MRV2 容量为 `P+1`，MRV1 在 `P=1` 时为 2，在 `P>1` 时仍返回 `P`。这是
-`VllmConfig.max_concurrent_batches` 的规则；其他配置校验还可能拒绝不支持的组合。
-例如 MRV2、PP=4、async 开启时容量为 5，并不是固定 2。
+设 `P` 为 PP stage 数（至少 1）。关闭 async scheduling 时容量为 `P`；开启时容量为 `P+1`
+（`vllm/config/vllm.py:559-565`）。MRV1 已随 #63373 删除，曾经的“MRV1 在 `P=1` 时为 2、`P>1` 时仍返回 `P`”分支不再存在。
+这是 `VllmConfig.max_concurrent_batches` 的规则；其他配置校验还可能拒绝不支持的组合。
+例如 PP=4、async 开启时容量为 5，并不是固定 2。
 
 [源码] `vllm/config/vllm.py` - `VllmConfig.max_concurrent_batches`
 

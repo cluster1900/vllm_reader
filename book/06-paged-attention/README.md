@@ -1371,8 +1371,8 @@ attention 算法/实现；block table 描述 K/V 的地址组织。当前 API �
 ### 6.16.6 Cascade 已删除，DCP 仍是独立分支
 
 v0.32.0 已删除 `cascade_attention()`、`use_cascade_attention()` 及 FlashAttention
-metadata 中的公共前缀/后缀字段。`SchedulerOutput.num_common_prefix_blocks` 保留空列表
-默认值，builder 的 `common_prefix_len` 兼容参数始终传 0；它们是树外实现兼容边界，
+metadata 中的公共前缀/后缀字段。`SchedulerOutput.num_common_prefix_blocks` 字段在 `05caae03` 里也已删除（第 04 章 4.17.2）；builder 的 `common_prefix_len` 兼容参数仍在，
+源码注释写明“Deprecated and always 0”，调用处传 0（`vllm/v1/attention/backend.py:698`、`:730`）。它只是树外实现的兼容边界，
 不是内置 cascade 仍在执行的证据。Prefix cache 的 block 共享仍存在，不能把“移除
 cascade 计算优化”误解为“移除前缀缓存”。
 
@@ -1393,8 +1393,6 @@ flowchart TD
 [源码] `vllm/v1/attention/backends/flash_attn.py` - `FlashAttentionImpl.forward`、`_forward_with_dcp`
 
 [源码] `vllm/v1/attention/backend.py` - `AttentionMetadataBuilder.build` 的兼容参数说明
-
-[源码] `vllm/v1/core/sched/output.py` - `SchedulerOutput.num_common_prefix_blocks`
 
 本章先建立单 rank 基本路径；第 09 章讨论跨 rank softmax 状态为什么不能直接平均。
 

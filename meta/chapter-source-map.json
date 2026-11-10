@@ -9,7 +9,6 @@
       {"path": "vllm/model_executor/layers/attention/attention.py", "symbols": ["class Attention", "def forward"]},
       {"path": "vllm/model_executor/layers/logits_processor.py", "symbols": ["class LogitsProcessor"]},
       {"path": "vllm/sampling_params.py", "symbols": ["class SamplingParams"]},
-      {"path": "vllm/v1/sample/sampler.py", "symbols": ["class Sampler"]},
       {"path": "vllm/v1/worker/gpu/sample/sampler.py", "symbols": ["class Sampler"]},
       {"path": "tests/test_sampling_params.py", "symbols": ["def test_diffusion_accepts_top_k_top_p"]},
       {"path": "tests/v1/sample/test_topk_topp_sampler.py", "symbols": ["def test_topk_impl_equivalence"]},
@@ -53,7 +52,8 @@
       {"path": "tests/v1/engine/test_startup_watch_processes.py", "symbols": ["def test_engine_core_process_shutdown_timeout"]},
       {"path": "vllm/entrypoints/common/offline.py", "symbols": ["class OfflineInferenceMixin", "def _run_engine"]},
       {"path": "vllm/config/parallel.py", "symbols": ["enable_shm_tensor_arena: bool = False"]},
-      {"path": "vllm/distributed/device_communicators/shm_broadcast.py", "symbols": ["class MessageQueue"]}
+      {"path": "vllm/distributed/device_communicators/shm_broadcast.py", "symbols": ["class MessageQueue"]},
+      {"path": "vllm/v1/worker/gpu/spec_decode/speculator.py", "symbols": ["def update_max_model_len"]}
     ],
     "04-scheduler": [
       {"path": "vllm/v1/core/sched/scheduler.py", "symbols": ["class Scheduler", "def schedule", "def _preempt_request", "def _update_after_schedule", "def update_from_output", "def get_num_unfinished_requests", "kv_holding_waiting", "def _drafts_unused", "def _get_encoder_input_updates", "def _drain_deferred_loads"]},
@@ -64,9 +64,10 @@
       {"path": "vllm/config/scheduler.py", "symbols": ["class SchedulerConfig", "max_num_scheduled_tokens", "scheduler_reserve_full_isl", "prefill_schedule_interval", "max_num_active_seqs", "long_prefill_token_threshold_adaptive"]},
       {"path": "vllm/v1/core/kv_cache_manager.py", "symbols": ["class KVCacheManager", "def allocate_slots"]},
       {"path": "vllm/v1/core/sched/async_scheduler.py", "symbols": ["class AsyncScheduler"]},
-      {"path": "tests/v1/core/test_scheduler.py", "symbols": ["def test_schedule_concurrent_partial_requests", "def test_schedule_order", "def test_preempt_during_execution", "def test_priority_scheduling_basic_ordering", "def test_priority_scheduling_preemption_and_resumption_when_out_of_kv", "def test_pause_new_drains_async_kv_loads", "def test_pause_new_ignores_streaming_session_waiting_for_input", "def test_skip_drafts_only_when_no_request_can_use_them", "def test_local_prefill_interval_holds_prefill_between_bursts", "def test_no_mm_input_chunking_at_item_boundary"]},
+      {"path": "tests/v1/core/test_scheduler.py", "symbols": ["def test_schedule_concurrent_partial_requests", "def test_schedule_order", "def test_preempt_during_execution", "def test_priority_scheduling_basic_ordering", "def test_priority_scheduling_preemption_and_resumption_when_out_of_kv", "def test_pause_new_drains_async_kv_loads", "def test_pause_new_ignores_streaming_session_waiting_for_input", "def test_skip_drafts_only_when_no_request_can_use_them", "def test_no_mm_input_chunking_at_item_boundary"]},
       {"path": "tests/v1/core/test_deferred_block_free.py", "symbols": ["def _setup_request_with_inflight_step", "def test_finish_defers_free_until_inflight_step_done", "def test_fence_held_across_multiple_inflight_steps", "def test_deferred_async_load_registers_after_inflight_step"]},
-      {"path": "tests/v1/streaming_input/test_scheduler_streaming.py", "symbols": ["def test_session_resumes_after_stop_while_preempted"]}
+      {"path": "tests/v1/streaming_input/test_scheduler_streaming.py", "symbols": ["def test_session_resumes_after_stop_while_preempted"]},
+      {"path": "tests/v1/engine/test_engine_core.py", "symbols": ["def test_prefill_interval_counts_only_executed_steps"]}
     ],
     "05-kv-cache": [
       {"path": "vllm/v1/kv_cache_interface.py", "symbols": ["class KVCacheSpec", "class AttentionSpec", "class FullAttentionSpec", "class MLAAttentionSpec", "class SlidingWindowSpec", "class MambaSpec", "class KVCacheTensor", "class KVCacheGroupSpec", "class KVCacheConfig", "def get_mamba_prefill_checkpoint_position", "cache_hit_alignment_tokens"]},
@@ -74,7 +75,7 @@
       {"path": "vllm/v1/core/kv_cache_utils.py", "symbols": ["class KVCacheBlock", "class FreeKVCacheBlockQueue", "def get_request_block_hasher", "def generate_lookahead_block_hash_extra_keys", "def trim_null_head"]},
       {"path": "vllm/v1/core/kv_cache_planning.py", "symbols": ["def check_enough_kv_cache_memory", "def get_kv_cache_config_from_groups", "def get_kv_cache_groups", "def get_kv_cache_configs", "def get_global_kv_cache_groups", "class DefaultKVCacheConfigBuilder"]},
       {"path": "vllm/v1/core/kv_cache_config_builder.py", "symbols": ["class KVCacheConfigBuilder", "def get_kv_cache_config_builder"]},
-      {"path": "vllm/config/vllm.py", "symbols": ["def num_hash_lookahead_tokens", "def adjust_dcp_kv_cache_interleave_size"]},
+      {"path": "vllm/config/vllm.py", "symbols": ["def _resolve_num_hash_lookahead_tokens", "def adjust_dcp_kv_cache_interleave_size"]},
       {"path": "vllm/v1/core/kv_cache_manager.py", "symbols": ["class KVCacheBlocks", "class KVCacheManager", "def get_computed_blocks", "def allocate_slots", "def free", "def cache_blocks"]},
       {"path": "vllm/v1/core/kv_cache_coordinator.py", "symbols": ["class KVCacheCoordinator", "class UnitaryKVCacheCoordinator", "class HybridKVCacheCoordinator", "def find_longest_cache_hit", "def replay_boundaries", "def reset_prefix_cache", "def get_num_cacheable_tokens"]},
       {"path": "vllm/v1/core/block_pool.py", "symbols": ["class BlockHashToBlockMap", "class BlockPool", "def cache_full_blocks", "def cache_partial_block", "def get_new_blocks", "def touch", "def free_blocks", "def evict_blocks", "def reset_prefix_cache"]},
@@ -83,7 +84,8 @@
       {"path": "tests/v1/core/prefix_cache/test_partial_prefix_cache_primitives.py", "symbols": ["def test_later_request_hits_cached_partial_tail", "def test_reset_prefix_cache_clears_partial_entry_metadata", "def test_partial_block_promotes_to_direct_full_block_hash"]},
       {"path": "tests/v1/core/prefix_cache/test_partial_prefix_cache_hits.py", "symbols": ["def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue", "def test_hybrid_sliding_window_group_disables_partial_hash_hits", "def test_resolved_cache_hit_alignment_matches_coordinator"]},
       {"path": "tests/v1/core/test_reset_prefix_cache_e2e.py", "symbols": ["def test_reset_prefix_cache_e2e"]},
-      {"path": "vllm/v1/worker/utils.py", "symbols": ["def request_memory"]}
+      {"path": "vllm/v1/worker/utils.py", "symbols": ["def request_memory"]},
+      {"path": "vllm/v1/request.py", "symbols": ["def get_prefix_cache_hit_limit", "def get_max_cache_hit_length"]}
     ],
     "06-paged-attention": [
       {"path": "vllm/v1/worker/gpu/buffer_utils.py", "symbols": ["class StagedWriteTensor", "def apply_write", "class FusedStagedWriter", "def apply", "class NonUvaBuffer", "class UvaBufferPool"]},
@@ -92,9 +94,7 @@
       {"path": "vllm/v1/attention/selector.py", "symbols": ["class AttentionSelectorConfig", "def get_attn_spec_kind", "def get_attn_backend"]},
       {"path": "vllm/v1/attention/backends/registry.py", "symbols": ["class AttentionBackendEnum", "def register_backend"]},
       {"path": "vllm/platforms/cuda.py", "symbols": ["def _get_backend_priorities", "def get_valid_backends", "def get_attn_backend_cls"]},
-      {"path": "vllm/v1/worker/block_table.py", "symbols": ["def get_block_table_width", "class BlockTable", "class MultiGroupBlockTable", "class ComputeSlotMappingKernel"]},
       {"path": "vllm/v1/worker/gpu/block_table.py", "symbols": ["class BlockTables", "def append_block_ids", "def gather_block_tables", "def compute_slot_mappings", "def _compute_slot_mappings_kernel"]},
-      {"path": "vllm/v1/worker/gpu_model_runner.py", "symbols": ["CommonAttentionMetadata(", "def _build_attn_group_metadata"]},
       {"path": "vllm/v1/worker/gpu/model_runner.py", "symbols": ["def prepare_attn", "gather_block_tables(", "compute_slot_mappings("]},
       {"path": "vllm/v1/attention/backends/flash_attn.py", "symbols": ["class FlashAttentionBackend", "class FlashAttentionMetadataBuilder", "class FlashAttentionImpl", "def do_kv_cache_update", "flash_attn_varlen_func("]},
       {"path": "vllm/v1/attention/ops/paged_attn.py", "symbols": ["class PagedAttention", "def split_kv_cache", "def write_to_paged_cache"]},
@@ -103,7 +103,8 @@
       {"path": "tests/v1/attention/test_backend_per_kind.py", "symbols": ["def test_backend_per_kind_parses_strings", "def test_backend_per_kind_rejects_unknown_kind"]},
       {"path": "tests/v1/attention/test_cuda_backend_probe_errors.py", "symbols": ["def test_get_valid_backends_records_environment_failure", "def test_selected_backend_probe_failure_raises_value_error_with_cause"]},
       {"path": "vllm/v1/worker/utils.py", "symbols": ["class AttentionGroup", "def map_to_kernel_block_table", "def map_kv_cache_to_kernel_blocks", "def prepare_kernel_block_sizes"]},
-      {"path": "vllm/v1/worker/gpu/attn_utils.py", "symbols": ["def build_attn_metadata"]}
+      {"path": "vllm/v1/worker/gpu/attn_utils.py", "symbols": ["def build_attn_metadata"]},
+      {"path": "vllm/v1/kv_cache_interface.py", "symbols": ["def get_block_table_width"]}
     ],
     "07-model-execution": [
       {"path": "vllm/envs.py", "symbols": ["VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"]},
@@ -112,7 +113,6 @@
       {"path": "vllm/v1/executor/multiproc_executor.py", "symbols": ["class MultiprocExecutor", "def collective_rpc", "class WorkerProc", "def worker_busy_loop", "def _execute_worker_rpc", "def async_output_busy_loop"]},
       {"path": "vllm/v1/worker/worker_base.py", "symbols": ["class WorkerBase", "class WorkerWrapperBase", "def init_worker", "def execute_model", "def sample_tokens"]},
       {"path": "vllm/v1/worker/gpu_worker.py", "symbols": ["class Worker", "def init_device", "def load_model", "def determine_available_memory", "def initialize_from_config", "def compile_or_warm_up_model", "def execute_model", "def sample_tokens", "def _make_model_runner", "def _init_workspace_and_model_runner"]},
-      {"path": "vllm/v1/worker/gpu_model_runner.py", "symbols": ["class GPUModelRunner", "def execute_model", "def sample_tokens"]},
       {"path": "vllm/v1/worker/gpu/model_runner.py", "symbols": ["class GPUModelRunner", "class ExecuteModelState", "def execute_model", "def sample_tokens"]},
       {"path": "vllm/v1/worker/gpu/input_batch.py", "symbols": ["class InputBatch"]},
       {"path": "vllm/v1/worker/gpu/states.py", "symbols": ["class RequestState", "def apply_staged_writes"]},
@@ -122,21 +122,21 @@
       {"path": "vllm/model_executor/model_loader/default_loader.py", "symbols": ["class DefaultModelLoader", "def get_all_weights", "def load_weights"]},
       {"path": "vllm/model_executor/models/registry.py", "symbols": ["class _ModelRegistry", "def resolve_model_cls", "\"LlamaForCausalLM\""]},
       {"path": "vllm/model_executor/models/llama.py", "symbols": ["class LlamaForCausalLM", "def load_weights"]},
-      {"path": "vllm/v1/sample/sampler.py", "symbols": ["class Sampler", "def forward", "def sample"]},
       {"path": "vllm/v1/worker/gpu/sample/sampler.py", "symbols": ["class Sampler", "def apply_sampling_params", "def sample"]},
       {"path": "vllm/v1/outputs.py", "symbols": ["class ModelRunnerOutput", "class AsyncModelRunnerOutput"]},
       {"path": "vllm/sequence.py", "symbols": ["class IntermediateTensors"]},
-      {"path": "vllm/config/vllm.py", "symbols": ["def use_v2_model_runner", "def _get_v2_model_runner_unsupported_features"]},
+      {"path": "vllm/config/vllm.py", "symbols": ["def _get_model_runner_unsupported_features", "def _validate_model_runner"]},
       {"path": "tests/distributed/test_multiproc_executor.py", "symbols": ["def test_multiproc_executor_collective_rpc"]},
       {"path": "tests/v1/worker/test_gpu_worker.py", "symbols": ["Memory accounting of the profiling run"]},
-      {"path": "tests/test_config.py", "symbols": ["VLLM_USE_V2_MODEL_RUNNER"]},
-      {"path": "vllm/v1/worker/utils.py", "symbols": ["def request_memory", "class AttentionGroup"]}
+      {"path": "tests/test_config.py", "symbols": ["def test_model_runner_supports_speculative_method", "def test_model_runner_supports_custom_logits_processors"]},
+      {"path": "vllm/v1/worker/utils.py", "symbols": ["def request_memory", "class AttentionGroup"]},
+      {"path": "vllm/platforms/interface.py", "symbols": ["def validate_environ"]}
     ],
     "08-compile-cuda-graph": [
       {"path": "vllm/envs.py", "symbols": ["VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"]},
-      {"path": "vllm/config/vllm.py", "symbols": ["OPTIMIZATION_LEVEL_TO_CONFIG", "def max_concurrent_batches", "def _maybe_override_dynamic_sd_cudagraph_mode", "def _disable_cudagraphs_for_v2_stock_torch_compile", "def use_cumem_cudagraph_pool"]},
+      {"path": "vllm/config/vllm.py", "symbols": ["OPTIMIZATION_LEVEL_TO_CONFIG", "def max_concurrent_batches", "def _disable_cudagraphs_for_stock_torch_compile", "def use_cumem_cudagraph_pool"]},
       {"path": "vllm/config/scheduler.py", "symbols": ["class SchedulerConfig", "async_scheduling", "def get_scheduler_cls"]},
-      {"path": "vllm/config/compilation.py", "symbols": ["class CompilationMode", "class CUDAGraphMode", "class CompilationConfig", "def compute_hash", "def set_splitting_ops_for_v1", "def resolve_cudagraph_mode_and_sizes", "def without_piecewise"]},
+      {"path": "vllm/config/compilation.py", "symbols": ["class CompilationMode", "class CUDAGraphMode", "class CompilationConfig", "def compile_factors", "def set_splitting_ops_for_v1", "def resolve_cudagraph_mode_and_sizes", "def without_piecewise"]},
       {"path": "vllm/v1/core/sched/async_scheduler.py", "symbols": ["class AsyncScheduler", "def _update_after_schedule", "num_output_placeholders"]},
       {"path": "vllm/v1/core/sched/scheduler.py", "symbols": ["def _update_request_with_output"]},
       {"path": "vllm/v1/engine/core.py", "symbols": ["def step", "def step_with_batch_queue", "batch_queue_size"]},
@@ -149,20 +149,19 @@
       {"path": "vllm/compilation/piecewise_backend.py", "symbols": ["class PiecewiseBackend", "def compile_all_ranges", "def _find_range_for_shape"]},
       {"path": "vllm/compilation/caching.py", "symbols": ["def aot_compile_hash_factors"]},
       {"path": "vllm/forward_context.py", "symbols": ["class BatchDescriptor", "class ForwardContext", "def set_forward_context"]},
-      {"path": "vllm/v1/cudagraph_dispatcher.py", "symbols": ["class CudagraphDispatcher", "def initialize_cudagraph_keys", "def dispatch", "def get_capture_descs"]},
       {"path": "vllm/compilation/cuda_graph.py", "symbols": ["class CUDAGraphStat", "class CUDAGraphWrapper", "input_addresses", "replay"]},
       {"path": "vllm/v1/attention/backend.py", "symbols": ["class AttentionCGSupport"]},
       {"path": "vllm/v1/worker/gpu_worker.py", "symbols": ["def compile_or_warm_up_model"]},
-      {"path": "vllm/v1/worker/gpu_model_runner.py", "symbols": ["def _determine_batch_execution_and_padding", "def _check_and_update_cudagraph_mode", "def capture_model"]},
-      {"path": "vllm/v1/worker/gpu/cudagraph_utils.py", "symbols": ["class BatchExecutionDescriptor", "def _is_compatible", "class CudaGraphManager", "class ModelCudaGraphManager", "def profile_cudagraph_memory", "def run_fullgraph", "def run_pw_graph"]},
+      {"path": "vllm/v1/worker/gpu/cudagraph_utils.py", "symbols": ["class BatchExecutionDescriptor", "def _is_compatible", "class CudaGraphManager", "class ModelCudaGraphManager", "def profile_cudagraph_memory", "def run_fullgraph", "def run_pw_graph", "def dispatch", "def capture"]},
       {"path": "vllm/v1/worker/gpu/model_runner.py", "symbols": ["def execute_model", "def capture_model", "run_fullgraph", "run_pw_graph"]},
       {"path": "tests/v1/core/test_async_scheduler.py", "symbols": ["def test_kv_pressure_preemption_with_inflight_output"]},
       {"path": "tests/v1/core/test_scheduler.py", "symbols": ["def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders", "def test_free_encoder_inputs_respects_unconfirmed_placeholders"]},
-      {"path": "tests/v1/cudagraph/test_cudagraph_dispatch.py", "symbols": ["class TestCudagraphDispatcher", "def test_dispatcher"]},
+      {"path": "tests/v1/cudagraph/test_cudagraph_dispatch.py", "symbols": ["class TestCUDAGraphWrapper", "def test_capture_replay_bypass_logic"]},
       {"path": "tests/v1/worker/test_gpu_model_runner_v2_cudagraph_profiling.py", "symbols": ["def test_profile_cudagraph_memory_samples_and_extrapolates", "def test_profile_cudagraph_memory_frees_throwaway_pool"]},
       {"path": "tests/test_config.py", "symbols": ["def test_resolve_cudagraph_mode_uses_loaded_piecewise_provider"]},
       {"path": "vllm/config/parallel.py", "symbols": ["def use_sequence_parallel_moe"]},
-      {"path": "vllm/v1/worker/utils.py", "symbols": ["def request_memory"]}
+      {"path": "vllm/v1/worker/utils.py", "symbols": ["def request_memory"]},
+      {"path": "tests/v1/cudagraph/test_cudagraph_manager.py", "symbols": ["def test_decode_capture_sizes_are_request_counts", "def test_uniform_decode_pads_up_to_full_graph"]}
     ],
     "09-distributed": [
       {"path": "vllm/config/parallel.py", "symbols": ["class ParallelConfig", "def world_size_across_dp", "def local_world_size", "def use_sequence_parallel_moe", "def __post_init__", "def pcp_shard_decode_requests", "def get_local_gpu_index", "def sync_dp_state"]},
@@ -188,7 +187,7 @@
       {"path": "vllm/v1/worker/gpu/pcp_manager.py", "symbols": ["class PCPManager", "def _iter_rank_chunks", "def partition_batch", "def restore_hidden_states", "def replicated_requests", "class PCPBatchMetadata", "def validate_config", "def set_block_tables", "def moe_is_padding", "def maybe_build_pcp_manager"]},
       {"path": "vllm/v1/worker/gpu/spec_decode/adaptive_verification.py", "symbols": ["class AdaptiveVerificationManager"]},
       {"path": "vllm/distributed/elastic_ep/external_elastic_ep.py", "symbols": ["class ExternalElasticEPScaleCoordinator"]},
-      {"path": "vllm/v1/worker/cp_utils.py", "symbols": ["def split_dcp_context_queries", "def run_split_fa2_dcp_context_attention", "def get_dcp_dummy_context_len", "def prepare_dcp_dummy_context_metadata"]},
+      {"path": "vllm/v1/worker/cp_utils.py", "symbols": ["def split_dcp_context_queries", "def run_split_fa2_dcp_context_attention"]},
       {"path": "vllm/v1/attention/ops/dcp.py", "symbols": ["def cp_lse_ag_out_rs", "def cp_lse_ag_out_ar", "def _lse_weighted_combine", "def dcp_a2a_lse_reduce", "class MLADCPManager"]},
       {"path": "vllm/v1/core/kv_cache_utils.py", "symbols": ["def resolve_dcp_kv_block_size"]},
       {"path": "tests/distributed/test_pipeline_partition.py", "symbols": ["def test_custom_layer_partition", "def test_uneven_auto_partition"]},
@@ -203,7 +202,8 @@
       {"path": "vllm/v1/worker/gpu/pp_utils.py", "symbols": ["class PPHandler", "def _sample_len", "def receive", "def broadcast_drafts"]},
       {"path": "vllm/v1/worker/gpu/sample/batch_shard.py", "symbols": ["class BatchSharder", "def shard_sampler_inputs"]},
       {"path": "vllm/config/vllm.py", "symbols": ["def adjust_dcp_kv_cache_interleave_size", "def _validate_batch_sharded_sampling"]},
-      {"path": "vllm/v1/worker/gpu/model_runner.py", "symbols": ["def sample_tokens"]}
+      {"path": "vllm/v1/worker/gpu/model_runner.py", "symbols": ["def sample_tokens"]},
+      {"path": "vllm/v1/worker/gpu/spec_decode/speculator_config.py", "symbols": ["def pcp_unsupported_reason"]}
     ],
     "10-experiments": [
       {"path": "vllm/benchmarks/latency.py", "symbols": ["def add_cli_args", "def run_to_completion", "def main"]},

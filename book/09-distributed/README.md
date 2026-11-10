@@ -934,6 +934,10 @@ $$
 **符号说明**：$N$ 是 DP group 的大小（`dp_group.size()`）；$r$ 是 DP rank；$u_r\in\{0,1\}$ 表示该 rank 是否有未完成请求；
 $p_r\in\{0,1\}$ 表示该 rank 是否有待处理的暂停请求；$S_0,S_1$ 是 SUM 之后的计数，无单位；$[\cdot]$ 在条件为真时取 1，否则取 0。
 
+**容错分支。** 若没有达成暂停共识，且启用了 fault tolerance 并且 sentinel 记录协调器已被禁用（`self.enable_fault_tolerance and self.ft_sentinel.coordinator_disabled`），
+函数不再返回 `has_unfinished`，而是直接返回 `True`：各 engine 保持继续 step，不做空闲暂停（`vllm/v1/engine/core.py:2864-2866` @ `05caae03`）。
+上面的公式描述的是没有走到这一分支时的结果。
+
 **怎么 all-reduce。** 这个张量很小，而且在 CPU（gloo）上，瓶颈是往返延迟而不是带宽；#61767 的标题就是“Low-latency CPU all-reduce for DP metadata syncs”，它引入
 `vllm.distributed.utils.cpu_all_reduce_`：先把 $N$ 拆成块大小 $B$（$N$ 的最大 2 的幂因子，源码写作 `world_size & -world_size`）和块数 $M=N/B$，
 块内做 recursive doubling（递归倍增），块间再做一次并发交换；#63016 让它把 `cpu_distributed_timeout` 传到每次点对点等待上。
@@ -1077,11 +1081,11 @@ MoE dispatch/combine 仍可能使用 sequence-parallel 输入。不要拿旧 com
 
 [源码] `vllm/config/parallel.py` - `use_sequence_parallel_moe`、`use_all2all`
 
-v0.32.0 的 MRV2 unsupported-feature 清单不再含 Elastic EP；这只是取消统一回退条件，
+v0.32.0 的 MRV2 unsupported-feature 清单不再含 Elastic EP；这只是取消统一回退条件（MRV1 被删除后，该清单只剩 external launcher + `PP>1` 与 DBO 组合，见第 07 章 7.22），
 扩缩容仍有独立校验与暂停策略。`_eep_commit_pause_mode` 在 V2 无法复用
 fused MoE kernel 的情况下选择 wait，否则选择 keep；不能把支持 EEP 理解为任意组合都无须 drain。
 
-[源码] `vllm/config/vllm.py` - `_get_v2_model_runner_unsupported_features`
+[源码] `vllm/config/vllm.py` - `_get_model_runner_unsupported_features`
 
 [源码] `vllm/v1/engine/core_client.py` - `DPAsyncMPClient._eep_commit_pause_mode`（`core_client.py:1695`；`DPLBAsyncMPClient` 继承它，并在 `:2138`、`:2211` 调用 @ `05caae03`）
 
@@ -1167,8 +1171,11 @@ prefill 在后，再按 request 与原片段起点排序。切片和正确重排
 固定版本的 `PCPManager.validate_config` 有明确限制，包括：
 
 - 仅支持 MLA；不与 encoder-decoder、multimodal 或 LoRA 同时使用。v0.32.0 不再禁止 PP 组合。
-- speculative decoding 允许 DSpark 或单模块 MTP，不支持其他方法或多模块 MTP。
-  DSpark 的 draft model 使用 MLA 时，还要求 `DCP=1` 或 `DCP=PCP`。
+- speculative decoding 不再由 `validate_config` 里写死的方法列表判断，而是问每种 speculator 配置类的
+  `pcp_unsupported_reason(parallel_config)`（调用点 `pcp_manager.py:178-183`；基类 `speculator_config.py:142`）。基类只放行
+  `supports_pcp = True` 的方法（类属性默认 `False`，`speculator_config.py:60`）；目前显式置 `True` 的是 DSpark（`dspark/config.py:29`）和
+  单模块 MTP（`mtp/config.py:24`），多模块 MTP 显式为 `False`（`multi_module_mtp/config.py:11`）。结果和以前一样：允许 DSpark 或单模块 MTP，
+  不支持其他方法或多模块 MTP。DSpark 在 draft model 使用 MLA 且 `DCP` 不在 `(1, PCP)` 内时拒绝，即要求 `DCP=1` 或 `DCP=PCP`（`dspark/config.py:132-143`）。
 - 通用配置已不再禁止 PCP 与 DP 组合，但仍需通过其他配置和后端校验。
 - PCP 与 `DCP>1` 同时使用时，仅支持 sparse MLA，且要求 `dcp_comm_backend="ag_rs"`。
 - sparse MLA 且 `DCP=1` 时，CUDA Graph 默认必须为 NONE；v0.33.0（#62377）只对 `deepseek_v32`（DeepSeek-V3.2）与 `glm_moe_dsa`（GLM-5.2/5.3）

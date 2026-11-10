@@ -1048,20 +1048,25 @@ flowchart LR
 
 > **读图方法：** 阅读“查找最长连续前缀”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
 
-**命中查询也受请求参数控制。** 未显式设置 `skip_reading_prefix_cache` 时，
-`SamplingParams` 会在 `prompt_logprobs` 非 None 时默认跳过读取 prefix cache，
-包括 `prompt_logprobs=0`。所以两个请求即使 token 和 hash 相同，也不一定执行相同的
-查找路径。显式设置该字段会覆盖默认行为；不能由此保证被跳过位置的 prompt
+**命中查询也受请求参数控制。** 请求先算出一个 `prefix_cache_hit_limit`（`Request.get_prefix_cache_hit_limit`，`vllm/v1/request.py:364`）：
+`skip_reading_prefix_cache` 为真时是 0（完全不读 prefix cache）；否则有 `prompt_logprobs` 或 `prompt_logprob_token_ids` 时取
+`prompt_logprob_start or 0`（评分起点之前的本地前缀仍可复用）；都没有则为 `None`（不设限）。
+`SamplingParams` 在未显式设置 `skip_reading_prefix_cache` 时，仍会在 `prompt_logprobs` 或 `prompt_logprob_token_ids` 非 None 时把它默认设为真
+（`sampling_params.py:629-636`，包括 `prompt_logprobs=0`），所以默认路径是上限 0；显式设为 `False` 才会改用评分起点作为上限。
+所以两个请求即使 token 和 hash 相同，也不一定执行相同的查找路径。显式设置该字段会覆盖默认行为；不能由此保证被跳过位置的 prompt
 logprobs 完整返回。这里控制的是读取复用，不等于停止为当前计算维护 KV。
+
+`prefix_cache_lookup_enabled` 为 `enable_caching and request.prefix_cache_hit_limit != 0`（`kv_cache_manager.py:253`）；`get_computed_blocks`
+的最大命中长度来自 `Request.get_max_cache_hit_length(bound)`（`request.py:352-356`），取 `num_tokens - 1`、`prefix_cache_hit_limit` 和显式 `bound` 三者中的最小值。
+只要 `prefix_cache_hit_limit` 不是 `None`，`skip_reading_external_kv` 就为真（`request.py:359-362`），调度器把外部命中清零
+（`scheduler.py:1127-1128`：`ext_tokens, load_kv_async = 0, False`）：有界请求只复用本地前缀，不读 KV connector 的外部命中；源码注释的意思是外部命中无法
+施加数值上限，所以选择跳过外部。
 
 [源码] `vllm/sampling_params.py` - `SamplingParams.__post_init__`
 
-[源码] `vllm/v1/request.py` - `Request.get_skip_reading_prefix_cache`
+[源码] `vllm/v1/request.py` - `Request.get_prefix_cache_hit_limit`、`Request.get_max_cache_hit_length`、`Request.skip_reading_external_kv`
 
 [源码] `vllm/v1/core/kv_cache_manager.py` - `prefix_cache_lookup_enabled`、`get_computed_blocks`
-
-> **main 上的变化（未发版，不在 v0.33.0 中）**：本书正文以 v0.33.0 为准；以下为 vLLM main 2026-10-27～10-28（ed1a73079..0106c8abc）的变化。已用 `git merge-base --is-ancestor` 核对 [e1e77a279d](https://github.com/vllm-project/vllm/commit/e1e77a279d68a9601be062cb267a5f9911c422c7) 不在 `4ba787ec9959` 的祖先链中，留待第二波。详见 meta/main-tracking-2026-10-28.md。
-> - [e1e77a279d](https://github.com/vllm-project/vllm/commit/e1e77a279d68a9601be062cb267a5f9911c422c7)（[#60960](https://github.com/vllm-project/vllm/pull/60960)）：`Request.get_skip_reading_prefix_cache` 改为 `get_prefix_cache_hit_limit`（`request.py` L326–L340 @ `0106c8abc`）与 `get_max_cache_hit_length`（L314–L318）。`prefix_cache_lookup_enabled` 变为 `enable_caching and request.prefix_cache_hit_limit != 0`（`kv_cache_manager.py` L251–L253）。有 `prompt_logprobs` / `prompt_logprob_token_ids` 时上限为 `prompt_logprob_start or 0`；`SamplingParams` 仍可默认把 `skip_reading_prefix_cache` 设为 True（上限 0），但显式 `skip_reading_prefix_cache=False` 时可复用评分起点之前的本地前缀。`get_computed_blocks` 经 `get_max_cache_hit_length` 收紧命中（与 `num_tokens-1`、显式 bound 取最小）。一旦 `prefix_cache_hit_limit is not None`，`skip_reading_external_kv` 为 True（`request.py` L321–L324 @ `0106c8abc`），调度器将外部命中清零（`scheduler.py` L1132–L1133：`ext_tokens, load_kv_async = 0, False`），即有界请求只复用本地前缀、跳过 KV connector 外部命中；源码注释“are not bounded by …”指无法对外部命中施加数值上限，故选择跳过外部，而非“外部仍可无界命中”。上文“`prompt_logprobs` 非 None 时默认跳过读取”在默认路径仍大致成立，但 API 与“可限定复用长度”的语义已变，升级时须改写正文与源码锚点。
 
 ### 5.12.2 为什么全 prompt 命中仍重算最后 token
 
@@ -1136,8 +1141,8 @@ $$
 
 - `H_i`、`H_{i-1}` 是第 `i` 个 hash block 与前一个 block 的链式 hash；
 - `tokens_i` 是第 `i` 个 block 自己的 token，仍然是被 hash 的 token 主体；
-- `L` 是 `num_hash_lookahead_tokens`：每个 block 之后额外被覆盖的 token 数，EAGLE 为 1，
-  多模块 MTP 为投机 token 数；`L=0` 时退回 5.12 的原公式；
+- `L` 是 `num_hash_lookahead_tokens`：每个 block 之后额外被覆盖的 token 数，等于 `num_prefill_lookahead_tokens`：EAGLE/EAGLE3/MTP 为 1，
+  多模块 MTP 为投机 token 数（`test_num_hash_lookahead_tokens` 的参数化用例）；`L=0` 时退回 5.12 的原公式；
 - `tokens^{+L}_i` 是紧跟 `tokens_i` 之后的 `L` 个 token；
 - `E_i` 是覆盖“block + 这 `L` 个 token”范围的 `extra_keys`（LoRA、多模态、salt 等），
   由 `generate_lookahead_block_hash_extra_keys` 生成；多模态输入如果跨过 block 边界，
@@ -1155,11 +1160,13 @@ flowchart TD
     A{use_eagle_block_drop 为真} -->|否| OFF[L = 0，沿用旧 hash]
     A -->|是| B{disable_lookahead_block_hashes}
     B -->|是| OFF
-    B -->|否| C{enable_prefix_caching}
+    B -->|否| D{配置了 kv_transfer_config}
+    D -->|是| K{connector 声明 supports_lookahead_block_hashes}
+    K -->|否| OFF
+    K -->|是| ON[L = num_prefill_lookahead_tokens]
+    D -->|否| C{enable_prefix_caching}
     C -->|否| OFF
-    C -->|是| D{配置了 kv_transfer_config}
-    D -->|是| OFF
-    D -->|否| ON[L = num_prefill_lookahead_tokens]
+    C -->|是| ON
     ON --> S1[Scheduler: use_eagle_block_drop = False]
     ON --> S2[coordinator: drop_eagle_group_ids 为空，group 仍标记为 EAGLE]
     ON --> S3["Mamba checkpoint: proof_limit = 长度 − max(1, L)"]
@@ -1168,9 +1175,11 @@ flowchart TD
 
 > **读图方法：** 这是“EAGLE 的 lookahead 哈希（v0.33.0）”的判定流程图。从上往下看四个条件如何依次把 `L` 归零，只有全部通过才得到 `L>0`；`L>0` 之后的 Scheduler、coordinator、Mamba checkpoint、`BlockStored` 事件四个节点是各组件的连带变化，用来核对“为什么 EAGLE 末块回退在这条路径上被关掉”。
 
-启用条件在 `VllmConfig.num_hash_lookahead_tokens` 里：必须启用了 EAGLE 末块回退、没有设置
-`disable_lookahead_block_hashes`、开启了 prefix caching，并且**没有配置 KV connector**
-（包括 HiSparse 使用的 connector，它们保持旧 hash）。启用后：
+启用条件在 `VllmConfig._resolve_num_hash_lookahead_tokens`（`vllm/config/vllm.py:632-653`，结果存进 `num_hash_lookahead_tokens` 字段，`:413`）里：
+必须启用了 EAGLE 末块回退（`use_eagle_block_drop()`）、没有设置 `disable_lookahead_block_hashes`；然后看 KV connector：配置了 connector 时，
+只有该 connector 类的 `supports_lookahead_block_hashes()` 返回真才启用（基类默认返回 `False`，`kv_connector/v1/base.py:198`；
+`OffloadingConnector`、`SimpleCPUOffloadConnector` 与 `NixlBaseConnector` 的实现返回 `True`），没有配置 connector 时才要求开启了 prefix caching。
+（v0.33.0 是“只要配置了 KV connector 就不启用”，之后 connector 可以自己声明支持。）启用后：
 
 - Scheduler 把 `use_eagle_block_drop` 置为假；`KVCacheCoordinator` 新增的
   `drop_eagle_group_ids` 在此时为空集合，group 仍保留 `is_eagle_group` 标记，但不再丢末块；
@@ -1184,9 +1193,9 @@ flowchart TD
 
 [源码] `vllm/v1/core/kv_cache_utils.py` - `get_request_block_hasher`、`generate_lookahead_block_hash_extra_keys`
 
-[源码] `vllm/config/vllm.py` - `VllmConfig.num_hash_lookahead_tokens`
+[源码] `vllm/config/vllm.py` - `VllmConfig._resolve_num_hash_lookahead_tokens`
 
-[源码] `vllm/v1/core/block_pool.py` - `BlockPool._generate_event_extra_keys`、`BlockPool._lookahead_token_ids`
+[源码] `vllm/v1/core/block_pool.py` - `BlockPool.generate_event_extra_keys`、`BlockPool.get_lookahead_token_ids`
 
 [测试] `tests/v1/core/test_kv_cache_utils.py` -
 `test_num_hash_lookahead_tokens`、`test_lookahead_block_hash_keeps_mm_inputs_for_next_block`
