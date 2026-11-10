@@ -819,7 +819,7 @@ CUDA Graph 或所有 attention feature。能力验证和 metadata builder 正是
 
 其余字段支持 encoder/cross attention、DCP、multimodal prefix、R-SWA、ReplaySSM 等功能。
 其中 multimodal prefix 的双向注意力范围，由 `compute_mm_prefix_ranges()`（`vllm/v1/attention/backends/utils.py:78`）
-统一计算（v0.33.0 起由 MRV1 与 MRV2 共用，MRV1 删除后只剩 MRV2 的 `gpu/model_states/default.py` 调用）；
+统一计算（v0.33.0 起由 MRV1 与 MRV2 共用，MRV1 删除后由 GPU 的 `gpu/model_states/default.py` 与 CPU 的 `cpu/model_states/default.py:135` 调用）；
 v0.32.0 里 MRV2 专用的 `gpu/attn_utils.py::compute_mm_prefix_ranges` 已被删除
 （[b3b0bc305](https://github.com/vllm-project/vllm/commit/b3b0bc305)，
 [#56937](https://github.com/vllm-project/vllm/pull/56937)）。
@@ -854,6 +854,8 @@ FlashAttention builder 将该值传到自己的 metadata；forward 按它切片 
 [源码] `vllm/v1/worker/gpu/attn_utils.py` - `build_attn_metadata`（`CommonAttentionMetadata(` 构造）
 
 [源码] `vllm/v1/worker/gpu/model_states/default.py` - `DefaultModelState.prepare_attn`
+
+[源码] `vllm/v1/worker/cpu/model_states/default.py` - `DefaultModelState.prepare_attn`（`:135`，同样调用 `compute_mm_prefix_ranges`）
 
 [源码] `vllm/v1/attention/backends/flash_attn.py` - `FlashAttentionMetadataBuilder.build`、
 `FlashAttentionImpl.forward`
@@ -1872,6 +1874,10 @@ flowchart TD
   - `is_quantized_kv_cache`
 - `vllm/v1/attention/backends/utils.py`
   - `compute_mm_prefix_ranges`
+- `vllm/v1/worker/gpu/model_states/default.py`
+  - `DefaultModelState.prepare_attn`（调用 `compute_mm_prefix_ranges`）
+- `vllm/v1/worker/cpu/model_states/default.py`
+  - `DefaultModelState.prepare_attn`（`:135`，同样调用 `compute_mm_prefix_ranges`）
 - `vllm/config/cache.py`
   - `register_kv_cache_dtype`
   - `is_known_kv_cache_dtype`

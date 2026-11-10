@@ -143,3 +143,7 @@ python3 scripts/check_book.py
 ## 2026-11-10 main `05caae03` 锚点（第 05 章）
 
 - 05：`vllm/config/cache.py` 的 `CacheConfig.DEFAULT_BLOCK_SIZE`（配置默认 64）与 `enable_extensible_kv_cache`；`vllm/platforms/interface.py` 的 `update_block_size_for_backend`；`vllm/config/vllm.py` 的 `_resolve_extensible_kv_cache`；`vllm/v1/worker/extensible_kv_cache.py` 的 `ExtensibleKVCache` / `extend_kv_cache`；`kv_cache_planning.finalize_extensible_kv_cache`。记录见 [核对说明](upgrade-main-05caae03-2026-11-10/b7-block64-extensible-kv.md)。
+
+## 2026-11-10 纠正：ch06 `compute_mm_prefix_ranges` 的 CPU 调用点
+
+- 06：`vllm/v1/attention/backends/utils.py` 的 `compute_mm_prefix_ranges`；GPU 的 `vllm/v1/worker/gpu/model_states/default.py` 与 CPU 的 `vllm/v1/worker/cpu/model_states/default.py` 的 `DefaultModelState.prepare_attn` 均调用（CPU 调用在 `:135` @ `05caae03`）。
