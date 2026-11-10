@@ -6,7 +6,7 @@ source_path: ../vllm
 source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
 source_branch: v0.33.0
 source_dirty: false
-verified_at: 2026-10-19
+verified_at: 2026-11-10
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -34,7 +34,7 @@ prerequisites:
 寻址与执行契约。FlashAttention、FlashInfer、Triton 和平台专用实现都可能消费分页 KV；
 仓库中的 `vllm/v1/attention/ops/paged_attn.py` 也不是所有当前 GPU 路径的统一入口。
 
-本章绑定源码 revision `5df63a7203cdb9328d824a27b682e77c7b9928be`，继续使用三种证据标签：
+本章绑定源码 revision `4ba787ec9959e566d3b587a796dff07673324da5`（v0.33.0），继续使用三种证据标签：
 
 - **源码事实**：能在固定 revision 的实现或测试中直接定位。
 - **设计含义**：由多个源码事实共同推出的系统解释。
@@ -407,7 +407,8 @@ writer，减少逐 group 写表的调度开销。
 
 持久表按 request state index 存储，但本轮 batch 的请求顺序可能变化。`idx_mapping` 说明
 batch row 对应哪个持久 request row，`gather_block_tables()` 将所需行收集到模型 forward 使用
-的持久输出 tensor，并把 padding row 清零。
+的持久输出 tensor，并把 padding row 清零；v0.33.0 起它还会清掉上一批更大 batch 留在共享缓冲里的
+旧行（见 6.6.3），并对滑窗 group 把窗口之外的表项换成 null block（见 6.6.4）。
 
 ```mermaid
 flowchart LR
@@ -443,7 +444,7 @@ UVA 不是所有数据都免拷贝的保证；须同时检查平台能力和 ten
 
 [源码] `vllm/v1/worker/gpu/buffer_utils.py` - `StagedWriteTensor.apply_write`、`FusedStagedWriter.apply`
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-27.md。
+> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，**不包含在** v0.33.0 中，下一次升级基线时复核。详见 meta/main-tracking-2026-10-27.md。
 > - [78e2f7960](https://github.com/vllm-project/vllm/commit/78e2f796019384b07c9f9b6d8a371e3ea958b33a)（[#63633](https://github.com/vllm-project/vllm/pull/63633)）：main 删除了写入内容的 `async_tensor_h2d` 分支。`StagedWriteTensor.apply_write` 与 `FusedStagedWriter.apply` 都用 `UvaBufferPool.copy_chunks_to_uva` 把暂存内容拼入轮转 UVA 缓冲，kernel 经 UVA 读取；上文“写入内容通过 H2D 复制到设备”“内容不总是单独 H2D”在 main 上应改为“内容与元数据都经 UVA 缓冲（无 UVA 时由 `NonUvaBuffer` 拷贝）”。
 
 [源码] `vllm/v1/worker/gpu/block_table.py` - `BlockTables.apply_staged_writes`、`gather_block_tables`
@@ -470,6 +471,127 @@ flowchart TD
 write 是互补保护，不能以“table 已清零”替代有效 request 检查。
 
 [源码] `vllm/v1/worker/gpu/block_table.py` - `_compute_slot_mappings_kernel`
+
+**共享缓冲里的“旧行”也要清。** 持久 input block table 是所有 step 共用的：上一步若有 8 个请求、
+这一步只有 3 个，第 3～7 行仍留着上一步真实的 block ID。那些 block 可能已经释放并分给别的请求，
+如果后面的 dummy run 或 profiling 把这些行当成有效行，写入就会落进别人的块。v0.33.0 为此给
+`BlockTables` 记录 `_num_dirty_rows`（`vllm/v1/worker/gpu/block_table.py:88`）：
+`get_dummy_block_tables()` 清零 `max(num_reqs, _num_dirty_rows)` 行（`:222`），
+`gather_block_tables()` 在使用共享输出时同样把行数扩成 `max(num_reqs_padded, _num_dirty_rows)`
+（`:191`），之后把 `_num_dirty_rows` 更新为本步有效请求数。调用方自己提供 `out` 时不碰共享行。
+对应的上游修复是 [61bb59087](https://github.com/vllm-project/vllm/commit/61bb59087)
+（[#61174](https://github.com/vllm-project/vllm/pull/61174)），测试为
+`test_shared_block_tables_clear_rows_from_larger_batch` 与
+`test_external_block_table_output_preserves_shared_rows`。
+
+[源码] `vllm/v1/worker/gpu/block_table.py` - `BlockTables.get_dummy_block_tables`、`gather_block_tables`
+
+### 6.6.4 滑窗组：窗口之外的表项在 gather 时换成 null block
+
+滑动窗口层只会读最近一段 token 的 KV，窗口之外的 block 随时可能被滑窗管理器释放并重新分配。
+但 attention kernel 按固定大小的 KV tile 读取，一个 tile 可能跨过窗口起点，把窗口外的块也加载进来；
+mask 只能在算分数时屏蔽它们，若那块内存里恰好是 NaN，NaN 仍会传进输出（这是源码 docstring 描述的风险）。
+所以 v0.33.0 在 gather 时就把这些表项改成 null block（ID 0），让 kernel 读到的永远是合法内存。
+主 forward 路径传入 `num_computed_tokens=self.req_states.num_computed_tokens.gpu`
+（`vllm/v1/worker/gpu/model_runner.py:1602`）；没有传入、没有滑窗 group，或 context parallelism
+大于 1 时，`sliding_window_reach` 为 0，kernel 不做这一步。
+
+要换成 null block 的表项个数是：
+
+$$
+n_{\mathrm{null}}=\left\lfloor \frac{\max(p_0-R,\,0)}{B} \right\rfloor
+$$
+
+读法：先算出本步第一个 query 能看到的最早 token 位置 $p_0-R$，再看这个位置之前有多少个**完整**的
+block；这些块整块都在窗口之外，可以安全换掉。跨在窗口边界上的那个块不能换，因为里面还有窗口内的 token。
+
+其中：
+
+- $p_0$：该请求本步第一个被调度 token 的位置，即 `num_computed_tokens`，单位 token；
+- $R$：该 KV cache group 的 `sliding_window_reach`，等于
+  `SlidingWindowSpec.num_retained_tokens = sliding_window - 1 + extra_retained_tokens`
+  （`vllm/v1/kv_cache_interface.py:911`），单位 token；
+- $B$：该 group 的 manager block size，单位 token/block；
+- $n_{\mathrm{null}}$：从这一行开头数起要换成 null block 的表项个数，即逻辑块下标 $i<n_{\mathrm{null}}$ 的表项。
+
+手算例子：$B=4$，`sliding_window=8`（无额外保留，所以 $R=7$），某请求 $p_0=30$。
+第一个 query 能看到 token 23～30。$n_{\mathrm{null}}=\lfloor (30-7)/4\rfloor=5$，
+逻辑块 0～4（token 0～19）整块在窗口之外；块 5 覆盖 token 20～23，含 token 23，所以保留。
+持久表里的一行 `[11, 4, 9, 6, 2, 8, 3, 5]` gather 到 forward 表后变成 `[0, 0, 0, 0, 0, 8, 3, 5]`。
+
+```mermaid
+flowchart TD
+    ROW["持久表中的一行: 逻辑块 0..m 的 block ID"] --> CALC["n_null = floor(max(p0-R, 0) / B)"]
+    OFF["关闭条件: R=0(无滑窗)/ context parallelism>1 / 未传 num_computed_tokens"] -.-> COPY
+    CALC --> SPLIT{"逻辑块下标 i < n_null ?"}
+    SPLIT -->|"是: 整块在窗口下沿之外"| NULL["写入 null block (ID 0)"]
+    SPLIT -->|"否: 窗口内或跨窗口边界"| COPY["原样复制 block ID"]
+    NULL --> OUT["forward 使用的 block table 行"]
+    COPY --> OUT
+    OUT --> KERN["attention kernel 读 KV tile: 跨窗口起点的 tile 只会读到合法块"]
+```
+
+> **读图方法：** 这是 `gather_block_tables` 在滑窗 group 上的判定流程图。先从上向下看一行 block table 如何先算出 $n_{\mathrm{null}}$，再沿“是/否”两条分支看每个表项被置零还是原样复制；虚线表示整个屏蔽步骤被关闭时直接走复制分支。
+
+这一步发生在 gather 的 Triton kernel 里（`_gather_block_tables_kernel` 的 `MASK_SLIDING_WINDOW` 分支，
+`vllm/v1/worker/gpu/block_table.py:275` 起，`num_null` 在 `:314-319`），读源块时用
+`mask=(offset >= num_null) & (offset < num_blocks), other=0` 把前 `num_null` 项读成 0，所以不改动持久表本身，
+只影响本步的 forward 表。上游修复是 [e1f314164](https://github.com/vllm-project/vllm/commit/e1f314164)
+（[#60767](https://github.com/vllm-project/vllm/pull/60767)），测试为
+`test_gather_block_tables_nulls_blocks_below_sliding_window`。
+
+[源码] `vllm/v1/worker/gpu/block_table.py` - `BlockTables.gather_block_tables`、`_gather_block_tables_kernel`
+
+[源码] `vllm/v1/kv_cache_interface.py` - `SlidingWindowSpec.num_retained_tokens`
+
+### 6.6.5 长 prompt 的 staged write：一行按 1024 个元素分块并行
+
+staged write 的任务是把“某个请求行从第几列起写入哪些 block ID”提交到设备上的持久表。
+新请求的 prompt 很长时，一行可以有上千个 block ID。v0.32.0 里一条写入由一个 Triton program 循环复制；
+v0.33.0 把 kernel grid 改成二维：第 0 维是写入条数 $n$，第 1 维是块数 $n_{\mathrm{chunk}}$，
+每个 program 只复制 `_WRITE_BLOCK_SIZE = 1024` 个元素（`vllm/v1/worker/gpu/buffer_utils.py:24`）。
+
+$$
+n_{\mathrm{chunk}}=\max\left(\left\lceil \frac{L_{\max}}{1024} \right\rceil,\ 1\right)
+$$
+
+读法：用本批所有写入里最长的一条决定要几块；`max(…, 1)` 保证 grid 第 1 维至少为 1。
+
+其中：
+
+- $L_{\max}$：本批 staged write 中最长一条的元素数（`_staged_write_max_len`，`StagedWriteTensor` 在 `:135`，
+  单 group 与 `FusedStagedWriter.apply` 都取各 tensor 的最大值）；
+- $1024$：`_WRITE_BLOCK_SIZE`，每个 program 负责的元素数；
+- $n_{\mathrm{chunk}}$：grid 第 1 维大小，由 `_num_write_chunks`（`:311`）计算。
+
+手算例子：本批有 3 条写入，长度分别为 5、3000、64 个元素，则 $L_{\max}=3000$，
+$n_{\mathrm{chunk}}=\lceil 3000/1024\rceil=3$，grid 为 $(3,3)$ 共 9 个 program；长度 5 的那条只有第 0 块有活干，
+其余 program 的 mask 全为假，不读也不写。
+
+```mermaid
+flowchart LR
+    W["staged writes: 行号 / 起始列 / 内容 / 累计长度"] --> MAXL["L_max = 最长一条的元素数"]
+    MAXL --> GRID["grid = (写入条数 n, n_chunk)"]
+    GRID --> P0["program (i, 0): 复制内容 [0, 1024)"]
+    GRID --> P1["program (i, 1): 复制内容 [1024, 2048)"]
+    GRID --> PK["program (i, c): 复制内容 [1024c, 1024(c+1))，越过本条长度的位置被 mask 掉"]
+    P0 --> DST["持久 block table 第 row_i 行，从 start_i 列起"]
+    P1 --> DST
+    PK --> DST
+```
+
+> **读图方法：** 这是 staged write kernel 的并行划分图。先看左侧的输入如何决定 grid 的两个维度，再看每个 program 只负责一条写入的一个 1024 元素片段，最后都汇到同一张持久表；第一遍不必关心 Triton 细节，只需确认“写入条数 × 分块数”就是并行度。
+
+这只改变并行方式，不改变语义：写到哪一行、哪一列起、写什么内容都与分块前一致，所以
+上文单 group `apply_write()` 与多 group `FusedStagedWriter.apply()` 的描述仍然成立
+（二者都以 `_apply_write_kernel[(…, _num_write_chunks(max_len))]` 启动，`:223`、`:296`；
+kernel 本体在 `:317`）。官方 v0.33.0 release notes 把该改动列为 GB200 上长 prompt staged write 提速 31–120 倍，
+这是上游 PR 的自述数字，本书没有复测。上游提交是
+[fc2b6ab45](https://github.com/vllm-project/vllm/commit/fc2b6ab45)
+（[#62698](https://github.com/vllm-project/vllm/pull/62698)），测试为
+`test_block_tables_fused_write_spans_multiple_chunks`。
+
+[源码] `vllm/v1/worker/gpu/buffer_utils.py` - `StagedWriteTensor.apply_write`、`FusedStagedWriter.apply`、`_num_write_chunks`、`_apply_write_kernel`
 
 ## 6.7 Slot Mapping：本轮 K/V 写到哪里
 
@@ -698,6 +820,12 @@ CUDA Graph 或所有 attention feature。能力验证和 metadata builder 正是
 | batch control | `num_reqs`、`num_actual_tokens`、`causal` | metadata 覆盖规模（可能含 padding）和 mask 语义 |
 
 其余字段支持 encoder/cross attention、DCP、multimodal prefix、R-SWA、ReplaySSM 等功能。
+其中 multimodal prefix 的双向注意力范围，v0.33.0 起由两个 Runner 共用同一个函数
+`compute_mm_prefix_ranges()`（`vllm/v1/attention/backends/utils.py:78`）：MRV1
+（`gpu_model_runner.py`）与 MRV2（`gpu/model_states/default.py`）都从这里取每个请求的 doc ranges；
+v0.32.0 里 MRV2 专用的 `gpu/attn_utils.py::compute_mm_prefix_ranges` 已被删除
+（[b3b0bc305](https://github.com/vllm-project/vllm/commit/b3b0bc305)，
+[#56937](https://github.com/vllm-project/vllm/pull/56937)）。
 
 ```mermaid
 flowchart TD
@@ -775,7 +903,8 @@ sequenceDiagram
 
 > **读图方法：** 这是“Model Runner 构造 metadata 的真实顺序”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
-MRV2 `prepare_attn()` 先用 `idx_mapping` gather block tables，再以
+MRV2 `prepare_attn()` 先用 `idx_mapping` gather block tables（v0.33.0 起同时传入
+`num_computed_tokens`，让滑窗 group 的窗口外表项变成 null block，见 6.6.4），再以
 `query_start_loc` 和 `positions` 计算所有 cache group 的 slot mappings。MRV1 则在 input
 preparation 中让 `input_batch.block_table.compute_slot_mapping()` 更新对应 buffer。
 
@@ -924,6 +1053,26 @@ flowchart LR
 implementation 的 `do_kv_cache_update()`，并传入当前 layer、K、V、KV tensor 与 layer slot
 mapping。
 
+**第三种情形：模型自己的融合 op 已经写好 KV。** v0.33.0 新增一对标志：
+`AttentionBackend.supports_kv_cache_update_bypass`（默认 `False`，`vllm/v1/attention/backend.py:73`）
+声明 backend 的 forward 能否在 key/value 省略时运行；`Attention.kv_cache_update_bypass`
+（默认 `False`，`vllm/model_executor/layers/attention/attention.py:456`）由模型设置，表示“我已在调用 attention 之前把 KV
+写进 cache，随后以 `key=None` 调用”。v0.33.0 里声明为 `True` 的 backend 有：`FlashAttentionBackend`
+（`vllm/v1/attention/backends/flash_attn.py:287`）、`FlashInferBackend`（`vllm/v1/attention/backends/flashinfer.py:555`）；ROCm AITER FlashAttention 仅在未启用 shuffle KV 布局时为 `True`，
+因为外部写入者产出的是 packed 布局。这两个标志只对 `forward_includes_kv_cache_update=False` 的 backend 有意义，
+并且要看使用方怎样判定：Muse Spark 的融合 QK-norm+RoPE+KV 插入路径
+（`vllm/models/muse_spark/common/ops/fused_qk_norm_rope_kv.py`）只在 `decode_context_parallel_size<=1`、
+backend `forward_includes_kv_cache_update=False` 且 `supports_kv_cache_update_bypass=True`、层不共享 KV、KV dtype 受支持时启用。它不改变上面两种统一层路径的判定，
+只是让“KV 已被别的 op 写好”这种情形有了显式契约。框架部分的上游提交是
+[6ab6bff1b](https://github.com/vllm-project/vllm/commit/6ab6bff1b)
+（[#62622](https://github.com/vllm-project/vllm/pull/62622)），`FlashAttentionBackend` 的 `True` 取值来自
+[0f6b26191](https://github.com/vllm-project/vllm/commit/0f6b26191)
+（[#61879](https://github.com/vllm-project/vllm/pull/61879)）。
+
+[源码] `vllm/v1/attention/backend.py` - `AttentionBackend.supports_kv_cache_update_bypass`
+
+[源码] `vllm/model_executor/layers/attention/attention.py` - `Attention.__init__`
+
 ## 6.14 Backend 契约：四个对象各做什么
 
 > **本节先看：** 本节要回答：**Backend 契约：四个对象各做什么**。下面的小节会逐层拆开概念、运行过程和源码落点；第一次阅读先抓对象之间的关系，第二次再记类名、字段和分支。
@@ -939,7 +1088,7 @@ mapping。
 - sliding window、non-causal、sink、MLA、sparse、PCP/DCP 等能力；
 - cache spec/layout 偏好与组合校验。
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-29～10-30（36d4ef654..2eae56c4b）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-30.md。
+> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；以下为 vLLM main 2026-10-29～10-30（36d4ef654..2eae56c4b）的变化，**不包含在** v0.33.0 中，下一次升级基线时复核。详见 meta/main-tracking-2026-10-30.md。
 > - [a6c3635e3](https://github.com/vllm-project/vllm/commit/a6c3635e3660f6343c14e2158c7ab44c62be88b9)（[#64064](https://github.com/vllm-project/vllm/pull/64064)）：新增 `AttentionBackend.supports_head_size_v`，默认要求 V=K（`vllm/v1/attention/backend.py` L109–L112）；`RocmAiterUnifiedAttentionBackend` 允许 `head_size_v <= head_size`（`rocm_aiter_unified_attn.py` L90–L94），从而 MiMo-V2.6 可用 ROCm AITER unified attention。`csrc/cache_kernels.cu` 新增 `reshape_and_cache_flash_kernel_asym`（L428），仅当 `v_head_size != head_size` 时由 `reshape_and_cache_flash` 使用（dispatch L993–L1014）；K/V 须共享 head stride / page stride / block geometry，对称 kernel 路径不变。
 
 ### 6.14.2 `AttentionMetadataBuilder`
@@ -1046,7 +1195,10 @@ flowchart TD
 但 `use_mm_prefix=True` 会把 `TRITON_FLASHINFER` 放在它之前；major 9 的其他普通路径
 在 mm-prefix 开启时优先插入 `TRITON_FLASH_ATTN`，再尝试 FlashAttention 等候选。
 没有 mm-prefix 的这些路径保留原排序；MLA 又按架构、KV dtype、head 数和 head size
-采用另一张候选表。排序仍须经过能力校验，不等于插入的候选一定可用。
+采用另一张候选表：例如 v0.33.0 的 major 10、sparse MLA、BF16 KV 且 head 数不超过 16 的分支，
+把 `FLASH_ATTN_MLA_SPARSE_FA4` 排在 `FLASHINFER_MLA_SPARSE` 与 `FLASHMLA_SPARSE` 之前
+（[31e90ac37](https://github.com/vllm-project/vllm/commit/31e90ac37)，
+[#55866](https://github.com/vllm-project/vllm/pull/55866)）。排序仍须经过能力校验，不等于插入的候选一定可用。
 
 [源码] `vllm/platforms/cuda.py` - `_get_backend_priorities`
 
@@ -1067,6 +1219,18 @@ v0.32.0 的 registry 允许 `register_backend("NEW_NAME", class_path)` 动态注
 block size、multimodal prefix、MLA/非 MLA、sink、sparse、per-head scales、compute capability、
 attention type、sliding window、non-causal、batch invariance、KV connector、PCP、adaptive
 verification、DCP、R-SWA 组合以及 backend 自定义组合条件。
+
+其中 KV dtype 一项在 v0.33.0 不再只对固定的字面量集合校验：`vllm/config/cache.py` 里的
+`KV_CACHE_DTYPES` 现在是可变列表，平台通过 `register_kv_cache_dtype(name)` 注册一个
+`KVCacheDTypeHandler`（给出存储 torch dtype 与 `KVQuantMode`）后，新名字会被追加进去并同时通过
+CLI/配置校验，`is_known_kv_cache_dtype()` 就是对这张列表做成员判断。随之，`is_quantized_kv_cache`
+从 `vllm/utils/torch_utils.py` 移到 `vllm/v1/kv_cache_interface.py:152`（`flash_attn.py` 与
+`cuda.py` 的导入已同步改动）。这只扩展“有哪些 dtype 名字合法”，不改变上面逐 backend 的 KV dtype 校验：
+backend 的 `supported_kv_cache_dtypes` 不含该名字时仍会被拒绝。上游提交是
+[9499c949b](https://github.com/vllm-project/vllm/commit/9499c949b)
+（[#52670](https://github.com/vllm-project/vllm/pull/52670)）。
+
+[源码] `vllm/config/cache.py` - `KVCacheDTypeHandler`、`register_kv_cache_dtype`、`is_known_kv_cache_dtype`
 
 ```mermaid
 flowchart LR
@@ -1095,10 +1259,16 @@ flowchart LR
 - activation dtype 支持 FP16/BF16；
 - KV dtype 列表包含 auto、FP16、BF16 和若干 FP8 表示，最终仍受版本/设备组合校验；
 - 常规 kernel block size 要求为 16 的倍数，特定 FA4 head-size-256 路径有专用 page size；
-- head size 要求为 8 的倍数，常规上限 256，满足 FA4 条件时可到 512；
+- head size 要求为 8 的倍数，常规上限 256，满足 FA4 条件时可到 512；XPU 平台的 SYCL kernel
+  直接支持到 512（v0.33.0 新增分支，`FlashAttentionBackend.supports_head_size`，
+  [d6d5412ca](https://github.com/vllm-project/vllm/commit/d6d5412ca)，
+  [#62014](https://github.com/vllm-project/vllm/pull/62014)）；
 - 支持 sliding window、non-causal 和多种 attention type；
 - mm-prefix 能力要求可用 FA4；仍需通过具体组合校验，不能把类级能力表当作所有配置的保证；
-- 声明 `forward_includes_kv_cache_update=False`。
+- 声明 `forward_includes_kv_cache_update=False`，并在 v0.33.0 起声明
+  `supports_kv_cache_update_bypass=True`（`flash_attn.py:287`，含义见 6.13；该取值由
+  [0f6b26191](https://github.com/vllm-project/vllm/commit/0f6b26191)、
+  [#61879](https://github.com/vllm-project/vllm/pull/61879) 加入，基类属性与框架分支来自 #62622）。
 
 v0.31.0 新增 `FA4DenseAttentionKernel` JIT warmup：只为满足设备、head dimension、
 page size、dtype、量化与并行条件的有限 compile keys 预热。它不替代后续 metadata build，
@@ -1120,7 +1290,12 @@ block_table_tensor, slot_mapping, causal
 
 然后按 FA 版本、CUDA Graph、DCP、sliding window 和 scheduler AOT metadata 等条件
 补充字段；cascade 相关字段已经删除。FA3 与 FA2 的 graph 支持并不相同，源码将其编码为不同
-`AttentionCGSupport` 等级。v0.32.0 还要求 per-request `causal` tensor 预先是
+`AttentionCGSupport` 等级：FA3 在 v0.32.0 就是 `ALWAYS`；v0.33.0 把 FA4（`get_flash_attn_version() in (3, 4)`，
+[791f92135](https://github.com/vllm-project/vllm/commit/791f92135)，
+[#60908](https://github.com/vllm-project/vllm/pull/60908)）和 XPU 平台
+（`current_platform.is_xpu()`，[35d01660f](https://github.com/vllm-project/vllm/commit/35d01660f)，
+[#62244](https://github.com/vllm-project/vllm/pull/62244)）也列为 `ALWAYS`，FA2 仍为 `UNIFORM_BATCH`
+（`FlashAttentionMetadataBuilder._cudagraph_support`，`flash_attn.py:619`）。v0.32.0 还要求 per-request `causal` tensor 预先是
 `int32`：builder 遇到其他 dtype 直接报错，不在热路径临时转换并分配新 tensor，
 以免破坏 FULL CUDA Graph 对持久地址的依赖。
 
@@ -1452,7 +1627,8 @@ prefix cache 生命周期、CUDA 并行、online softmax、DCP、graph capture �
 - feature 约束可让所有候选无效。
 
 上游 `tests/v1/worker/test_gpu_block_table.py` 固定了 fused multi-group writes 原样保留
-manager IDs、DCP local slot、vacated row 清零和 dummy table 地址稳定性。
+manager IDs、DCP local slot、vacated row 清零和 dummy table 地址稳定性；v0.33.0 新增的用例分别在
+6.6.3（共享缓冲旧行清零）、6.6.4（滑窗窗口外表项置 null）与 6.6.5（多块 staged write）里给出测试名。
 DCP 用例已更名为 `test_dcp_slot_mapping_only_shards_sharded_groups`；它验证仅
 `dcp_sharded=True` 的组转换为 local position，不再验证持久表展开。这些是 GPU 测试，本地无
 CUDA 环境没有执行。
@@ -1687,9 +1863,23 @@ flowchart TD
   - `BlockTables.append_block_ids`
   - `BlockTables.apply_staged_writes`
   - `BlockTables.gather_block_tables`
+  - `BlockTables.get_dummy_block_tables`
   - `BlockTables.compute_slot_mappings`
   - `_gather_block_tables_kernel`
   - `_compute_slot_mappings_kernel`
+- `vllm/v1/worker/gpu/buffer_utils.py`
+  - `StagedWriteTensor.apply_write`
+  - `FusedStagedWriter.apply`
+  - `_num_write_chunks`
+  - `_apply_write_kernel`
+- `vllm/v1/kv_cache_interface.py`
+  - `SlidingWindowSpec.num_retained_tokens`
+  - `is_quantized_kv_cache`
+- `vllm/v1/attention/backends/utils.py`
+  - `compute_mm_prefix_ranges`
+- `vllm/config/cache.py`
+  - `register_kv_cache_dtype`
+  - `is_known_kv_cache_dtype`
 
 - `vllm/v1/worker/utils.py`
   - `AttentionGroup.create_metadata_builders`
@@ -1801,7 +1991,9 @@ PagedAttention 的核心不是某个固定函数名，而是保持以下契约�
 12. 分页改变地址，不应改变逻辑 attention 数学结果。
 
 2026-10-19 的 v0.32.0 静态复核与 CPU 测试记录见
-[升级核对](../../meta/upgrade-v0.32.0-2026-10-19/06-paged-attention.md)。
+[升级核对](../../meta/upgrade-v0.32.0-2026-10-19/06-paged-attention.md)；
+2026-11-10 对 v0.33.0（`4ba787ec`）的复核见
+[v0.33.0 升级核对](../../meta/upgrade-v0.33.0-2026-11-10/b5-ch01-02-06-10.md)。
 
 本章正文、30 余幅源码流程/地址图、教学模型、实验说明和 15 个 CPU 测试已经完成，
 `content_complete=true`。当前机器没有可用的 vLLM NVIDIA GPU runtime，无法执行上游 CUDA
