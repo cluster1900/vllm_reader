@@ -6,7 +6,7 @@ source_path: ../vllm
 source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
 source_branch: v0.33.0
 source_dirty: false
-verified_at: 2026-10-19
+verified_at: 2026-11-10
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -36,7 +36,7 @@ KV Cache 不是一个 Python 字典，也不只是一块 GPU tensor。阅读当�
 3. EngineCore 中代表物理页所有权的 `KVCacheBlock` 元数据；
 4. 每个请求按逻辑 token 顺序维护的 block table。
 
-本章绑定源码 revision `5df63a7203cdb9328d824a27b682e77c7b9928be`。文中继续使用三种
+本章绑定源码 revision `4ba787ec9959e566d3b587a796dff07673324da5`（vLLM v0.33.0）。文中继续使用三种
 证据标签：
 
 - **源码事实**：能在固定 revision 的实现或测试中直接定位。
@@ -260,12 +260,18 @@ H_{\mathrm{kv,local}}=\frac{H_{\mathrm{kv}}}{\mathrm{TP}}.
 $$
 
 但真实 backend 可能在 KV heads 少于 TP 数时复制 head；DCP/PCP 还会改变 token 或上下文
-维度上的分片。量化 KV 可能加入 scale 或 zero-point，某些布局还会 padding。因此正确做法
-是：
+维度上的分片。量化 KV 可能加入 scale 或 zero-point，某些布局还会 padding。v0.33.0 起
+`--kv-cache-dtype` 的取值还可以由平台后端通过 `KVCacheDTypeHandler` 注册：
+`get_kv_quant_mode` 会先询问已注册的 handler，没有 handler 时才落到内置映射（#52670）。
+所以“dtype 字符串对应多少字节”不能只查内置表。因此正确做法是：
 
 1. 用简单公式形成数量级直觉；
 2. 用实际 `KVCacheSpec.page_size_bytes` 得到当前 backend 的物理页大小；
 3. 用启动日志和最终 `KVCacheConfig` 核对可用 block 数。
+
+[源码] `vllm/config/cache.py` - `KVCacheDTypeHandler`、`get_kv_cache_dtype_handler`
+
+[源码] `vllm/v1/kv_cache_interface.py` - `get_kv_quant_mode`
 
 ### 5.2.3 当前源码里的通用 page 公式
 
@@ -437,7 +443,7 @@ Unknown。不同规格回答的不是同一个问题：
 | Full Attention | 所有可见历史 K/V | 通常随序列持续增长 |
 | Sliding Window | 最近窗口相关 K/V | 窗口滑过后可置空旧位置 |
 | Chunked Local | 当前 local chunk 所需 K/V | 持有量受 chunk 与 in-flight 限制 |
-| MLA | 压缩 latent state | V 维可为 0，布局和对齐不同 |
+| MLA | 压缩 latent state | V 维可为 0，布局和对齐不同；稀疏 MLA 的 spec 还带 `topk_buffer_width`（top-k 索引 buffer 含填充的宽度），同组各层必须一致 |
 | Mamba | recurrent state / checkpoint | 不等价于逐 token K/V |
 | Cross Attention | encoder states | 通常按 encoder 长度一次性分配 |
 | Encoder-only | 不需要 decoder KV | 最大 KV 使用量为 0 |
@@ -466,15 +472,33 @@ flowchart TB
 
 > **读图方法：** 阅读“group 是共享 block table 的层集合”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
+投机解码的 draft 层也要占 KV。v0.33.0 在 `KVCacheSpec` 上新增了 `is_draft` 字段
+（`compare=False`，不参与 spec 相等比较，因此不会改变分组结果），
+`get_global_kv_cache_groups` 在启用 EAGLE 末块回退（`use_eagle_block_drop()`）时，
+只要某个 group 含有被标成 draft 的层，就把该 group 的 `is_eagle_group` 置为真。
+v0.32.0 用的是按层结构猜测的启发式；现在改为模型/proposer 显式打标签（#61455），
+所以“哪个 group 属于 EAGLE”不再取决于层的排列。
+
+[源码] `vllm/v1/kv_cache_interface.py` - `KVCacheSpec`、`KVCacheGroupSpec`
+
+[源码] `vllm/v1/core/kv_cache_planning.py` - `get_global_kv_cache_groups`
+
 ### 5.5.3 多个 group 共享一个 block ID pool
 
 配置生成时，一个 pool block 的字节宽度取最宽设备 cache group 的有效每-block 字节数；
-`num_blocks = available_memory // bytes_per_block`。v0.32.0 明确把 layout 与 stride 对齐
-计入这个有效宽度：layer-outer 布局逐层将 page 向上补齐再求和，block-outer 布局先合并
-各层 page，再按各层要求的公共对齐补齐。不能简单把原始 `page_size_bytes` 相加后就
-当成任意布局的分母。HiSparse host-resident group 由独立 host pool 处理。
+`num_blocks = available_memory // bytes_per_block`。自 v0.32.0 起，layout 与 stride 对齐
+已计入这个有效宽度（v0.33.0 沿用）：layer-outer 布局逐层将 page 向上补齐再求和，
+block-outer 布局先合并各层 page，再按各层要求的公共对齐补齐。不能简单把原始
+`page_size_bytes` 相加后就当成任意布局的分母。HiSparse host-resident group 由独立
+host pool 处理。
 
-[源码] `vllm/v1/core/kv_cache_utils.py` - `_get_layer_block_stride`、
+这些规划函数在 v0.33.0 里已经不在 `kv_cache_utils.py`：#61183 把整块“KV cache 规划”
+逻辑移到了新模块 `kv_cache_planning.py`，旧文件只保留运行时用的数据结构和 hash 辅助
+（`KVCacheBlock`、`FreeKVCacheBlockQueue`、`get_request_block_hasher` 等）。读 v0.32.0
+之前的资料时，凡是写着 `kv_cache_utils.get_kv_cache_configs` 的地方，现在都应去
+`kv_cache_planning.py` 找。
+
+[源码] `vllm/v1/core/kv_cache_planning.py` - `_get_layer_block_stride`、
 `_get_kv_cache_bytes_per_block`、`_pool_bytes_per_block`、`get_kv_cache_config_from_groups`
 
 [源码] `vllm/v1/kv_cache_interface.py` - `KVCacheSpec.get_block_stride_alignment`
@@ -504,6 +528,43 @@ flowchart TD
 `find_longest_cache_hit` 对复杂多类型组合仍有限制。写文档时不能把混合管理描述成已经对
 任意组合完全泛化。
 
+### 5.5.5 规划模块与可插拔的 KV 配置 builder
+
+v0.33.0 把“怎样把层分成 group、怎样为给定 block 数铺开 tensor”拆成两层，让平台或
+特殊模型可以只替换放置策略，而不必改动跨 worker 的规划流程（#61183、#53558）：
+
+| 层 | 文件 | 谁负责 |
+|---|---|---|
+| 规划流程（Core 持有） | `vllm/v1/core/kv_cache_planning.py` | 合并各 worker 的 spec、按 PP 投影出每个 worker 的 group、auto-fit `max_model_len`、容量检查、取全体最小 `num_blocks` |
+| builder 接口 | `vllm/v1/core/kv_cache_config_builder.py` | `KVCacheConfigBuilder`：只提供两个放置决策 `get_kv_cache_groups` 与 `get_kv_cache_config_from_groups` |
+| 默认实现 | `kv_cache_planning.py` 中的 `DefaultKVCacheConfigBuilder` | 沿用 v0.32.0 的分组与 tensor 布局；支持 `SupportsKVCacheGrouping` 的模型在这里声明自己的分组 |
+| 选择钩子 | `vllm/platforms/interface.py` 的 `Platform.get_kv_cache_config_builder_cls` | 返回 builder 类的全限定名，默认指向 `DefaultKVCacheConfigBuilder` |
+
+```mermaid
+flowchart TB
+    EC[EngineCore._initialize_kv_caches] --> GG[get_global_kv_cache_groups]
+    EC --> GC[get_kv_cache_configs]
+    PL[Platform.get_kv_cache_config_builder_cls] --> BLD[KVCacheConfigBuilder 实例]
+    GG -->|get_kv_cache_groups| BLD
+    GC -->|get_kv_cache_config_from_groups| BLD
+    BLD --> DEF[DefaultKVCacheConfigBuilder]
+    GG --> TAG[draft 层打标签: is_eagle_group]
+    GC --> MIN[取各 worker 最小 num_blocks]
+```
+
+> **读图方法：** 这张图用于压缩“规划模块与可插拔的 KV 配置 builder”的整体关系。左上两个函数是 Core 持有的固定流程，右侧 builder 只回答“怎样放置”；先找谁调用谁，再确认平台钩子只影响 builder 的选择，不改变流程本身。
+
+接口文档明确写着它是**实验性**的：钩子和 `num_blocks` 契约在稳定前可能变化；
+`_get_pool_bytes_per_block` 是私有、过渡性的钩子，返回 `None` 时由 Core 用“一个 block、
+一个设备 backing”的放置结果自行推出每 block 字节数。所以本书只把 builder 当作
+“规划流程的一个替换点”来读，不把它的接口写成稳定 API。
+
+[源码] `vllm/v1/core/kv_cache_config_builder.py` - `KVCacheConfigBuilder`、`get_kv_cache_config_builder`
+
+[源码] `vllm/v1/core/kv_cache_planning.py` - `DefaultKVCacheConfigBuilder`、`get_kv_cache_groups_from_builder`
+
+[源码] `vllm/platforms/interface.py` - `Platform.get_kv_cache_config_builder_cls`
+
 ## 5.6 启动时怎样决定 KV 容量
 
 > **本节先看：** 本节要回答：**启动时怎样决定 KV 容量**。下面的小节会逐层拆开概念、运行过程和源码落点；第一次阅读先抓对象之间的关系，第二次再记类名、字段和分支。
@@ -514,7 +575,9 @@ flowchart TD
 
 1. 等外部 loader 持有的权重就绪，再记录初始显存快照与本进程预算；
 2. 运行 dummy forward，profile 权重之外的非 KV 和瞬时峰值；
-3. 如果启用并支持 CUDA Graph，估算 graph 占用；
+3. 如果启用并支持 CUDA Graph，估算 graph 占用（v0.33.0 起，MRV2 在开启
+   `cudagraph_mm_encoder` 且非 `enforce_eager` 时，即使 decoder 的 `cudagraph_mode`
+   为 `NONE`，也会估算 encoder graph 的占用，#58243）；
 4. 用请求显存减去非 KV 占用和应用的 graph 估算；
 5. 返回可用于 KV allocation 的字节数。
 
@@ -548,6 +611,12 @@ profiling fallback，不能把这条断言说成所有平台分支都无条件�
 
 [源码] `vllm/v1/worker/utils.py` - `request_memory`
 
+v0.33.0 在 `init_device` 里还多了一步：拍初始显存快照之前，先用一次小矩阵 `mm` 和带 bias 的
+`linear` 让 cuBLAS / cuBLASLt 建好自己的 handle（#61044）。cuBLAS 直接向 CUDA 要显存，
+torch 看不到，也就不会在 cuBLAS 申请失败时清理自己的空闲缓存；如果 profiling 把 torch 的
+缓存撑满，第一次 cuBLAS 调用就可能失败。提前创建后，这部分显存和 NCCL buffer 一样计入基线，
+不会被误当成可给 KV 的显存。
+
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.init_device`、`determine_available_memory`
 
 ### 5.6.2 手动字节数是另一条路径
@@ -559,7 +628,8 @@ profiling fallback，不能把这条断言说成所有平台分支都无条件�
 
 ### 5.6.3 从字节数到 block 数
 
-EngineCore 汇总各 Worker 的 `KVCacheSpec`，建立 groups，然后计算：
+EngineCore 汇总各 Worker 的 `KVCacheSpec`，**在 profiling 之前**先建立全局 groups
+（v0.33.0 的变化，见下），等 Worker 报告可用字节数后再计算：
 
 ```text
 bytes_per_pool_block = widest device group's layout-aligned bytes
@@ -578,15 +648,18 @@ num_blocks = available_memory // bytes_per_pool_block
 sequenceDiagram
     participant EC as EngineCore
     participant W as Workers
-    participant U as kv_cache_utils
+    participant U as kv_cache_planning
     EC->>W: Executor.get_kv_cache_specs()
     W-->>EC: per-layer specs
     EC->>EC: resolve_kv_cache_layout
-    EC->>W: set_kv_cache_layout
+    EC->>U: get_global_kv_cache_groups(specs)
+    U-->>EC: global groups (merge specs and build groups)
+    EC->>EC: adjust_dcp_kv_cache_interleave_size(groups)
+    EC->>W: set_kv_cache_layout(layout, cp interleave)
     EC->>W: determine_available_memory()
     W-->>EC: bytes per worker
-    EC->>U: get_kv_cache_configs(specs, bytes)
-    U->>U: merge specs and build groups
+    EC->>U: get_kv_cache_configs(specs, bytes, global groups)
+    U->>U: project global groups to each worker
     U->>U: check one-request capacity
     U->>U: derive per-worker num_blocks
     U->>U: clamp all workers to minimum
@@ -596,9 +669,25 @@ sequenceDiagram
 
 > **读图方法：** 这是“从字节数到 block 数”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-27.md。
-> - [3e75ccba2](https://github.com/vllm-project/vllm/commit/3e75ccba298d0c7f045f35c39078cec74184b799)（[#62330](https://github.com/vllm-project/vllm/pull/62330)）：main 把图中 `U->>U: merge specs and build groups` 提前到 `determine_available_memory()` 之前：EngineCore 调用新函数 `get_global_kv_cache_groups`，用分组结果确定 NIXL P/D 的 DCP interleave（`adjust_dcp_kv_cache_interleave_size`），`set_kv_cache_layout` 同时下发 layout 与 interleave；之后 `get_kv_cache_configs(specs, bytes, global_kv_cache_groups)` 不再自行分组。
-> - main 2026-10-28～10-29：[edad8b03c5](https://github.com/vllm-project/vllm/commit/edad8b03c5285a1c12e7e4f83c1af709b319a01b)（[#61294](https://github.com/vllm-project/vllm/pull/61294)）：`resolve_kv_cache_layout` / `_merge_supported_layouts` 跨 PP stage 取各 worker 支持布局的**交集**，再按“多数 worker 把该布局排第一”排序（`vllm/v1/attention/backends/utils.py` L243–L337 @ `36d4ef654`），不再要求各 stage 列表完全一致。[317081fb6d](https://github.com/vllm-project/vllm/commit/317081fb6dc8b125a3134711a7750707bfd55371)（[#62860](https://github.com/vllm-project/vllm/pull/62860)）：DSA decode indexer logits 计入 memory profile workspace（`sparse_attn_indexer.py` L496–L541）。详见 meta/main-tracking-2026-10-29.md。
+v0.33.0 把“合并 spec、建 groups”从 `get_kv_cache_configs` 里提前出来（#62330）：EngineCore
+先调用 `get_global_kv_cache_groups`，再用分组结果为 NIXL P/D 的 DCP 确定
+`cp_kv_cache_interleave_size`（`adjust_dcp_kv_cache_interleave_size`：只在 DCP>1 且配置了
+KV transfer 实例时才可能改动，“自动对齐到最小 group 的 block_size”这一步只针对
+`NixlConnector`），`set_kv_cache_layout` 同时把 layout 与 interleave 发给各 Worker；
+`get_kv_cache_configs(specs, bytes, global_kv_cache_groups)` 之后不再自行分组。
+源码注释说明了 layout 必须先于 profiling 解析：启用 full cudagraph 的 Worker 在
+profiling 期间就会初始化一个最小 KV cache。#62330 让 interleave 也在 profiling 之前定稿，
+Worker 只负责接收并赋值。
+
+[源码] `vllm/v1/engine/core.py` - `EngineCore._initialize_kv_caches`
+
+[源码] `vllm/v1/core/kv_cache_planning.py` - `get_global_kv_cache_groups`、`get_kv_cache_configs`
+
+[源码] `vllm/config/vllm.py` - `VllmConfig.adjust_dcp_kv_cache_interleave_size`
+
+> **main 上的变化（未发版，不在 v0.33.0 中）**：本书正文以 v0.33.0 为准；以下为 vLLM main 2026-10-28～10-29（0106c8abc..36d4ef654）的变化。已用 `git merge-base --is-ancestor` 核对 [edad8b03c5](https://github.com/vllm-project/vllm/commit/edad8b03c5285a1c12e7e4f83c1af709b319a01b) 与 [317081fb6d](https://github.com/vllm-project/vllm/commit/317081fb6dc8b125a3134711a7750707bfd55371) 都不在 `4ba787ec9959` 的祖先链中，留待第二波。详见 meta/main-tracking-2026-10-29.md。
+> - [edad8b03c5](https://github.com/vllm-project/vllm/commit/edad8b03c5285a1c12e7e4f83c1af709b319a01b)（[#61294](https://github.com/vllm-project/vllm/pull/61294)）：`resolve_kv_cache_layout` / `_merge_supported_layouts` 跨 PP stage 取各 worker 支持布局的**交集**，再按“多数 worker 把该布局排第一”排序（`vllm/v1/attention/backends/utils.py` L243–L337 @ `36d4ef654`），不再要求各 stage 列表完全一致。
+> - [317081fb6d](https://github.com/vllm-project/vllm/commit/317081fb6dc8b125a3134711a7750707bfd55371)（[#62860](https://github.com/vllm-project/vllm/pull/62860)）：DSA decode indexer logits 计入 memory profile workspace（`sparse_attn_indexer.py` L496–L541）。
 
 ### 5.6.4 `num_blocks` 与有效并发
 
@@ -694,7 +783,8 @@ block_hash[i] = hash(parent_hash, tokens_in_block, extra_keys)
 ```
 
 `extra_keys` 可包含 LoRA、多模态、cache salt 和 prompt embedding 信息，不能从实际
-缓存键中删去。block 的粒度由配置决定，token 也不等于单词。
+缓存键中删去。block 的粒度由配置决定，token 也不等于单词。上面是默认形式；v0.33.0 中
+EAGLE 类投机解码在特定条件下会让 hash 额外覆盖块后的几个 token，见 5.12.4。
 
 单次 hash map 查询通常按平均 O(1) 理解；遍历一个有 B 个 hash blocks 的前缀需要
 多次查询，常规逐块查找可达 O(B)，生成 hash 也有成本。命中还要满足连续前缀、
@@ -720,6 +810,17 @@ null block 有三个特殊点：
 - 永久不回到普通 free queue；
 - `ref_cnt` 不按普通 block 维护；
 - 容量检查和 usage 计算要减去它。
+
+v0.33.0 把“`ref_cnt` 不按普通 block 维护”写成了显式的短路：`BlockPool.touch` 与
+`free_blocks` 遇到 `is_null` 的 block 直接 `continue`，不再先判断 `ref_cnt == 0` 再排除
+null（#61724）。Sliding Window 的 block table 前缀往往是一长串 null，这样每次 free 或
+touch 都不必逐个处理它们。同一个 PR 还新增了 `null_head_len` 与 `trim_null_head`：
+所有 null 条目是同一个对象，所以前缀长度可以用二分加一次 `count` 求出，再用切片去掉。
+`pop_blocks_for_free`、`KVCacheBlocks.get_unhashed_block_ids_all_groups` 等出口都会先 `trim_null_head`。
+
+[源码] `vllm/v1/core/kv_cache_utils.py` - `null_head_len`、`trim_null_head`
+
+[源码] `vllm/v1/core/block_pool.py` - `BlockPool.touch`、`BlockPool.free_blocks`
 
 attention-free 模型即使没有 KV group，配置也返回 `num_blocks=1`，正是为了满足 pool 需要
 一个 null block 的结构契约。
@@ -956,16 +1057,21 @@ logprobs 完整返回。这里控制的是读取复用，不等于停止为当�
 
 [源码] `vllm/v1/core/kv_cache_manager.py` - `prefix_cache_lookup_enabled`、`get_computed_blocks`
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-27～10-28（ed1a73079..0106c8abc）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-28.md。
+> **main 上的变化（未发版，不在 v0.33.0 中）**：本书正文以 v0.33.0 为准；以下为 vLLM main 2026-10-27～10-28（ed1a73079..0106c8abc）的变化。已用 `git merge-base --is-ancestor` 核对 [e1e77a279d](https://github.com/vllm-project/vllm/commit/e1e77a279d68a9601be062cb267a5f9911c422c7) 不在 `4ba787ec9959` 的祖先链中，留待第二波。详见 meta/main-tracking-2026-10-28.md。
 > - [e1e77a279d](https://github.com/vllm-project/vllm/commit/e1e77a279d68a9601be062cb267a5f9911c422c7)（[#60960](https://github.com/vllm-project/vllm/pull/60960)）：`Request.get_skip_reading_prefix_cache` 改为 `get_prefix_cache_hit_limit`（`request.py` L326–L340 @ `0106c8abc`）与 `get_max_cache_hit_length`（L314–L318）。`prefix_cache_lookup_enabled` 变为 `enable_caching and request.prefix_cache_hit_limit != 0`（`kv_cache_manager.py` L251–L253）。有 `prompt_logprobs` / `prompt_logprob_token_ids` 时上限为 `prompt_logprob_start or 0`；`SamplingParams` 仍可默认把 `skip_reading_prefix_cache` 设为 True（上限 0），但显式 `skip_reading_prefix_cache=False` 时可复用评分起点之前的本地前缀。`get_computed_blocks` 经 `get_max_cache_hit_length` 收紧命中（与 `num_tokens-1`、显式 bound 取最小）。一旦 `prefix_cache_hit_limit is not None`，`skip_reading_external_kv` 为 True（`request.py` L321–L324 @ `0106c8abc`），调度器将外部命中清零（`scheduler.py` L1132–L1133：`ext_tokens, load_kv_async = 0, False`），即有界请求只复用本地前缀、跳过 KV connector 外部命中；源码注释“are not bounded by …”指无法对外部命中施加数值上限，故选择跳过外部，而非“外部仍可无界命中”。上文“`prompt_logprobs` 非 None 时默认跳过读取”在默认路径仍大致成立，但 API 与“可限定复用长度”的语义已变，升级时须改写正文与源码锚点。
 
 ### 5.12.2 为什么全 prompt 命中仍重算最后 token
 
-`get_computed_blocks()` 把最大命中长度设为：
+`get_computed_blocks()` 默认把最大命中长度设为：
 
 ```text
 request.num_tokens - 1
 ```
+
+v0.33.0 给它（以及 `get_computed_blocks_for_connector()`）加了可选参数
+`max_cache_hit_length`：调用方显式给出命中上限时用它，不给才用上面的默认值。
+目前 Scheduler 在配置了 aux output connector 时，用 `aux_output_connector.max_cache_hit(request)`
+填这个参数，让命中不要越过仍保留着 routed experts 等辅助输出的位置（#62591）。
 
 因为模型仍需对最后一个 prompt token 执行计算以得到下一 token 的 logits。当前
 `allocate_slots()` 又要求常规 computed token 边界满足 block 对齐，所以一个 8-token prompt、
@@ -1012,6 +1118,78 @@ flowchart TB
 当 A 完成时，P0/P1 的 `ref_cnt` 从 2 降到 1，仍由 B 使用；只有最后一个 owner 释放后才
 进入 free queue。
 
+### 5.12.4 EAGLE 的 lookahead 哈希（v0.33.0）
+
+投机解码里的 EAGLE / MTP draft 层在算某个 block 最后一个位置的 KV 时，要读**后面紧跟的
+几个 token**。v0.32.0 的做法是保守地丢掉最后一个命中的 block（EAGLE 末块回退），让这
+几个 token 重新算一遍。#61589 换了一个办法：让 block 的 hash 把这几个 token 也算进去，
+命中就等于“这几个 token 也一样”，因此不必再回退。
+
+$$
+H_i=\operatorname{hash}\bigl(H_{i-1},\;\mathrm{tokens}_i,\;(E_i,\;\mathrm{tokens}^{+L}_i)\bigr)
+$$
+
+其中：
+
+- `H_i`、`H_{i-1}` 是第 `i` 个 hash block 与前一个 block 的链式 hash；
+- `tokens_i` 是第 `i` 个 block 自己的 token，仍然是被 hash 的 token 主体；
+- `L` 是 `num_hash_lookahead_tokens`：每个 block 之后额外被覆盖的 token 数，EAGLE 为 1，
+  多模块 MTP 为投机 token 数；`L=0` 时退回 5.12 的原公式；
+- `tokens^{+L}_i` 是紧跟 `tokens_i` 之后的 `L` 个 token；
+- `E_i` 是覆盖“block + 这 `L` 个 token”范围的 `extra_keys`（LoRA、多模态、salt 等），
+  由 `generate_lookahead_block_hash_extra_keys` 生成；多模态输入如果跨过 block 边界，
+  会保留给下一个 block 再用一次。
+
+白话：原来的 hash 只“指纹”到 block 末尾，现在要等 block 之后再出现 `L` 个 token 才能
+算出来，所以 hash **晚出现 `L` 个 token**。`get_request_block_hasher` 里用
+`request.num_tokens - L` 判断“是否已有新的完整 block”，block 末尾 `end` 满足
+`end + L <= request.num_tokens` 才发出 hash。例：block 大小 4、`L=1`，第 0 块的 hash
+要等第 5 个 token 存在后才有；只有 8 个 token 的 prompt 此时只有第 0 块有 hash，第 1 块要
+等到生成出第 9 个 token。这是对源码规则的手算，不是 GPU 运行结果。
+
+```mermaid
+flowchart TD
+    A{use_eagle_block_drop 为真} -->|否| OFF[L = 0，沿用旧 hash]
+    A -->|是| B{disable_lookahead_block_hashes}
+    B -->|是| OFF
+    B -->|否| C{enable_prefix_caching}
+    C -->|否| OFF
+    C -->|是| D{配置了 kv_transfer_config}
+    D -->|是| OFF
+    D -->|否| ON[L = num_prefill_lookahead_tokens]
+    ON --> S1[Scheduler: use_eagle_block_drop = False]
+    ON --> S2[coordinator: drop_eagle_group_ids 为空，group 仍标记为 EAGLE]
+    ON --> S3[Mamba checkpoint: proof_limit = 长度 - max 1 和 L]
+    ON --> S4[BlockStored 事件带 lookahead_token_ids]
+```
+
+> **读图方法：** 这是“EAGLE 的 lookahead 哈希（v0.33.0）”的判定流程图。从上往下看四个条件如何依次把 `L` 归零，只有全部通过才得到 `L>0`；右下四个框是 `L>0` 之后各组件的连带变化，用来核对“为什么 EAGLE 末块回退在这条路径上被关掉”。
+
+启用条件在 `VllmConfig.num_hash_lookahead_tokens` 里：必须启用了 EAGLE 末块回退、没有设置
+`disable_lookahead_block_hashes`、开启了 prefix caching，并且**没有配置 KV connector**
+（包括 HiSparse 使用的 connector，它们保持旧 hash）。启用后：
+
+- Scheduler 把 `use_eagle_block_drop` 置为假；`KVCacheCoordinator` 新增的
+  `drop_eagle_group_ids` 在此时为空集合，group 仍保留 `is_eagle_group` 标记，但不再丢末块；
+- `BlockPool` 保存 `num_hash_lookahead_tokens`，`BlockStored` 事件新增
+  `lookahead_token_ids` 字段，事件的 `extra_keys` 也按同一窗口计算，外部 KV 事件消费者要
+  用相同设置才能复算 hash；
+- `resumable`（流式续写）请求在重新计算 KV 前会清空并重算 `block_hashes`，因为驻留的 KV 可能
+  保留着已被丢弃的 streaming token 的 hash；
+- `SingleTypeKVCacheManager.cache_blocks` 只缓存 hash 已经发出的 block
+  （`min(num_tokens, 已有 hash 数 × hash_block_size)`），不会为还没有 hash 的块登记。
+
+[源码] `vllm/v1/core/kv_cache_utils.py` - `get_request_block_hasher`、`generate_lookahead_block_hash_extra_keys`
+
+[源码] `vllm/config/vllm.py` - `VllmConfig.num_hash_lookahead_tokens`
+
+[源码] `vllm/v1/core/block_pool.py` - `BlockPool._generate_event_extra_keys`、`BlockPool._lookahead_token_ids`
+
+[测试] `tests/v1/core/test_kv_cache_utils.py` -
+`test_num_hash_lookahead_tokens`、`test_lookahead_block_hash_keeps_mm_inputs_for_next_block`
+
+[测试] `tests/v1/core/test_prefix_caching.py` - `test_kv_events_reconstruct_lookahead_block_hashes`
+
 ## 5.13 完整 block 注册与重复项
 
 `cache_full_blocks()` 使用 Request 已预计算的 hash chain，为“已完整且可提交”的 block
@@ -1046,7 +1224,8 @@ stateDiagram-v2
 ### 5.14.1 请求 free
 
 `KVCacheManager.free(request)` 让 coordinator 删除请求的 block table，并按逆序释放 block。
-释放只减少 `ref_cnt`。如果 cached block 的最后一个 owner 离开：
+v0.33.0 中 `pop_blocks_for_free` 返回的列表已去掉前缀的 null block（`trim_null_head`），
+所以 Sliding Window 请求不会把一长串 null 交给 `free_blocks`。释放只减少 `ref_cnt`。如果 cached block 的最后一个 owner 离开：
 
 - `ref_cnt` 变为 0；
 - block 进入 free queue 尾部；
@@ -1197,12 +1376,28 @@ sequenceDiagram
 这组测试说明 partial-tail 不是独立的小优化，而是会穿过调度、spec decode、并行和远端
 KV 生命周期的条件化能力。初学者先掌握完整 block 主线，再读这些测试更稳妥。
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
-> - KV offload 在 main 上有一组修复，本书只讲到 offload 边界，正文不受影响：[1757f6720](https://github.com/vllm-project/vllm/commit/1757f6720c3c1cc130a834b41f264ac22a782289)（[#61390](https://github.com/vllm-project/vllm/pull/61390)） 文件系统发布遇到 EEXIST 视为已存储；[6f5143383](https://github.com/vllm-project/vllm/commit/6f51433838b858a9cd0478b2ffee4d2c610a1712)（[#63010](https://github.com/vllm-project/vllm/pull/63010)） 重启后重置已存储 chunk 下标；[2b1f75c80](https://github.com/vllm-project/vllm/commit/2b1f75c80f79496b313e28362f0856632dfbf5ea)（[#61780](https://github.com/vllm-project/vllm/pull/61780)） store 失败时通知背压检测；[921ed7fa1](https://github.com/vllm-project/vllm/commit/921ed7fa11c41b89ce36e81f50fb3b1c293dc8f7)（[#60810](https://github.com/vllm-project/vllm/pull/60810)） 恢复的 session 重置 block table；[fc0cfcdc0](https://github.com/vllm-project/vllm/commit/fc0cfcdc05b1717cadb17a0e24a6b1f611aec456)（[#61019](https://github.com/vllm-project/vllm/pull/61019)） 修正 EAGLE/MTP group 的 partial tail；[65bc69835](https://github.com/vllm-project/vllm/commit/65bc698356b4b0106630788536b6af6a916308e9)（[#63266](https://github.com/vllm-project/vllm/pull/63266)） 拒绝未对齐的 ChunkedLocal CPU 后缀命中。详见 meta/main-tracking-2026-10-25.md。
-> - main 2026-10-25～10-27（至 ed1a73079）继续修改 KV offload，同样不影响正文：[fe5fe8ba5](https://github.com/vllm-project/vllm/commit/fe5fe8ba5fb9412ac6deafd192ae8b7c466b96c5)（[#61961](https://github.com/vllm-project/vllm/pull/61961)） 新增 `sync_load_budget_bytes`，预算内的 CPU 小命中在本步同步加载；[e113018f5](https://github.com/vllm-project/vllm/commit/e113018f5067045ac92de3949b8c302439abb226)（[#61050](https://github.com/vllm-project/vllm/pull/61050)） CPU LRU 按请求 rank 与位置排序，`CachePolicy.insert` 新增 `req_context`；[c13d4a5a4](https://github.com/vllm-project/vllm/commit/c13d4a5a46c2c663b728aa21af7eb00ece6bd698)（[#57646](https://github.com/vllm-project/vllm/pull/57646)） finalize 时暴露已处理前缀；[14aefcd4f](https://github.com/vllm-project/vllm/commit/14aefcd4f907ff91cb29b9e80bd9c6a5568944bb)（[#62929](https://github.com/vllm-project/vllm/pull/62929)） cache reset 后暂停 promotion 直到 job 回报；[a64fc9408](https://github.com/vllm-project/vllm/commit/a64fc94081cfa3f0061a87e6c0646ed472552a1b)（[#60574](https://github.com/vllm-project/vllm/pull/60574)） 同步 reset/重载时保留新 load；[1d3f05aad](https://github.com/vllm-project/vllm/commit/1d3f05aadb9c100c9665dabc3bb188fcd3e7d0e8)（[#63652](https://github.com/vllm-project/vllm/pull/63652)） 不存含 null block 的 sliding-window chunk；[8c6e770a1](https://github.com/vllm-project/vllm/commit/8c6e770a1ca9a522fa32f91995ba241e21e5a88c)（[#63655](https://github.com/vllm-project/vllm/pull/63655)） 对象 key 按 `blocks_per_chunk` 分命名空间；P2P 层 [963399729](https://github.com/vllm-project/vllm/commit/9633997299f29d54f1da38fb4a37e7d1a6535005)（[#63781](https://github.com/vllm-project/vllm/pull/63781)）（分模式超时 10s/30s）、[51d2a8559](https://github.com/vllm-project/vllm/commit/51d2a855942907366bc15ba72d76130d0fc4346b)（[#63708](https://github.com/vllm-project/vllm/pull/63708)）（send 不阻塞）、[8a4b018f1](https://github.com/vllm-project/vllm/commit/8a4b018f1c1b5ebf195072a00196a915c4e534b3)（[#63628](https://github.com/vllm-project/vllm/pull/63628)）、[f682f1dc3](https://github.com/vllm-project/vllm/commit/f682f1dc32586f43c3917c4516b8f95f7bf0471d)（[#63664](https://github.com/vllm-project/vllm/pull/63664)）、[71294c2e9](https://github.com/vllm-project/vllm/commit/71294c2e9ac41ed710b6eb4ca41cba3793705345)（[#63498](https://github.com/vllm-project/vllm/pull/63498)） 为失败处理修复。详见 meta/main-tracking-2026-10-27.md。
-> - main 2026-10-27～10-28（ed1a73079..0106c8abc）继续修改 KV offload / HiSparse：[e3883b7a7e](https://github.com/vllm-project/vllm/commit/e3883b7a7ec41f3117dfb7ca764746ec80a24d87)（[#60469](https://github.com/vllm-project/vllm/pull/60469)） KVCR 按请求聚合 completed_prefixes 并保序，由 scheduler finalize recency；[36f5ff3172](https://github.com/vllm-project/vllm/commit/36f5ff3172eb75433e54e496d64c473e951f8ecc)（[#63889](https://github.com/vllm-project/vllm/pull/63889)） 降低 KVCR adapter 开销；[70cb50dab2](https://github.com/vllm-project/vllm/commit/70cb50dab240a03f7db9ab87a613b5b52f1339fe)（[#62592](https://github.com/vllm-project/vllm/pull/62592)） 新增 `HiSparseBackend` 平台后端（pin/unpin、cache ops、IPC event）。详见 meta/main-tracking-2026-10-28.md。
-> - main 2026-10-28～10-29（0106c8abc..36d4ef654）继续修改 KV offload / connector / layout，详见 meta/main-tracking-2026-10-29.md：[0beab6c251](https://github.com/vllm-project/vllm/commit/0beab6c251e8046c0c6cf2fef114cd23b58cda74)（[#63779](https://github.com/vllm-project/vllm/pull/63779)） tier promotion 可失败并 `defer_write_release`（`tiering/manager.py` L170–L214、L556–L638 @ `36d4ef654`）；[77f58e5304](https://github.com/vllm-project/vllm/commit/77f58e530450416d217e4816727a35910bf3d9bf)（[#64229](https://github.com/vllm-project/vllm/pull/64229)） bounded-replay SWA 计入 lazy walk；P2P [f4fd1ab68e](https://github.com/vllm-project/vllm/commit/f4fd1ab68e2ba3a76bf6b903662eb6a8ee8202ab)（[#63207](https://github.com/vllm-project/vllm/pull/63207)）、[a1cfd2c1b5](https://github.com/vllm-project/vllm/commit/a1cfd2c1b584c4ac197db9cc9ac84a6d973d39df)（[#64250](https://github.com/vllm-project/vllm/pull/64250)）；NIXL `transfer_mode` push（[#64230](https://github.com/vllm-project/vllm/pull/64230)）、Mooncake 跳过 padding（[#63513](https://github.com/vllm-project/vllm/pull/63513)）、MORI embedded（[#61793](https://github.com/vllm-project/vllm/pull/61793)）仅清单。
-> - main 2026-10-29～10-30：本区间继续改 KV offload / P2P / OBJ / SimpleCPUOffload（#64400、#59099、#63618、#62930、#63566、#63788、#64251、#59322、#63937、#64501、#64345、#62444、#64256、#64224、#52838）：partial-tail 去重、`reset_cache` 可重入、idle P2P-only 可 park、跨节点拒绝 secondary tier、传输故障降级缓存等。详见 meta/main-tracking-2026-10-30.md。
+v0.33.0 另外带入了一批 KV offload / P2P 的修复，本书只讲到 offload 边界，正文不受影响。
+它们已用 `git merge-base --is-ancestor` 核对在 `4ba787ec9959` 的祖先链中：
+[#61390](https://github.com/vllm-project/vllm/pull/61390)（文件系统发布遇到 EEXIST 视为已存储）、
+[#63010](https://github.com/vllm-project/vllm/pull/63010)（重启后重置已存储 chunk 下标）、
+[#61780](https://github.com/vllm-project/vllm/pull/61780)（store 失败时通知背压检测）、
+[#60810](https://github.com/vllm-project/vllm/pull/60810)（恢复的 session 重置 block table）、
+[#61019](https://github.com/vllm-project/vllm/pull/61019)（修正 EAGLE/MTP group 的 partial tail）、
+[#63266](https://github.com/vllm-project/vllm/pull/63266)（拒绝未对齐的 ChunkedLocal CPU 后缀命中）、
+[#61961](https://github.com/vllm-project/vllm/pull/61961)（新增 `sync_load_budget_bytes`，预算内的 CPU 小命中在本步同步加载）、
+[#61050](https://github.com/vllm-project/vllm/pull/61050)（CPU LRU 按请求 rank 与位置排序，`CachePolicy.insert` 新增 `req_context`）、
+[#62929](https://github.com/vllm-project/vllm/pull/62929)（cache reset 后暂停 promotion 直到 job 回报）、
+[#60574](https://github.com/vllm-project/vllm/pull/60574)（同步 reset/重载时保留新 load）、
+[#63652](https://github.com/vllm-project/vllm/pull/63652)（不存含 null block 的 sliding-window chunk）、
+[#63655](https://github.com/vllm-project/vllm/pull/63655)（对象 key 按 `blocks_per_chunk` 分命名空间）、
+P2P 失败处理 [#63708](https://github.com/vllm-project/vllm/pull/63708)（send 不阻塞）、
+[#63628](https://github.com/vllm-project/vllm/pull/63628)、[#63664](https://github.com/vllm-project/vllm/pull/63664)、[#63498](https://github.com/vllm-project/vllm/pull/63498)。
+
+> **main 上的变化（未发版，不在 v0.33.0 中）**：本书正文以 v0.33.0 为准；以下各项已用 `git merge-base --is-ancestor` 核对不在 `4ba787ec9959` 的祖先链中，留待第二波。详见 meta/main-tracking-2026-10-27.md ～ 10-30.md。
+> - main 2026-10-25～10-27：[c13d4a5a4](https://github.com/vllm-project/vllm/commit/c13d4a5a46c2c663b728aa21af7eb00ece6bd698)（[#57646](https://github.com/vllm-project/vllm/pull/57646)） finalize 时暴露已处理前缀；P2P [963399729](https://github.com/vllm-project/vllm/commit/9633997299f29d54f1da38fb4a37e7d1a6535005)（[#63781](https://github.com/vllm-project/vllm/pull/63781)）分模式超时 10s/30s。
+> - main 2026-10-27～10-28：[e3883b7a7e](https://github.com/vllm-project/vllm/commit/e3883b7a7ec41f3117dfb7ca764746ec80a24d87)（[#60469](https://github.com/vllm-project/vllm/pull/60469)） KVCR 按请求聚合 completed_prefixes 并保序，由 scheduler finalize recency；[36f5ff3172](https://github.com/vllm-project/vllm/commit/36f5ff3172eb75433e54e496d64c473e951f8ecc)（[#63889](https://github.com/vllm-project/vllm/pull/63889)） 降低 KVCR adapter 开销；[70cb50dab2](https://github.com/vllm-project/vllm/commit/70cb50dab240a03f7db9ab87a613b5b52f1339fe)（[#62592](https://github.com/vllm-project/vllm/pull/62592)） 新增 `HiSparseBackend` 平台后端（pin/unpin、cache ops、IPC event）。
+> - main 2026-10-28～10-29：[0beab6c251](https://github.com/vllm-project/vllm/commit/0beab6c251e8046c0c6cf2fef114cd23b58cda74)（[#63779](https://github.com/vllm-project/vllm/pull/63779)） tier promotion 可失败并 `defer_write_release`（`tiering/manager.py` L170–L214、L556–L638 @ `36d4ef654`）；[77f58e5304](https://github.com/vllm-project/vllm/commit/77f58e530450416d217e4816727a35910bf3d9bf)（[#64229](https://github.com/vllm-project/vllm/pull/64229)） bounded-replay SWA 计入 lazy walk；P2P [f4fd1ab68e](https://github.com/vllm-project/vllm/commit/f4fd1ab68e2ba3a76bf6b903662eb6a8ee8202ab)（[#63207](https://github.com/vllm-project/vllm/pull/63207)）、[a1cfd2c1b5](https://github.com/vllm-project/vllm/commit/a1cfd2c1b584c4ac197db9cc9ac84a6d973d39df)（[#64250](https://github.com/vllm-project/vllm/pull/64250)）；NIXL `transfer_mode` push（[#64230](https://github.com/vllm-project/vllm/pull/64230)）、Mooncake 跳过 padding（[#63513](https://github.com/vllm-project/vllm/pull/63513)）、MORI embedded（[#61793](https://github.com/vllm-project/vllm/pull/61793)）仅清单。
+> - main 2026-10-29～10-30：KV offload / P2P / OBJ / SimpleCPUOffload（#64400、#59099、#63618、#62930、#63566、#63788、#64251、#59322、#63937、#64501、#64345、#62444、#64256、#64224、#52838）：partial-tail 去重、`reset_cache` 可重入、idle P2P-only 可 park、跨节点拒绝 secondary tier、传输故障降级缓存等。
 > - main 2026-10-29～10-30：[7ab756940](https://github.com/vllm-project/vllm/commit/7ab756940a89a7464ebd6ab26c7c6a1f3b7d08da)（[#63047](https://github.com/vllm-project/vllm/pull/63047)）：`sparse_attn_indexer` profile dummy 把 prefill FP32 copy 计入 workspace（`sparse_attn_indexer.py` L519–L543 @ `2eae56c4b`），接续 #62860。
 
 ### 5.15.5 v0.32.0 的 checkpoint 与 cache group 边界
@@ -1230,13 +1425,39 @@ Mamba/EAGLE 还要保留未来真正可恢复的 checkpoint。旧 coordinator �
 `enable_mamba_shared_prefix_checkpoint` 只有同时满足 EAGLE group、partial hash hit 和
 无 reprefillable tail 等条件才激活；不是所有 Mamba 模型无条件使用的新主线。
 
-checkpoint 位置也有一处容易多退一个边界的细节：非 EAGLE 先留出最后 token 再向下
-对齐；EAGLE 使用 prompt 全长作为 proof limit，再减一个对齐单位。例：长度 128、
-对齐 32，EAGLE 返回 96，而不是先减 1 后再退到 64。此为纯函数的源码算例，不是
-GPU 运行结果。
+checkpoint 位置也有一处容易多退一个边界的细节。`get_mamba_prefill_checkpoint_position`
+现在有三个分支：
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-27.md。
-> - [2fb320d83](https://github.com/vllm-project/vllm/commit/2fb320d8304381e224dd27fbf8c13c30b4e1020f)（[#61589](https://github.com/vllm-project/vllm/pull/61589)）：main 上 EAGLE 类方法开启 prefix caching 且未配置 KV connector 时，每个 block hash 还覆盖块后 `num_prefill_lookahead_tokens` 个 token，Scheduler 因此关闭 EAGLE 末块回退，Mamba checkpoint 也不再按上文“EAGLE 减一个对齐单位”计算（`num_hash_lookahead_tokens>0` 时 `drop_eagle_block` 为假）。上面 128/32→96 的算例只适用于配置 KV connector 或 `disable_lookahead_block_hashes=True` 的旧路径。`BlockStored` 事件同时新增 `lookahead_token_ids`，外部 KV 事件消费者需用相同设置。
+- 走 EAGLE 末块回退（`drop_eagle_block` 为真）：用 prompt 全长作为 proof limit，对齐后再
+  减一个对齐单位；
+- 不回退（含 lookahead 哈希路径）：先留出 `max(1, L)` 个 token 再向下对齐，其中 `L` 是
+  `num_hash_lookahead_tokens`，没有 lookahead 时就是原来的“留最后 token”；
+- 结果小于 0 时取 0。
+
+例：长度 128、对齐 32、走 EAGLE 末块回退，返回 96，而不是先减 1 后再退到 64。
+同样对齐 32，长度 130：末块回退路径返回 `130//32*32 - 32 = 96`；`L=2` 的 lookahead 路径
+返回 `(130-2)//32*32 = 128`，多保留了一个对齐单位的可复用前缀。此为纯函数的源码算例，
+不是 GPU 运行结果。
+
+#61589 之前，EAGLE 类方法只有末块回退这一条路；v0.33.0 在没有 KV connector、没有设置
+`disable_lookahead_block_hashes` 时改用 5.12.4 的 lookahead 哈希，因此上面第二个分支成了
+EAGLE 的默认路径，第一个分支只在配置了 KV connector 或显式关闭 lookahead 哈希时使用。
+`replay_boundaries` 也随之使用 `drop_eagle_group_ids`（lookahead 哈希下为空）来决定是否
+按 EAGLE 计算可达边界。
+
+v0.33.0 还修了两处与 prefix 交汇相关的边界：
+
+- 共享前缀交汇点（`shared_prefix_boundary`）处，如果该 manager 属于 EAGLE 回退的 group，
+  兄弟请求越过交汇点的那个 block 不能当作 EAGLE 的“下一块 peek”，命中会落在低一个 block；
+  在稀疏保留策略下（只保留可达边界处的窗口尾部），`cache_blocks` 因此把
+  `shared_prefix_boundary - block_size` 也加入可达边界，避免 Sliding Window 把这段尾部当成不可达而丢掉（#62206，
+  `test_swa_shared_prefix_reuse_under_zero_retention`）；
+- Mamba 的 prompt 尾部 checkpoint 如果已经带着当前 token 数对应的 hash（命中或更早的
+  step 已登记过），不再重复登记，否则会把它标成“本 step 刚缓存”，导致所有命中它的兄弟
+  请求被推迟一步（#62841，`MambaManager._cache_partial_tail_block` 里对 `block_hash_num_tokens` 的检查）。
+
+另外，`MambaManager` 现在直接断言 `mamba_cache_mode == "align"` 或未启用缓存：
+`"all"` 模式的残留代码已在 #60043 中删除，`MambaCacheMode` 只剩 `align` 与 `none`。
 
 HiSparse host tier 有私有 pool：命中可能比设备 group 更长，分配时只附着本地与外部命中
 实际覆盖的部分。host CoW 不进入普通 worker GPU block-copy 通道，不能画成所有 group
@@ -1249,6 +1470,10 @@ HiSparse host tier 有私有 pool：命中可能比设备 group 更长，分配�
 [源码] `vllm/v1/engine/core.py` - `EngineCore._initialize_kv_caches`
 
 [源码] `vllm/v1/kv_cache_interface.py` - `get_mamba_prefill_checkpoint_position`
+
+[源码] `vllm/v1/core/single_type_kv_cache_manager.py` - `SingleTypeKVCacheManager.cache_blocks`、`MambaManager.__init__`
+
+[源码] `vllm/config/cache.py` - `MambaCacheMode`
 
 [测试] `tests/v1/core/prefix_cache/test_partial_prefix_cache_hits.py` -
 `test_resolved_cache_hit_alignment_matches_coordinator`
@@ -1295,6 +1520,57 @@ Sliding Window 的最大持有量还要考虑：
 - 窗口起点不对齐时额外一个 block。
 
 所以不能简单写成 `ceil(window / block_size)`。
+
+其中第 1 项与第 3 项合起来，就是 v0.33.0 给 `SlidingWindowSpec` 新增的属性
+`num_retained_tokens = sliding_window - 1 + extra_retained_tokens`：它表示“请求本步第一个
+被调度位置”以下，仍必须保持可读的 token 数。`extra_retained_tokens` 由
+`get_global_kv_cache_groups` 按 `max(0, num_prefill_lookahead_tokens - 1)` 统一写入每个
+Sliding Window spec。
+
+### 5.16.1 Worker 侧：窗口以下的整块在 block table 里改写为 null
+
+Manager 释放窗口外的页以后，这些页可能很快被别的请求复用；但 attention kernel 加载 KV tile
+时，tile 可能跨过窗口起点，把窗口左侧已被复用的页也读进来，被 mask 掉的位置如果恰好是
+NaN，仍会污染输出。#60767 在 MRV2 的 `BlockTables.gather_block_tables` 里补了一道保险：
+给每个 Sliding Window group，把“本步第一个被调度位置”窗口左侧的整块 entry 换成 null block：
+
+$$
+n_{\mathrm{null}}=\left\lfloor\frac{\max(p-R,\,0)}{T}\right\rfloor
+$$
+
+其中：
+
+- `n_null` 是 forward 用的 block table 里，从行首起要改写成 null 的 entry 个数；
+- `p` 是该请求本步第一个被调度 token 的位置，即 `num_computed_tokens`；
+- `R` 是 `SlidingWindowSpec.num_retained_tokens`，窗口左侧仍须保持可读的 token 数；
+- `T` 是该 group 的 block size（token 数）；
+- 向下取整保证只改写**完全**落在 `p-R` 以下的整块。
+
+白话：窗口再往左的整块页，后面的 kernel 一定不需要，就别再让它们指向可能已被复用的物理页，
+统一指到 null。算例：窗口 128、无额外保留（`R=127`），`T=16`，`p=300`：
+`(300-127)//16 = 10`，前 10 个 entry（覆盖 token 0–159，都在 173 以下）被置为 null。
+这是对源码规则的手算，不是 GPU 运行结果。Context parallel（`cp_size>1`）时 block table 的列
+不再对应连续的 token 区间，这道保险被关闭。
+
+```mermaid
+flowchart LR
+    M[Manager: remove_skipped_blocks 释放窗口外页] --> RU[页进入 free queue，可能被复用]
+    RU -. 与此同时 .-> TB[Worker 持久 block table 仍含旧 block ID]
+    TB --> G[gather_block_tables]
+    P[p = num_computed_tokens] --> G
+    R2[R = num_retained_tokens] --> G
+    G -->|前 n_null 个 entry| NULL[改写为 null block]
+    NULL --> K[attention kernel 只会读到 null 或窗口内页]
+```
+
+> **读图方法：** 这是“Worker 侧：窗口以下的整块在 block table 里改写为 null”的流程图。左边两个框说明为什么需要这道保险（页可能已被复用），中间是 `gather_block_tables` 的两个输入，右边是输出；虚线只表示“同时存在”的关系，不是函数调用。
+
+[源码] `vllm/v1/kv_cache_interface.py` - `SlidingWindowSpec.num_retained_tokens`
+
+[源码] `vllm/v1/worker/gpu/block_table.py` - `BlockTables.gather_block_tables`
+
+[测试] `tests/v1/worker/test_gpu_block_table.py` -
+`test_gather_block_tables_nulls_blocks_below_sliding_window`（需要 CUDA 设备，本机未运行）
 
 ## 5.17 外部 KV、P/D 与延迟缓存
 
@@ -1642,12 +1918,22 @@ block 被 append 到 free queue、但未调用 `_remove_cached_block_hashes()` �
 - `vllm/v1/worker/gpu_worker.py`
   - `Worker.determine_available_memory`
   - `Worker.initialize_from_config`
-- `vllm/v1/core/kv_cache_utils.py`
+- `vllm/v1/core/kv_cache_planning.py`
+  - `get_global_kv_cache_groups`
   - `get_kv_cache_groups`
   - `check_enough_kv_cache_memory`
   - `get_kv_cache_config_from_groups`
   - `get_kv_cache_configs`
+  - `DefaultKVCacheConfigBuilder`
+- `vllm/v1/core/kv_cache_config_builder.py`
+  - `KVCacheConfigBuilder`
+  - `get_kv_cache_config_builder`
+- `vllm/v1/core/kv_cache_utils.py`
+  - `KVCacheBlock`
+  - `FreeKVCacheBlockQueue`
+  - `trim_null_head`
   - `get_request_block_hasher`
+  - `generate_lookahead_block_hash_extra_keys`
   - `partial_hash_hits_enabled`
   - `resolve_cache_hit_alignment_tokens`
 
@@ -1720,6 +2006,10 @@ KV Cache 管理的核心不是“保存一个 tensor”，而是维护动态服�
 2026-10-19 的 v0.32.0 静态复核与 CPU 教学测试记录见
 [升级核对](../../meta/upgrade-v0.32.0-2026-10-19/05-kv-cache.md)；重点是对齐容量、
 checkpoint 可恢复边界以及按 group 防止异步写入与清零竞争。
+2026-11-10 对 v0.33.0（`4ba787ec9959`）的静态复核见
+[v0.33.0 升级核对](../../meta/upgrade-v0.33.0-2026-11-10/05-kv-cache.md)；重点是规划模块
+迁到 `kv_cache_planning.py`、启动流程里全局分组前移、EAGLE lookahead 哈希，以及
+Sliding Window 的 null 头部处理。
 
 本章正文、图示、教学模型和 CPU 测试已经完成，`content_complete=true`。当前机器没有可用
 的 vLLM NVIDIA GPU runtime，无法核对真实显存 profiling、GPU copy 和 attention 执行，
