@@ -17,6 +17,7 @@ class KVCapacityTest(unittest.TestCase):
         )
         self.assertEqual(per_token, 128 * 1024)
         self.assertEqual(block_bytes(per_token, 16), 2 * 1024 * 1024)
+        self.assertEqual(block_bytes(per_token, 64), 8 * 1024 * 1024)
         self.assertEqual(per_token * 8192, 1024**3)
 
     def test_tp_splits_kv_heads_in_teaching_formula(self):
