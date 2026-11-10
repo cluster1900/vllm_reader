@@ -6,7 +6,7 @@ source_path: ../vllm
 source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
 source_branch: v0.33.0
 source_dirty: false
-verified_at: 2026-10-19
+verified_at: 2026-11-10
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -307,12 +307,42 @@ data: [DONE]
 
 模型和 EngineCore 都不负责 JSON 序列化。
 
+v0.33.0 把第 2 层再拆成两段：`chat_completion_stream_generator_raw()`
+（`vllm/entrypoints/openai/chat_completion/serving.py:509`）只负责读 `RequestOutput`、
+交给 reasoning/tool 解析（每个 choice 一个 `ChatStreamProcessor`），产出 `ChatCompletionStreamResponse`
+或 `ErrorResponse` **对象**，不碰 SSE 文本；外层的 `chat_completion_stream_generator()`（`:472`）
+再把每个对象 `model_dump_json()` 成 `data: ...\n\n`，序列化出错时输出一条错误 chunk，
+最后无论成败都补 `data: [DONE]`。Cohere 与 Anthropic 端点复用同一个 raw 生成器、自行序列化，
+所以它们的流式错误现在能保留各自的格式（[5be4266f5](https://github.com/vllm-project/vllm/commit/5be4266f5)，
+[#61947](https://github.com/vllm-project/vllm/pull/61947)）。非流式的
+`chat_completion_full_generator()`（`:955`）也不再自己写 tool-choice 分支，而是调用
+`assemble_chat_message_fields()`（`vllm/entrypoints/openai/chat_completion/message_assembly.py:26`），
+与流式、批量 derender 共用同一套组装规则（[e879223b5](https://github.com/vllm-project/vllm/commit/e879223b5)，
+[#63148](https://github.com/vllm-project/vllm/pull/63148)；
+[5ea2c7ff1](https://github.com/vllm-project/vllm/commit/5ea2c7ff1)，
+[#62706](https://github.com/vllm-project/vllm/pull/62706)）。
+
+```mermaid
+flowchart LR
+    GEN["AsyncLLM.generate: RequestOutput 流"] --> RAW["chat_completion_stream_generator_raw: reasoning/tool 解析, 产出 ChatCompletionStreamResponse 或 ErrorResponse"]
+    RAW --> SER["chat_completion_stream_generator: model_dump_json 并加 data: 前缀"]
+    SER --> SSE["SSE: data: JSON 若干条, 最后 data: [DONE]"]
+    RAW -.-> OTH["Cohere / Anthropic 端点: 自行序列化同一个对象流"]
+    FULL["chat_completion_full_generator"] --> ASM["assemble_chat_message_fields: 非流式消息字段"]
+```
+
+> **读图方法：** 这是 chat 流式输出两段式结构的流程图。先沿实线从左到右看一条 SSE 如何由 `RequestOutput` 变成 `data:` 帧；虚线表示其他协议端点复用 raw 生成器，下方一条独立链路是非流式路径使用的消息组装函数。
+
+[源码] `vllm/entrypoints/openai/chat_completion/serving.py` -
+`OpenAIServingChat.chat_completion_stream_generator`、`chat_completion_stream_generator_raw`、
+`chat_completion_full_generator`
+
 [源码] `vllm/entrypoints/openai/chat_completion/serving.py` -
 `OpenAIServingChat._create_chat_completion`、`chat_completion_stream_generator`
 
 [源码] `vllm/v1/engine/async_llm.py` - `AsyncLLM.generate`
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-28～10-29（0106c8abc..36d4ef654）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-29.md。
+> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；以下为 vLLM main 2026-10-28～10-29（0106c8abc..36d4ef654）的变化，经 `git merge-base --is-ancestor` 核对**不在** v0.33.0 祖先链中，留待下一波次复核。详见 meta/main-tracking-2026-10-29.md。
 > - [9fc019a749](https://github.com/vllm-project/vllm/commit/9fc019a749cbf3235cc06aa5357b17fd37cb648a)（[#64097](https://github.com/vllm-project/vllm/pull/64097)）：`run_batch` 支持 `/v1/completions`（`entrypoints/launchers/run_batch.py` L182–L197、L828–L829 @ `36d4ef654`），不再仅限 chat completions。
 > - [f60edccd00](https://github.com/vllm-project/vllm/commit/f60edccd0079428503f9e9f66e3b651aa4da73db)（[#64177](https://github.com/vllm-project/vllm/pull/64177)）：chat completions 序列化省略 null 的 `annotations` 与 `usage.prompt_tokens_details`（`exclude_none`）。
 > - main 2026-10-29～10-30：[5c1939140](https://github.com/vllm-project/vllm/commit/5c19391400c58ae10feca2483f55c547df211715)（[#63896](https://github.com/vllm-project/vllm/pull/63896)）：`ResponsesRequest.thinking_token_budget` 写入 `SamplingParams`（`vllm/entrypoints/openai/responses/protocol.py` L452、L650 @ `2eae56c4b`），与 chat completions 对齐。Rust frontend 仍不服务 `/v1/responses`。
@@ -381,9 +411,35 @@ render_prompts
 `render_chat()` 多一步 `render_messages()`，先把 role、content、tools 等消息结构变成
 模型可读的 prompt。
 
+v0.33.0 在在线 Renderer 里有三处会改变 chat prompt 的行为：
+
+- `--reasoning-effort-map`（JSON 对象）会被传入 `OnlineRenderer(reasoning_effort_map=…)`
+  （`vllm/renderers/online_renderer.py:177`）。`render_chat` 构造 chat params 时先把请求里的
+  `reasoning_effort` 按映射改写再交给 chat template（`build_chat_params(..., reasoning_effort_map)`，
+  `:228`），Harmony 路径用同一个 `map_reasoning_effort()`（`vllm/renderers/params.py:53`）。
+  它只改写 effort 字符串，不增加新的 effort 取值
+  （[41d9d1e14](https://github.com/vllm-project/vllm/commit/41d9d1e14)，
+  [#61094](https://github.com/vllm-project/vllm/pull/61094)）。
+- `tool_strict_level` 的构造默认值从 `"auto"` 改为 `None`，未设置时回落到 tool parser 自己的默认值
+  （[8fa5ae844](https://github.com/vllm-project/vllm/commit/8fa5ae844)，
+  [#61328](https://github.com/vllm-project/vllm/pull/61328)）。
+- 需要把 prompt 文本带回响应（例如 echo，`params.needs_detokenization`）时，
+  `BaseRenderer._tokenize_singleton_prompt` 先应用截断（`apply_post_tokenization`），再把截断后的 token
+  反解为文本，保证返回文本与真正送进引擎的 token 一致
+  （[d74f4180c](https://github.com/vllm-project/vllm/commit/d74f4180c)，
+  [#61876](https://github.com/vllm-project/vllm/pull/61876)）。
+
+渲染阶段的客户端错误也统一了类型：空 prompt、`multi_modal_uuids` 缺项或长度不符、
+`prompt_embeds` 开关/形状错误，原先抛 `ValueError`，现在抛带 `parameter` 字段的
+`VLLMValidationError`（[1cc332ee8](https://github.com/vllm-project/vllm/commit/1cc332ee8)，
+[#62738](https://github.com/vllm-project/vllm/pull/62738)），因此会和 `InputProcessor` 的校验错误一样
+被 `AsyncLLM` 当作客户端错误（见 2.14）。
+
 [源码] `vllm/renderers/base.py` - `BaseRenderer.render_cmpl`、`render_chat`
 
 [源码] `vllm/renderers/online_renderer.py` - `OnlineRenderer.render_chat`
+
+[源码] `vllm/renderers/base.py` - `BaseRenderer.validate_token_ids`
 
 ### InputProcessor：从 `EngineInput` 到 `EngineCoreRequest`
 
@@ -393,7 +449,10 @@ render_prompts
 2. 校验 LoRA 与 data-parallel rank。
 3. 必要时兼容旧的 raw prompt 路径。
 4. 拆分 encoder/decoder input。
-5. 检查 prompt 长度、token ID 范围和平台限制。
+5. 检查 prompt 长度、token ID 范围和平台限制。token ID 范围由 `BaseRenderer.validate_token_ids()` 判定；
+   v0.33.0 起即使 `skip_tokenizer_init=True`（没有 tokenizer）也会按模型词表大小检查，不再整段跳过
+   （[47e2b610b](https://github.com/vllm-project/vllm/commit/47e2b610b)，
+   [#62911](https://github.com/vllm-project/vllm/pull/62911)）。
 6. clone 并补全 request-local 参数，例如默认 `max_tokens` 和 EOS；默认最大输出长度
    按 `max_model_len - prompt_len` 得到后，还要检查 `min_tokens` 是否超过这一余量。
 7. 整理多模态 feature。
@@ -514,7 +573,11 @@ API Server 场景中输出回到提交请求的 client。
 - internal load balancer 路径使用 `DPLBAsyncMPClient`。
 
 它们改变路由和 EngineCore 数量，不改变“前端通过 client 提交
-`EngineCoreRequest`、接收 `EngineCoreOutputs`”这一基本契约。
+`EngineCoreRequest`、接收 `EngineCoreOutputs`”这一基本契约。v0.33.0 还把 DP wave 的唤醒权交给引擎：
+前端不再发送 `FIRST_REQ`，`DPEngineCoreProc.add_request()` 在引擎空闲且未暂停时自己置 `engines_running`，
+并经 coordinator 通知其他 rank 开始新一轮 wave
+（[a94c31571](https://github.com/vllm-project/vllm/commit/a94c31571)，
+[#59559](https://github.com/vllm-project/vllm/pull/59559)）。
 
 [源码] `vllm/v1/engine/core_client.py` - `EngineCoreClient.make_client`、
 `make_async_mp_client`、`InprocClient`、`AsyncMPClient`
@@ -667,6 +730,22 @@ structured-output grammar 初始化。把它放在 input thread，可以与 GPU 
 这也说明 input thread 不只是“搬运 socket 字节”，它承担一部分可并行的 request
 初始化。但真正改变 Scheduler 队列仍发生在 busy loop，避免多个线程任意修改核心
 状态。
+
+input thread 里的初始化也可能失败。v0.33.0 起，`preprocess_add_request()` 抛出
+`VLLMValidationError`（目前用于“请求使用的 structured-output backend 与引擎已锁定的不同”）时，
+线程调用 `_handle_request_validation_error()`（`vllm/v1/engine/core.py:2170`）：不让该请求进入 Scheduler，
+而是回送一个 `finish_reason=ERROR`、`RequestError(code="validation_error")` 的输出，前端据此抛回客户端错误
+（[88077b746](https://github.com/vllm-project/vllm/commit/88077b746)，
+[#49625](https://github.com/vllm-project/vllm/pull/49625)）。其它异常仍走原来的
+`_handle_request_preproc_error()`。
+
+多模态缓存失配也在这条链路上：EngineCore 发现 receiver cache 缺项时，输出会带 `mm_cache_miss_hashes`。
+v0.33.0 的 `AsyncLLM` 输出循环在调用 `process_outputs()` **之前**，先通过
+`renderer.queue_mm_cache_invalidations()`（`vllm/v1/engine/async_llm.py:902`）把这些 hash 排进渲染器的待失效集合；
+下一次渲染在查缓存前由 `_drain_mm_cache_invalidations()` 统一清掉（`vllm/renderers/base.py:397`、`:408`）。
+这样排队中的渲染也不会在客户端重试前再次命中已失效的 sender cache
+（[70806b631](https://github.com/vllm-project/vllm/commit/70806b631)，
+[#62164](https://github.com/vllm-project/vllm/pull/62164)）。
 
 [源码] `vllm/v1/engine/core.py` - `EngineCore.preprocess_add_request`、
 `EngineCoreProc.process_input_sockets`、`_handle_client_request`
@@ -855,6 +934,42 @@ EngineCore 返回 token ID 后，前端还要完成多项工作：
 8. 若 stop string 由前端发现而 EngineCore 尚未完成，把 request ID 放入
    `reqs_to_abort`，通知后端清理。
 
+**v0.33.0 新增的两个分支。** `OutputProcessor.process_outputs()` 在做上面 2～8 步之前，
+先看 `EngineCoreOutput.error`（`vllm/v1/engine/output_processor.py:764`）：若带错误且请求有 collector，
+说明请求在**到达 EngineCore 时就被拒绝**（例如引擎暂停，见 2.14），模型一个 token 都没跑过；
+此时直接把 `error.to_exception()` 放进 collector 并 `_finish_request()`，不再统计、detokenize。
+第二个分支是流式输入（streaming input）会话：一个会话由多个输入 chunk 组成，每个 chunk 结束时
+`finish_reason` 非空但会话并未结束。`streaming_chunk_boundary`（`:844`）只在 `finish_reason` 不是
+`ABORT`/`ERROR` 时为真，它让该输出的 `finished` 保持 `False`，并切换到下一个 chunk；
+遇到 `ABORT`/`ERROR` 则当作终态，清理并通知 EngineCore，防止“僵尸会话”
+（[146350155](https://github.com/vllm-project/vllm/commit/146350155)，
+[#58942](https://github.com/vllm-project/vllm/pull/58942)）。
+
+```mermaid
+flowchart TD
+    IN["一条 EngineCoreOutput"] --> FIND{"前端 RequestState 还在吗?"}
+    FIND -->|"否: 已 abort"| SKIP["忽略该输出"]
+    FIND -->|"是"| ERR{"output.error 非空且有 collector?"}
+    ERR -->|"是: 到达即被拒绝"| REJ["collector.put(error.to_exception()); _finish_request"]
+    REJ --> SI1{"流式输入会话?"}
+    SI1 -->|"是"| AB1["加入 reqs_to_abort, 防止后续输入 chunk 重建会话"]
+    ERR -->|"否"| NORM["统计 -> detokenize -> stop string -> logprobs"]
+    NORM --> MK["make_request_output -> collector.put"]
+    MK --> FIN{"finish_reason 非空?"}
+    FIN -->|"否"| NEXT["等待下一个 token"]
+    FIN -->|"是"| SI2{"streaming_chunk_boundary?"}
+    SI2 -->|"是: 流式输入且不是 ABORT/ERROR"| CHUNK["finished 置 False, 切换到下一个输入 chunk"]
+    SI2 -->|"否"| DONE["_finish_request; 流式输入或后端未结束时加入 reqs_to_abort"]
+```
+
+> **读图方法：** 这是 `process_outputs` 对单条输出的分支图。先从上往下看三道关卡：状态是否存在、是否带错误、是否结束；右侧两个叶子（拒绝清理、正常结束）都会释放前端状态，而“切换到下一个输入 chunk”是唯一不释放状态的结束分支。
+
+其他实现细节：`n>1` 的并行采样里，每个 child 结束时会从 parent 的 `child_requests` 集合中移除自己
+（`:929`），最后一个 child 结束才释放 parent；池化（pooling）输出的构造被提到
+`stream_interval` 逻辑之前，使 pooling 请求不再受 token stream interval 影响
+（[f0c50148a](https://github.com/vllm-project/vllm/commit/f0c50148a)，
+[#55226](https://github.com/vllm-project/vllm/pull/55226)）。
+
 ### 离线输出
 
 离线 `LLMEngine.step()` 调用 `engine_core.get_output()`，然后
@@ -877,11 +992,19 @@ await EngineCoreClient.get_output_async()
 下 producer 比 consumer 快时，后续 delta 会合并到已有 `RequestOutput`，减少积压，且
 保留 `n > 1` 的不同 choice index。
 
-[源码] `vllm/v1/engine/output_processor.py` - `RequestOutputCollector`、
-`OutputProcessor.process_outputs`
+流式输入请求改用子类 `StreamingInputOutputCollector`（`vllm/v1/engine/output_processor.py:128`）：
+当前 slot 里已经是“chunk 结束”输出（`_is_chunk_boundary`，`:116`：`finish_reason` 非空而请求未结束）时，
+后到的输出不再合并进去，而是进入 `_backlog` 队列，`get()` 取走一条后再把队首补进 slot。
+这样一个 chunk 的结束事件不会被下一个 chunk 的 delta 吞掉；收到异常则清空 backlog
+（[957d512e9](https://github.com/vllm-project/vllm/commit/957d512e9)，
+[#58941](https://github.com/vllm-project/vllm/pull/58941)）。
 
-[测试] `tests/v1/engine/test_output_processor.py` - collector merge 与
-`test_abort_requests`
+[源码] `vllm/v1/engine/output_processor.py` - `RequestOutputCollector`、
+`StreamingInputOutputCollector`、`OutputProcessor.process_outputs`
+
+[测试] `tests/v1/engine/test_output_processor.py` - collector merge、`test_abort_requests`，以及 v0.33.0 新增的
+`test_streaming_input_collector_preserves_chunk_boundary`、`test_streaming_input_stop_is_chunk_boundary`、
+`test_streaming_input_abort_error_is_terminal`、`test_request_rejected_by_engine`
 
 ```mermaid
 sequenceDiagram
@@ -989,6 +1112,13 @@ while shutdown state allows running:
 若本 step 没有实际模型执行，但 Scheduler 仍在等待远端 KV 等后台工作，代码会短暂
 sleep 1ms，让后台 transfer thread 获得进展机会。
 
+v0.33.0 给 busy loop 加了看门狗：`EngineCoreProc.run_engine_core` 在进入 `run_busy_loop()` 前启动
+`start_watch_dog(f"engine_{dp_rank}", …)`（`vllm/v1/engine/core.py:1569`），每次
+`_process_engine_step()` 开头 `get_watch_dog().feed()`（`:1680`）；超时未喂时看门狗转储所有线程栈用于诊断。
+阻塞读取 `input_queue` 时包在 `get_watch_dog().disable()` 里（接口注释：暂停超时检测，例如阻塞等待空闲输入）
+（[1c8799197](https://github.com/vllm-project/vllm/commit/1c8799197)，
+[#55700](https://github.com/vllm-project/vllm/pull/55700)）。
+
 [源码] `vllm/v1/engine/core.py` - `EngineCoreProc.run_busy_loop`、
 `_process_input_queue`、`_process_engine_step`
 
@@ -1037,7 +1167,55 @@ AsyncLLM.abort(internal=True)
 token 级 EOS 可以由 EngineCore 处理，但任意字符串 stop 依赖增量 detokenize 后的文本。
 若 `OutputProcessor` 发现 stop string，而 `EngineCoreOutput.finished` 仍为 false，它先向
 用户产生完成输出，再把内部 ID 放进 `reqs_to_abort`，由 Engine client 通知 Scheduler
-清理剩余状态。
+清理剩余状态。v0.33.0 起，流式输入会话在前端终结时也会加入 `reqs_to_abort`：
+传输中的下一个输入 chunk 可能让 EngineCore 重建同一个会话，必须一并清掉。
+
+### 暂停期间到达的新请求会被拒绝
+
+`AsyncLLM.pause_generation(mode, clear_cache)` 用于权重更新等需要停住生成的场景。v0.32.0 里新请求在暂停期间
+只是不被调度；v0.33.0 区分了模式：`abort` 与 `wait` 模式下，EngineCore 在暂停开始到
+`resume_generation` 之间**拒绝**新请求，`keep` 模式仍然接收并排队。实现分三步：
+
+1. `AsyncLLM.pause_generation()` 现在调用 `engine_core.pause_generation_async()`（utility `pause_generation`），
+   `EngineCoreProc.pause_generation()`（`vllm/v1/engine/core.py:2225`）在原 `pause_scheduler` 之外设置
+   `reject_new_requests = (mode != "keep")`；`resume_scheduler()` 把它清回 `False`。睡眠等其他暂停不改这个标志。
+2. busy loop 处理 ADD 时先过 `_reject_add_while_paused()`（`:1796`）：已存在于 Scheduler 的会话输入、
+   `abort_immediately` 的 KV 清理标记不算新请求，放行；其余请求回送
+   `finish_reason=ERROR`、`RequestError(code="engine_paused", retryable=True)` 的输出，
+   带 `kv_transfer_params` 的请求还会以 `abort_immediately` 重新加入，让 KV connector 释放远端块。
+3. 前端 `process_outputs()` 的 error 分支（见 2.11）把它变成 `RetryableRequestError`
+   （`vllm/exceptions.py:139`，`status_code` 为 503）抛给调用方；`AsyncLLM` 把 `GenerationError` 与
+   `VLLMClientError` 归为同一类请求级失败，并对 `n>1` 的并行采样 `abort` 其余 child，避免一半请求被拒、
+   另一半继续跑（[d5b36699b](https://github.com/vllm-project/vllm/commit/d5b36699b)，
+   [#51488](https://github.com/vllm-project/vllm/pull/51488)）。
+
+```mermaid
+sequenceDiagram
+    participant U as 调用方(训练或运维)
+    participant A as AsyncLLM
+    participant EC as EngineCoreProc
+    participant OP as OutputProcessor
+    participant G as 新请求的 generate task
+    U->>A: pause_generation(mode)
+    A->>EC: utility pause_generation(mode, clear_cache)
+    Note over EC: abort 与 wait 模式 reject_new_requests=True，keep 模式为 False
+    G->>A: 新请求
+    A->>EC: ADD
+    EC->>EC: _reject_add_while_paused
+    EC-->>OP: EngineCoreOutput(finish_reason=ERROR, error=engine_paused)
+    OP-->>G: collector.put(RetryableRequestError)
+    U->>A: resume_generation
+    A->>EC: resume_scheduler 后 reject_new_requests=False
+```
+
+> **读图方法：** 这是暂停期间准入判定的时序图。先看上半段 `pause_generation` 如何在 EngineCore 里设置拒绝标志，再看中间新请求被 `_reject_add_while_paused` 拦下并以带错误的输出原路返回，最后一行表示恢复后标志清除、请求重新被接收。
+
+[源码] `vllm/v1/engine/core.py` - `EngineCoreProc.pause_generation`、`_reject_add_while_paused`
+
+[源码] `vllm/outputs.py` - `RequestError`
+
+[测试] `tests/v1/engine/test_async_llm.py` - `test_pause_admission_policy_per_mode`、
+`test_pause_mid_fanout_rejects_the_whole_request`、`test_retryable_request_error_reaches_caller`
 
 ### EngineCore 或 output handler 出错
 
@@ -1522,9 +1700,13 @@ OutputProcessor 生成用户完成输出，并把内部 ID 放入 `reqs_to_abort
   - `OpenAIServingChat.create_chat_completion`
   - `OpenAIServingChat._create_chat_completion`
   - `OpenAIServingChat.chat_completion_stream_generator`
+  - `OpenAIServingChat.chat_completion_stream_generator_raw`
+  - `OpenAIServingChat.chat_completion_full_generator`
 - `vllm/renderers/base.py`
   - `BaseRenderer.render_cmpl`
   - `BaseRenderer.render_chat`
+  - `BaseRenderer.validate_token_ids`
+  - `BaseRenderer.queue_mm_cache_invalidations`
 - `vllm/renderers/online_renderer.py`
   - `OnlineRenderer.render_chat`
 - `vllm/v1/engine/input_processor.py`
@@ -1550,8 +1732,11 @@ OutputProcessor 生成用户完成输出，并把内部 ID 放入 `reqs_to_abort
   - `EngineCoreProc.run_busy_loop`
   - `EngineCoreProc.process_input_sockets`
   - `EngineCoreProc.process_output_sockets`
+  - `EngineCoreProc.pause_generation`
+  - `EngineCoreProc._reject_add_while_paused`
 - `vllm/v1/engine/output_processor.py`
   - `RequestOutputCollector`
+  - `StreamingInputOutputCollector`
   - `OutputProcessor.process_outputs`
   - `OutputProcessor.abort_requests`
 - `vllm/v1/request.py`
