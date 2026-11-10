@@ -240,12 +240,10 @@ v0.33.0 又把 chat 适配器的“首事件”判定收紧：只有 `_choice_ha
 ```mermaid
 flowchart TD
     MSG["收到一条 SSE data 消息并解析 JSON"] --> USAGE["先调用 _update_server_metrics: 若带 metrics 则记录服务端耗时"]
-    USAGE --> CH{"choices 非空?"}
-    CH -->|"否"| UG{"带 usage?"}
-    UG -->|"是"| TOK["记录 completion_tokens 与 prompt_tokens, 不推进末时间戳"]
-    UG -->|"否"| IGN["忽略"]
-    CH -->|"是"| OUT{"delta 有 content/reasoning/tool_calls/function_call, 或 content 为空串且无 role?"}
-    OUT -->|"否: 例如只有 role 的开头消息"| IGN2["不计时"]
+    USAGE --> OUT{"choices 非空, 且 choices[0] 的 delta 有 content/reasoning/tool_calls/function_call, 或 content 为空串且无 role?"}
+    OUT -->|"否: 没有形成已流出输出的消息, 例如 usage-only 消息或只有 role 的开头消息"| UG{"带 usage?"}
+    UG -->|"是: 包括同时带 usage 的 role-only 消息"| TOK["记录 completion_tokens 与 prompt_tokens, 不推进末时间戳"]
+    UG -->|"否"| IGN["不计时"]
     OUT -->|"是"| FIRST{"这是第一个这样的消息?"}
     FIRST -->|"是"| TTFT["TTFT = 当前时间 - 发送时间"]
     FIRST -->|"否"| ITL["追加 ITL = 当前时间 - 上一次输出时间"]
@@ -253,7 +251,7 @@ flowchart TD
     ITL --> END
 ```
 
-> **读图方法：** 这是 chat 适配器处理每条流式消息的判定图。先沿“choices 非空 → 是否承载输出”两道门走，只有通过第二道门的消息才能产生 TTFT 或 ITL；左侧分支说明 usage-only 消息只记账 token 数，不改变任何计时。
+> **读图方法：** 这是 chat 适配器处理每条流式消息的判定图。先看第一道判定“这条消息是否形成已流出输出”，只有通过的消息才能产生 TTFT 或 ITL；没通过的消息一律走左侧分支，源码里这是 `if … elif usage` 的 `elif`（`endpoint_request_func.py:487`），所以只要带 usage 就记 token 数，不论 choices 是否为空，也不改变任何计时。
 
 此外，v0.33.0 不再对每个网络读到的字节块先 `strip()`：completion、chat、audio 三个适配器都直接把原始字节
 交给 `StreamedResponseHandler` 按 SSE 消息边界拼接，避免首尾空白在传输分块边界被吞掉
@@ -675,7 +673,7 @@ size 已经就绪。第 8 章说明 compile range 与 CUDA Graph descriptor 都�
 - container image 或依赖 lock；
 - power/clock policy 与同机干扰任务。
 
-> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；下面这条经 `git merge-base --is-ancestor` 核对**不在** v0.33.0 祖先链中，留待下一波次复核。[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：记录环境时须写明 `ParallelConfig.numa_bind`（`parallel.py` L329–L344 @ `0106c8abc`）。默认 `None` 为 best-effort 自动绑定（多 NUMA、`numactl`、spawn、mp/uni 等条件满足时软 memory preference）；显式 `True` 严格绑定（失败即启动错误），`False` 关闭。仅写“NUMA 拓扑”而不写该开关的取值，无法复现 Worker 子进程是否被绑核。详见 meta/main-tracking-2026-10-28.md。
+> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；下面这条**不包含在** v0.33.0 中，下一次升级基线时复核。[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：记录环境时须写明 `ParallelConfig.numa_bind`（`parallel.py` L329–L344 @ `0106c8abc`）。默认 `None` 为 best-effort 自动绑定（多 NUMA、`numactl`、spawn、mp/uni 等条件满足时软 memory preference）；显式 `True` 严格绑定（失败即启动错误），`False` 关闭。仅写“NUMA 拓扑”而不写该开关的取值，无法复现 Worker 子进程是否被绑核。详见 meta/main-tracking-2026-10-28.md。
 
 ### 10.10.2 固定 workload
 
@@ -1596,8 +1594,7 @@ run-2026-09-07T120000/
 ### 10.22.4 跨版本比较前先看口径变化清单
 
 把 v0.32.0 与 v0.33.0 的 benchmark 数字放在一起比较之前，先确认本章讲过的几处测量口径是否随版本变了，
-否则差异可能来自工具而不是引擎。下面五项都在 v0.33.0 祖先链里（逐提交 `git merge-base --is-ancestor`
-核对过），只涉及 `bench serve` 的测量与记录，不改变引擎行为：
+否则差异可能来自工具而不是引擎。下面五项都已包含在 v0.33.0 中，只涉及 `bench serve` 的测量与记录，不改变引擎行为：
 
 | 变化 | 影响哪类比较 | 正文位置 |
 |---|---|---|
@@ -1607,7 +1604,7 @@ run-2026-09-07T120000/
 | 结果里新增服务端 `server_queue_times`、`server_ttfts`（#55809） | 与客户端 TTFT 对账 | 10.11.5 |
 | cuBLAS handle 先于显存快照创建（#61044） | 可用 KV 显存、启动日志里的 profile 数 | 10.9.1 |
 
-本批同时整理了 v0.32.0→v0.33.0 的破坏性变更与弃用清单，每一项带 PR、提交和祖先关系：
+v0.32.0→v0.33.0 的破坏性变更与弃用清单（每一项附 PR 与提交）见：
 [meta/upgrade-v0.33.0-2026-11-10/breaking-changes.md](../../meta/upgrade-v0.33.0-2026-11-10/breaking-changes.md)。
 清单里与本章实验直接相关的是“暂停期间新请求返回 HTTP 503”：压测脚本若在 `pause_generation` 窗口内（`abort`、`wait` 模式）发请求，
 会得到 503 而不是排队等待，需要在报告里把这类失败与容量拒绝分开统计。

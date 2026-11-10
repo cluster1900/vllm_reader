@@ -444,7 +444,7 @@ UVA 不是所有数据都免拷贝的保证；须同时检查平台能力和 ten
 
 [源码] `vllm/v1/worker/gpu/buffer_utils.py` - `StagedWriteTensor.apply_write`、`FusedStagedWriter.apply`
 
-> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，经 `git merge-base --is-ancestor` 核对**不在** v0.33.0 祖先链中，留待下一波次复核。详见 meta/main-tracking-2026-10-27.md。
+> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，**不包含在** v0.33.0 中，下一次升级基线时复核。详见 meta/main-tracking-2026-10-27.md。
 > - [78e2f7960](https://github.com/vllm-project/vllm/commit/78e2f796019384b07c9f9b6d8a371e3ea958b33a)（[#63633](https://github.com/vllm-project/vllm/pull/63633)）：main 删除了写入内容的 `async_tensor_h2d` 分支。`StagedWriteTensor.apply_write` 与 `FusedStagedWriter.apply` 都用 `UvaBufferPool.copy_chunks_to_uva` 把暂存内容拼入轮转 UVA 缓冲，kernel 经 UVA 读取；上文“写入内容通过 H2D 复制到设备”“内容不总是单独 H2D”在 main 上应改为“内容与元数据都经 UVA 缓冲（无 UVA 时由 `NonUvaBuffer` 拷贝）”。
 
 [源码] `vllm/v1/worker/gpu/block_table.py` - `BlockTables.apply_staged_writes`、`gather_block_tables`
@@ -1057,8 +1057,8 @@ mapping。
 `AttentionBackend.supports_kv_cache_update_bypass`（默认 `False`，`vllm/v1/attention/backend.py:73`）
 声明 backend 的 forward 能否在 key/value 省略时运行；`Attention.kv_cache_update_bypass`
 （默认 `False`，`vllm/model_executor/layers/attention/attention.py:456`）由模型设置，表示“我已在调用 attention 之前把 KV
-写进 cache，随后以 `key=None` 调用”。`FlashAttentionBackend` 声明为 `True`
-（`vllm/v1/attention/backends/flash_attn.py:287`）；ROCm AITER FlashAttention 仅在未启用 shuffle KV 布局时为 `True`，
+写进 cache，随后以 `key=None` 调用”。v0.33.0 里声明为 `True` 的 backend 有：`FlashAttentionBackend`
+（`vllm/v1/attention/backends/flash_attn.py:287`）、`FlashInferBackend`（`vllm/v1/attention/backends/flashinfer.py:555`）；ROCm AITER FlashAttention 仅在未启用 shuffle KV 布局时为 `True`，
 因为外部写入者产出的是 packed 布局。这两个标志只对 `forward_includes_kv_cache_update=False` 的 backend 有意义，
 并且要看使用方怎样判定：Muse Spark 的融合 QK-norm+RoPE+KV 插入路径
 （`vllm/models/muse_spark/common/ops/fused_qk_norm_rope_kv.py`）只在 `decode_context_parallel_size<=1`、
@@ -1088,7 +1088,7 @@ backend `forward_includes_kv_cache_update=False` 且 `supports_kv_cache_update_b
 - sliding window、non-causal、sink、MLA、sparse、PCP/DCP 等能力；
 - cache spec/layout 偏好与组合校验。
 
-> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；以下为 vLLM main 2026-10-29～10-30（36d4ef654..2eae56c4b）的变化，经 `git merge-base --is-ancestor` 核对**不在** v0.33.0 祖先链中，留待下一波次复核。详见 meta/main-tracking-2026-10-30.md。
+> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；以下为 vLLM main 2026-10-29～10-30（36d4ef654..2eae56c4b）的变化，**不包含在** v0.33.0 中，下一次升级基线时复核。详见 meta/main-tracking-2026-10-30.md。
 > - [a6c3635e3](https://github.com/vllm-project/vllm/commit/a6c3635e3660f6343c14e2158c7ab44c62be88b9)（[#64064](https://github.com/vllm-project/vllm/pull/64064)）：新增 `AttentionBackend.supports_head_size_v`，默认要求 V=K（`vllm/v1/attention/backend.py` L109–L112）；`RocmAiterUnifiedAttentionBackend` 允许 `head_size_v <= head_size`（`rocm_aiter_unified_attn.py` L90–L94），从而 MiMo-V2.6 可用 ROCm AITER unified attention。`csrc/cache_kernels.cu` 新增 `reshape_and_cache_flash_kernel_asym`（L428），仅当 `v_head_size != head_size` 时由 `reshape_and_cache_flash` 使用（dispatch L993–L1014）；K/V 须共享 head stride / page stride / block geometry，对称 kernel 路径不变。
 
 ### 6.14.2 `AttentionMetadataBuilder`
@@ -1627,10 +1627,8 @@ prefix cache 生命周期、CUDA 并行、online softmax、DCP、graph capture �
 - feature 约束可让所有候选无效。
 
 上游 `tests/v1/worker/test_gpu_block_table.py` 固定了 fused multi-group writes 原样保留
-manager IDs、DCP local slot、vacated row 清零和 dummy table 地址稳定性；v0.33.0 新增的用例还固定了
-多块 staged write（`test_block_tables_fused_write_spans_multiple_chunks`）、滑窗窗口外表项置 null
-（`test_gather_block_tables_nulls_blocks_below_sliding_window`）与共享缓冲旧行清零
-（`test_shared_block_tables_clear_rows_from_larger_batch`、`test_external_block_table_output_preserves_shared_rows`）。
+manager IDs、DCP local slot、vacated row 清零和 dummy table 地址稳定性；v0.33.0 新增的用例分别在
+6.6.3（共享缓冲旧行清零）、6.6.4（滑窗窗口外表项置 null）与 6.6.5（多块 staged write）里给出测试名。
 DCP 用例已更名为 `test_dcp_slot_mapping_only_shards_sharded_groups`；它验证仅
 `dcp_sharded=True` 的组转换为 local position，不再验证持久表展开。这些是 GPU 测试，本地无
 CUDA 环境没有执行。
