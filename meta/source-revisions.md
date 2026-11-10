@@ -86,13 +86,16 @@
 ## 阅读基线 004：v0.33.0（2026-11-10 B0 钉扎）
 
 - Repository: `vllm-project/vllm`
-- Tag: `v0.33.0`（annotated tag 解引用 commit；GitHub Release 条目的 `tag_name` 为 `v0.33.0rc3`，指向同一 commit）
+- Tag: `v0.33.0`（annotated tag 解引用 commit；tagger date **2026-11-01** 09:21:10 UTC；GitHub Release 名为「v0.33.0」的条目 `tag_name` 为 `v0.33.0rc3`，指向同一 commit，published 2026-11-02）
 - Commit: `4ba787ec9959e566d3b587a796dff07673324da5`
 - 前一基线：`5df63a7203cdb9328d824a27b682e77c7b9928be`（v0.32.0 / 基线 003）；旧记录、旧实验输出与 `meta/main-tracking-*.md` 注记原样保留。
-- Reader base：本 B0 PR 合入前的 `main`；本批只更新 README / source-revisions / chapter-source-map / 十章 `source_commit`+`source_branch`，**不改写章节正文**。
+- Reader base：本 B0 PR 合入前的 `main`；本批钉扎 README / source-revisions / chapter-source-map / 十章 `source_commit`+`source_branch`，并把 check_book 的 6 处 map 失败改到 v0.33.0 实址（见下）；**不改写章节正文**（十章 `verified_at` 仍为 2026-10-19）。
 - 获取方式：同级 `../vllm` 以 detached HEAD 检出上述 commit（由 annotated tag `v0.33.0` 解引用核对）。
 - Python 要求仍为 `>=3.11,<3.15`（`pyproject.toml` `requires-python`）。
-- 正文落注记与符号/路径修复按 bot-hub #127 分批 B1–B5（v0.33.0 范围内）与 B6–B9（追 main）；本基线条目不宣称十章已完成静态语义升级。
-- `python3 scripts/check_book.py` 在钉扎后对 `4ba787ec…` 尚有 6 处 source-map 失败（见 B0 PR）：`kv_cache_utils` 中 4 个函数迁至 `kv_cache_planning.py`、`async_scheduler._update_request_with_output` 迁至 `scheduler.py`、`ray_executor.py` 删除（现为 `ray_executor_v2.py`）。B0 不改 map 符号列表与正文，留给对应批次。
+- B0 map 再绑定（仅 JSON/md，正文留给后续批）：
+  - ch05：`check_enough_kv_cache_memory` / `get_kv_cache_config_from_groups` / `get_kv_cache_groups` / `get_kv_cache_configs` → `vllm/v1/core/kv_cache_planning.py`（正文仍提旧路径 → **B1**）
+  - ch08：`_update_request_with_output` → `vllm/v1/core/sched/scheduler.py`（**属 ch08，正文批 B2**，不是 B4/ch04）
+  - ch09：删除 `ray_executor.py` / `RayDistributedExecutor` 条目（类已不存在；既有 `ray_executor_v2.py` / `RayExecutorV2` 覆盖 → 正文 **B3**）
+- 正文落注记按 bot-hub #127：波次 1 仅落 **v0.33.0 ancestry** 内变更；非 ancestry 注记推迟波次 2（B6–B9）。
 - 章节继续 `draft` / `runtime_verified: false`。
 

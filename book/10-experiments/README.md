@@ -6,7 +6,7 @@ source_path: ../vllm
 source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
 source_branch: v0.33.0
 source_dirty: false
-verified_at: 2026-11-10
+verified_at: 2026-10-19
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"

@@ -27,9 +27,8 @@ jobs:
             echo "source_commit must be a 40-char SHA" >&2
             exit 1
           fi
-          # check_book.py resolves meta/chapter-source-map.json source_path ../vllm
-          # relative to the reader repo root. actions/checkout cannot place a repo
-          # outside GITHUB_WORKSPACE, so clone the sibling with git.
+          # check_book.py resolves source_path ../vllm relative to reader root.
+          # actions/checkout cannot place a repo outside GITHUB_WORKSPACE, so clone sibling via git.
           DEST="${GITHUB_WORKSPACE}/../vllm"
           rm -rf "${DEST}"
           mkdir -p "${DEST}"
@@ -42,8 +41,11 @@ jobs:
           test "${ACTUAL}" = "${PIN}"
           test -f "${DEST}/vllm/__init__.py"
 
-      - name: check_book.py
-        run: python3 scripts/check_book.py
-
       - name: unit tests
         run: python3 -m unittest discover -s tests
+
+      - name: enrich_pedagogy --check
+        run: python3 scripts/enrich_pedagogy.py --check
+
+      - name: check_book.py
+        run: python3 scripts/check_book.py
