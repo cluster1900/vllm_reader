@@ -1986,6 +1986,7 @@ PagedAttention 的核心不是某个固定函数名，而是保持以下契约�
 [升级核对](../../meta/upgrade-v0.32.0-2026-10-19/06-paged-attention.md)；
 2026-11-10 对 v0.33.0（`4ba787ec`）的复核见
 [v0.33.0 升级核对](../../meta/upgrade-v0.33.0-2026-11-10/b5-ch01-02-06-10.md)。
+那是 v0.33.0 时代的核对；当前阅读基线是 `05caae03`（2026-11-10 重新钉扎）。
 
 本章正文、30 余幅源码流程/地址图、教学模型、实验说明和 15 个 CPU 测试已经完成，
 `content_complete=true`。当前机器没有可用的 vLLM NVIDIA GPU runtime，无法执行上游 CUDA

@@ -140,7 +140,14 @@
       {"path": "tests/v1/worker/test_gpu_worker.py", "symbols": ["Memory accounting of the profiling run"]},
       {"path": "tests/test_config.py", "symbols": ["def test_model_runner_supports_speculative_method", "def test_model_runner_supports_custom_logits_processors"]},
       {"path": "vllm/v1/worker/utils.py", "symbols": ["def request_memory", "class AttentionGroup"]},
-      {"path": "vllm/platforms/interface.py", "symbols": ["def validate_environ"]}
+      {"path": "vllm/platforms/interface.py", "symbols": ["def validate_environ"]},
+      {"path": "vllm/v1/worker/gpu/spec_decode/__init__.py", "symbols": ["def init_speculator"]},
+      {"path": "vllm/v1/worker/gpu/spec_decode/fly.py", "symbols": ["def compute_fly_entropy"]},
+      {"path": "vllm/v1/worker/gpu/spec_decode/xpress/speculator.py", "symbols": ["class XPressSpeculator", "def _generate_draft", "def _jacobi_refine"]},
+      {"path": "vllm/v1/worker/gpu/spec_decode/xpress/config.py", "symbols": ["class XPressSpeculatorConfig"]},
+      {"path": "vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py", "symbols": ["def rejection_sample"]},
+      {"path": "vllm/v1/worker/gpu/spec_decode/speculator_config.py", "symbols": ["def get_speculator_config_class"]},
+      {"path": "vllm/config/speculative.py", "symbols": ["rejection_sample_method", "fly_window_size", "fly_entropy_threshold", "fly_entropy_top_k"]}
     ],
     "08-compile-cuda-graph": [
       {"path": "vllm/envs.py", "symbols": ["VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"]},

@@ -433,7 +433,7 @@ sequenceDiagram
 `ExternalElasticEPScaleCoordinator`，`prepare_elastic_ep` / `commit_elastic_ep` /
 `abort_external_elastic_ep` / `get_external_elastic_ep_status` 经它完成（#43202）；被缩容淘汰的
 rank 通过 `set_elastic_ep_rank_retired(True)` 标记，之后 `AsyncLLM.check_health()` 直接返回，
-`should_keep_api_server_alive` 为真，等待外部进程关闭它。Elastic EP 的完整流程不在本章展开。
+`should_keep_api_server_alive` 为真，等待外部进程关闭它。Elastic EP 的完整流程不在本章展开，见 9.8.6。
 
 [源码] `vllm/v1/engine/core_client.py` - `DPAsyncMPClient`、`DPLBAsyncMPClient`
 
@@ -875,11 +875,13 @@ flowchart LR
 t=200 恢复喂狗后，下一次卡顿才会重新转储。`disable()` 期间后台线程把 `last_feed_time` 持续刷新到
 当前时刻，所以恢复后的计时窗口从零开始。
 
-[源码] `vllm/utils/watch_dog.py` - `ThreadedWatchDog`、`start_watch_dog`、`get_watch_dog`
+[源码] `vllm/utils/watch_dog.py` - `ThreadedWatchDog`、`start_watch_dog`、`get_watch_dog`（`:41`、`:152`、`:147` @ `05caae03`）
 
-[源码] `vllm/config/watchdog_config.py` - `WatchdogConfig`
+[源码] `vllm/config/watchdog_config.py` - `WatchdogConfig`（`:13`）
 
-[源码] `vllm/v1/engine/core.py` - `EngineCoreProc.run_engine_core`、`_process_engine_step`
+[源码] `vllm/v1/engine/core.py` - `EngineCoreProc.run_engine_core`、`_process_engine_step`（启动 `:1757`，feed `:1872`，disable `:1854`；SIGTERM 时 `handle_failure` `:1718`）
+
+[源码] `vllm/v1/executor/multiproc_executor.py` - `WorkerProc` 启动 watchdog（`:1081`）
 
 ## 3.11 Batch queue：把提交与结算拆开
 
@@ -1613,6 +1615,7 @@ Actor mixin 提供 Ray 生命周期、可见 GPU 和免握手覆盖；EngineCore
 
 2026-11-10 已对照 v0.33.0（`4ba787ec9959`）静态复核，修订清单见
 [v0.33.0 升级核对](../../meta/upgrade-v0.33.0-2026-11-10/03-engine-core.md)。
+那是 v0.33.0 时代的核对；当前阅读基线是 `05caae03`（2026-11-10 重新钉扎）。
 
 本章正文已经完整，`content_complete=true`。当前机器缺少可用 vLLM GPU runtime，
 因此 `runtime_verified=false`，按项目规则保持 `draft`。

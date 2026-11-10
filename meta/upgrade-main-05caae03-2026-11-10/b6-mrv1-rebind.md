@@ -5,7 +5,7 @@
 - 触发变更：`aac1b2a4f36e742c1f55bcb34ca9aaa5e6e02592`（#63373，`[Core] Remove Model Runner V1`，2026-11-07）是 `05caae03` 与 `v0.34.0rc0` 的祖先，**不在** v0.33.0 里。删除后 `vllm/v1/worker/gpu_model_runner.py` 及其整套（`block_table.py`、`v1/sample/sampler.py`、`cudagraph_dispatcher.py`、`cp_utils` 里的 MRV1 符号等）不复存在，`vllm/v1/worker/gpu/…` 的 `GPUModelRunner` 是唯一 Runner。
 - 删除之后的配置面（正文均已按此重写）：`VLLM_USE_V2_MODEL_RUNNER` 未设置 OK、值为 `1` 只 warning、其他值在 `Platform.validate_environ` 里 `ValueError`；`_validate_model_runner` / `_get_model_runner_unsupported_features` 只剩 external_launcher+`PP>1` 与 DBO 的组合；standalone CPU Runner 有自己的不支持清单；Worker 另有 Triton 检查。
 - 章节仍为 draft，`runtime_verified=false`；全部静态源码核对，没有跑 GPU。
-- 约定：各章里“main 上的变化（未发版）”小节和 7.32、8.26 的发布祖先表保留为 v0.33.0 时代的历史记录；只有与新正文**直接矛盾**的条目被合并或删除（#61464、#60960、#63778）。
+- 约定：7.32、8.26 的发布祖先表保留为 v0.33.0 时代的历史记录；各章里原“main 上的变化（未发版）”注记已在 r2 改写为“已包含在本书基线中，正文尚未展开（后续批次补写）”，不再使用“未发版”标签（详见第五节第 6 项）。只有与新正文**直接矛盾**的条目被合并或删除（#61464、#60960、#63778）。
 - 写法约定：已删除的文件在正文里用短写（如 `v1/sample/sampler.py`），避免被 `check_book` 当成指向缺失文件的源码路径；历史对照引用 `docs/design/model_runner_v2.md`，并标明是历史对照。
 
 ## 一、MRV1 删除带来的改绑（按章）
@@ -23,7 +23,7 @@
 
 ## 二、行号机械刷新
 
-先用 `git diff -U0 v0.33.0..05caae03` 的 hunk 把旧行号映射到新行号，只在“旧行与新行文本完全相同”时接受；其余全部人工重查。引用行与符号由 `check_book`（207 个源码锚点、1197 条显式引用）和符号校验脚本核对。
+先用 `git diff -U0 v0.33.0..05caae03` 的 hunk 把旧行号映射到新行号，只在“旧行与新行文本完全相同”时接受；其余全部人工重查。引用行与符号由 `check_book`（207 个源码锚点、1202 条显式引用）和符号校验脚本核对。
 
 ## 三、非 MRV1 的漂移修正（单列；只做最小改动）
 
@@ -46,15 +46,15 @@
 
 - ch08 §8.14 的 capture-size 配置拆分（`prefill_/decode_cudagraph_capture_*`）和 `_decode_descs` 请求数表只做了简短提示，没有展开重写；如要完整覆盖需另起一批。
 - MRV2 里没有对应 compile_sizes padding 校验，正文只写“已删除”，没有断言替代行为。
-- 7.32、8.26 的发布祖先表与“main 上的变化”注记保留 v0.33.0 时代口径，不是遗漏。
+- 7.32、8.26 的发布祖先表仍保留 v0.33.0 时代口径，不是遗漏。“main 上的变化”注记已在 r2 按第五节第 6 项改写，不再使用“未发版”标签。
 - 上游 `docs/` 里仍有 V1 历史叙述（含 `docs/design/model_runner_v2.md` 的 MRV1 对照），本批未据此改动；按规则不对外提交，仅记在 bot-hub。
-- B7（block_size=64、可扩展 KV）与 B8（XPress/FLy、Elastic EP、`/v1/decisions`、watchdog）内容未写；只在引用需要时点到。
+- B7（block_size=64、可扩展 KV）与 B8（XPress/FLy、Elastic EP、`/v1/decisions`、watchdog）在本批未写。其后：XPress/FLy 短节与 watchdog 行号重钉已写入（7.22.1、ch03 §3.10.4 / ch07 §7.4.3）；block_size=64 / Extensible KV、Elastic EP、`/v1/decisions` 由并行后续 PR 补写（#18、#17），合入前不要把「见 5.6.5 / 9.8.6」当成已在 main 上的小节。
 
 ## 五、r2（评审后修订）
 
 评审对 `308703bd` 提出 6 项必改与若干建议；修订前 `origin/main` 仍是 `c18e5124`，没有合并。
 
-1. **ch07 §7.9 / ch05 §5.6.1（#63778）**：Worker 只按平台（`is_cuda_alike()` / `is_xpu()`）和 `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` 决定要不要估算（`gpu_worker.py` L748–L760，估算判断在 L755–L760）；`cudagraph_mode` / `cudagraph_mm_encoder` 的判断已由 `GPUModelRunner.profile_cudagraph_memory()` 承担，开启 `enable_extensible_kv_cache` 时返回 0（`gpu/model_runner.py` L1129–L1136，仅按评审给出的条件记录，机制留给后续批次）；其后由 `cudagraph_utils.py::profile_cudagraph_memory`（L1010–L1014）和 `needs_cudagraph_capture()`（`gpu/model_runner.py` L1138–L1146）判断。删去 7.9 “未发版”注记里的 #63778 条目，并把 7.32、8.26 的“仍只以注记保留”清单里的 #63778 去掉。
+1. **ch07 §7.9 / ch05 §5.6.1（#63778）**：Worker 只按平台（`is_cuda_alike()` / `is_xpu()`）和 `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` 决定要不要估算（`gpu_worker.py` L747–L760，估算判断在 L755–L760）；`cudagraph_mode` / `cudagraph_mm_encoder` 的判断已由 `GPUModelRunner.profile_cudagraph_memory()` 承担，开启 `enable_extensible_kv_cache` 时返回 0（`gpu/model_runner.py` L1129–L1136，仅按评审给出的条件记录，机制留给后续批次）；其后由 `cudagraph_utils.py::profile_cudagraph_memory`（L1010–L1014）和 `needs_cudagraph_capture()`（`gpu/model_runner.py` L1138–L1146）判断。删去 7.9 “未发版”注记里的 #63778 条目，并把 7.32、8.26 的“仍只以注记保留”清单里的 #63778 去掉。
 2. **ch07 行号**：`initialize_from_config` 调用 L394 → L408；`get_simple_cpu_offload_num_blocks` L402 → L432（`vllm/v1/engine/core.py`）。
 3. **ch09 / ch10 章末基线说明**：原写“源码基线 4ba787ec / 已按 v0.33.0 静态复核”，改为 05caae03 基线，并如实说明引用与行号已复核、MRV1 删除已重绑，其余行为没有在 05caae03 上逐一重新核实。本批因此也有 ch09、ch10 的基线文字改动（此前误写为 ch10 只刷新行号）。
 4. **ch05 §5.15.5 / §5.12.4**：按 `VllmConfig._resolve_num_hash_lookahead_tokens`（`vllm/config/vllm.py:632-653`）与 connector 的 `supports_lookahead_block_hashes`（#64096，`75be138428`）重写；connector 清单补全为 Offloading、SimpleCPUOffload、NixlBase、Mooncake、MooncakeStore 直接返回真，`MultiConnector` 逐个询问子 connector；§5.12.4 标题与读图方法去掉“(v0.33.0)”。

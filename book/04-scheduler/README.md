@@ -2058,6 +2058,7 @@ Update 发现请求不存在或已 finished 后直接跳过，不能追加 token
 静态证据和本次 CPU 教学测试记录见 [升级核对](../../meta/upgrade-v0.32.0-2026-10-19/04-scheduler.md)。
 2026-11-10 已对照 v0.33.0（`4ba787ec9959`）静态复核，修订清单见
 [v0.33.0 升级核对](../../meta/upgrade-v0.33.0-2026-11-10/04-scheduler.md)。
+那是 v0.33.0 时代的核对；当前阅读基线是 `05caae03`（2026-11-10 重新钉扎）。
 
 本章正文已经完整，`content_complete=true`。当前机器缺少可用 vLLM GPU runtime，
 因此 `runtime_verified=false`，按项目规则保持 `draft`。

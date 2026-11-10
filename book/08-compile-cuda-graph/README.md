@@ -1656,14 +1656,13 @@ v0.33.0 在这条路径上有四处与旧正文相比的变化：
    `get_kv_cache_config_builder(vllm_config)`，再用 `get_kv_cache_groups_from_builder` 取 groups，最后
    `builder.get_kv_cache_config_from_groups(..., num_blocks=min_blocks)`（L1129）；旧版先临时改写
    `cache_config.num_gpu_blocks_override` 再恢复的做法已经删除。`min_blocks` 的取法没变。
-2. **什么时候需要 profile。** `profile_cudagraph_memory` 只在 `cudagraph_mode == NONE` 且
+2. **什么时候需要 profile。** 这里说的是 `cudagraph_utils.py` 里的 `profile_cudagraph_memory`：它只在 `cudagraph_mode == NONE` 且
    `runner.needs_cudagraph_capture()` 也为假时才直接返回 0；并且是否还有 graph 要捕获统一问
    `runner.needs_cudagraph_capture()`，而不只问 decoder 的 `manager.needs_capture()`。因此只开 encoder
-   graph 时也会得到估算（`7128f568a`，#58243）。
+   graph 时也会得到估算（`7128f568a`，#58243）。（Runner 上的同名方法还有开启 `enable_extensible_kv_cache` 时直接返回 0 的早退，见第 4 项。）
 3. **profiling pass 不测 adaptive verification。** `capture_model(profile_only=True)` 时跳过
    adaptive verification 的 cost 曲线 profiling（`4135590ff`，#63431），这类 dummy run 与 graph 内存无关。
-4. **EPLB 统计不受影响。** `GPUModelRunner.profile_cudagraph_memory` 整个包在 `eplb.suppress()` 里
-   （`87e7dce3a`，#56716），profiling/warmup 的 dummy 流量不进入 EPLB 负载统计。
+4. **EPLB 统计不受影响。** `GPUModelRunner.profile_cudagraph_memory`（`gpu/model_runner.py` L1129–L1136 @ `05caae03`）在开启 `enable_extensible_kv_cache` 时先直接返回 0，这一早退发生在 `eplb.suppress()` 之前；其余路径才把实际估算包在 `eplb.suppress()` 里（`87e7dce3a`，#56716），因此 profiling/warmup 的 dummy 流量不进入 EPLB 负载统计。
 
 ### 可选 cuMem graph pool 的边界
 
