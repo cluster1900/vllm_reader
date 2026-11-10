@@ -3,8 +3,8 @@ title: "第05章 KV Cache 内存管理"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
-source_branch: v0.33.0
+source_commit: 05caae03c20f69436ff7ec23ded339ea104f1a01
+source_branch: main
 source_dirty: false
 verified_at: 2026-11-10
 content_complete: true
@@ -36,7 +36,7 @@ KV Cache 不是一个 Python 字典，也不只是一块 GPU tensor。阅读当�
 3. EngineCore 中代表物理页所有权的 `KVCacheBlock` 元数据；
 4. 每个请求按逻辑 token 顺序维护的 block table。
 
-本章绑定源码 revision `4ba787ec9959e566d3b587a796dff07673324da5`（vLLM v0.33.0）。文中继续使用三种
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，B6 已把源码引用与行号重新核对到此 revision，详见 `meta/upgrade-main-05caae03-2026-11-10/`）。文中继续使用三种
 证据标签：
 
 - **源码事实**：能在固定 revision 的实现或测试中直接定位。

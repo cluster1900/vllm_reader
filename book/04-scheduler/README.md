@@ -3,8 +3,8 @@ title: "第04章 Scheduler 与 Continuous Batching"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
-source_branch: v0.33.0
+source_commit: 05caae03c20f69436ff7ec23ded339ea104f1a01
+source_branch: main
 source_dirty: false
 verified_at: 2026-11-10
 content_complete: true
@@ -41,7 +41,7 @@ Continuous Batching 不是源码中的一个独立 `ContinuousBatching` 类。�
 4. 新请求可以填补空出的 sequence slot 和 token budget；
 5. 长 prefill 可以切成多个 chunk，与 decode 工作共享一轮计算。
 
-本章绑定源码 revision `4ba787ec9959e566d3b587a796dff07673324da5`（vLLM v0.33.0）。文中继续区分：
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，B6 已把源码引用与行号重新核对到此 revision，详见 `meta/upgrade-main-05caae03-2026-11-10/`）。文中继续区分：
 
 - **源码事实**：固定 revision 的实现或测试可直接证明。
 - **设计含义**：由多个源码事实推导出的系统解释。

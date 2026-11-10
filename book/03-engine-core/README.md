@@ -3,8 +3,8 @@ title: "第03章 Engine 与 EngineCore"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
-source_branch: v0.33.0
+source_commit: 05caae03c20f69436ff7ec23ded339ea104f1a01
+source_branch: main
 source_dirty: false
 verified_at: 2026-11-10
 content_complete: true
@@ -36,7 +36,7 @@ LLMEngine / AsyncLLM
 执行期间到达的 abort 怎样生效、多个 batch 如何保持在途，以及进程退出或 worker
 故障如何被前端看见。
 
-本章绑定源码 revision `4ba787ec9959e566d3b587a796dff07673324da5`（vLLM v0.33.0）。文中区分：
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，B6 已把源码引用与行号重新核对到此 revision，详见 `meta/upgrade-main-05caae03-2026-11-10/`）。文中区分：
 
 - **源码事实**：可在固定 revision 的实现或测试中直接定位。
 - **设计含义**：由多个源码事实推导出的工程解释。

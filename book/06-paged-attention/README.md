@@ -3,8 +3,8 @@ title: "第06章 PagedAttention 与 Attention Backend"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
-source_branch: v0.33.0
+source_commit: 05caae03c20f69436ff7ec23ded339ea104f1a01
+source_branch: main
 source_dirty: false
 verified_at: 2026-11-10
 content_complete: true
@@ -34,7 +34,7 @@ prerequisites:
 寻址与执行契约。FlashAttention、FlashInfer、Triton 和平台专用实现都可能消费分页 KV；
 仓库中的 `vllm/v1/attention/ops/paged_attn.py` 也不是所有当前 GPU 路径的统一入口。
 
-本章绑定源码 revision `4ba787ec9959e566d3b587a796dff07673324da5`（v0.33.0），继续使用三种证据标签：
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，B6 已把源码引用与行号重新核对到此 revision，详见 `meta/upgrade-main-05caae03-2026-11-10/`），继续使用三种证据标签：
 
 - **源码事实**：能在固定 revision 的实现或测试中直接定位。
 - **设计含义**：由多个源码事实共同推出的系统解释。
@@ -493,7 +493,7 @@ write 是互补保护，不能以“table 已清零”替代有效 request 检�
 mask 只能在算分数时屏蔽它们，若那块内存里恰好是 NaN，NaN 仍会传进输出（这是源码 docstring 描述的风险）。
 所以 v0.33.0 在 gather 时就把这些表项改成 null block（ID 0），让 kernel 读到的永远是合法内存。
 主 forward 路径传入 `num_computed_tokens=self.req_states.num_computed_tokens.gpu`
-（`vllm/v1/worker/gpu/model_runner.py:1602`）；没有传入、没有滑窗 group，或 context parallelism
+（`vllm/v1/worker/gpu/model_runner.py:1672`）；没有传入、没有滑窗 group，或 context parallelism
 大于 1 时，`sliding_window_reach` 为 0，kernel 不做这一步。
 
 要换成 null block 的表项个数是：
@@ -510,7 +510,7 @@ block；这些块整块都在窗口之外，可以安全换掉。跨在窗口边
 - $p_0$：该请求本步第一个被调度 token 的位置，即 `num_computed_tokens`，单位 token；
 - $R$：该 KV cache group 的 `sliding_window_reach`，等于
   `SlidingWindowSpec.num_retained_tokens = sliding_window - 1 + extra_retained_tokens`
-  （`vllm/v1/kv_cache_interface.py:911`），单位 token；
+  （`vllm/v1/kv_cache_interface.py:929`），单位 token；
 - $B$：该 group 的 manager block size，单位 token/block；
 - $n_{\mathrm{null}}$：从这一行开头数起要换成 null block 的表项个数，即逻辑块下标 $i<n_{\mathrm{null}}$ 的表项。
 
@@ -549,7 +549,7 @@ flowchart TD
 staged write 的任务是把“某个请求行从第几列起写入哪些 block ID”提交到设备上的持久表。
 新请求的 prompt 很长时，一行可以有上千个 block ID。v0.32.0 里一条写入由一个 Triton program 循环复制；
 v0.33.0 把 kernel grid 改成二维：第 0 维是写入条数 $n$，第 1 维是块数 $n_{\mathrm{chunk}}$，
-每个 program 只复制 `_WRITE_BLOCK_SIZE = 1024` 个元素（`vllm/v1/worker/gpu/buffer_utils.py:24`）。
+每个 program 只复制 `_WRITE_BLOCK_SIZE = 1024` 个元素（`vllm/v1/worker/gpu/buffer_utils.py:27`）。
 
 $$
 n_{\mathrm{chunk}}=\max\left(\left\lceil \frac{L_{\max}}{1024} \right\rceil,\ 1\right)
@@ -559,10 +559,10 @@ $$
 
 其中：
 
-- $L_{\max}$：本批 staged write 中最长一条的元素数（`_staged_write_max_len`，`StagedWriteTensor` 在 `:135`，
+- $L_{\max}$：本批 staged write 中最长一条的元素数（`_staged_write_max_len`，`StagedWriteTensor` 在 `:169`，
   单 group 与 `FusedStagedWriter.apply` 都取各 tensor 的最大值）；
 - $1024$：`_WRITE_BLOCK_SIZE`，每个 program 负责的元素数；
-- $n_{\mathrm{chunk}}$：grid 第 1 维大小，由 `_num_write_chunks`（`:311`）计算。
+- $n_{\mathrm{chunk}}$：grid 第 1 维大小，由 `_num_write_chunks`（`:369`）计算。
 
 手算例子：本批有 3 条写入，长度分别为 5、3000、64 个元素，则 $L_{\max}=3000$，
 $n_{\mathrm{chunk}}=\lceil 3000/1024\rceil=3$，grid 为 $(3,3)$ 共 9 个 program；长度 5 的那条只有第 0 块有活干，
@@ -584,8 +584,8 @@ flowchart LR
 
 这只改变并行方式，不改变语义：写到哪一行、哪一列起、写什么内容都与分块前一致，所以
 上文单 group `apply_write()` 与多 group `FusedStagedWriter.apply()` 的描述仍然成立
-（二者都以 `_apply_write_kernel[(…, _num_write_chunks(max_len))]` 启动，`:223`、`:296`；
-kernel 本体在 `:317`）。官方 v0.33.0 release notes 把该改动列为 GB200 上长 prompt staged write 提速 31–120 倍，
+（二者都以 `_apply_write_kernel[(…, _num_write_chunks(max_len))]` 启动，`:271`、`:354`；
+kernel 本体在 `:375`）。官方 v0.33.0 release notes 把该改动列为 GB200 上长 prompt staged write 提速 31–120 倍，
 这是上游 PR 的自述数字，本书没有复测。上游提交是
 [fc2b6ab45](https://github.com/vllm-project/vllm/commit/fc2b6ab45)
 （[#62698](https://github.com/vllm-project/vllm/pull/62698)），测试为
@@ -1054,11 +1054,11 @@ implementation 的 `do_kv_cache_update()`，并传入当前 layer、K、V、KV t
 mapping。
 
 **第三种情形：模型自己的融合 op 已经写好 KV。** v0.33.0 新增一对标志：
-`AttentionBackend.supports_kv_cache_update_bypass`（默认 `False`，`vllm/v1/attention/backend.py:73`）
+`AttentionBackend.supports_kv_cache_update_bypass`（默认 `False`，`vllm/v1/attention/backend.py:72`）
 声明 backend 的 forward 能否在 key/value 省略时运行；`Attention.kv_cache_update_bypass`
-（默认 `False`，`vllm/model_executor/layers/attention/attention.py:456`）由模型设置，表示“我已在调用 attention 之前把 KV
+（默认 `False`，`vllm/model_executor/layers/attention/attention.py:478`）由模型设置，表示“我已在调用 attention 之前把 KV
 写进 cache，随后以 `key=None` 调用”。v0.33.0 里声明为 `True` 的 backend 有：`FlashAttentionBackend`
-（`vllm/v1/attention/backends/flash_attn.py:287`）、`FlashInferBackend`（`vllm/v1/attention/backends/flashinfer.py:555`）；ROCm AITER FlashAttention 仅在未启用 shuffle KV 布局时为 `True`，
+（`vllm/v1/attention/backends/flash_attn.py:281`）、`FlashInferBackend`（`vllm/v1/attention/backends/flashinfer.py:557`）；ROCm AITER FlashAttention 仅在未启用 shuffle KV 布局时为 `True`，
 因为外部写入者产出的是 packed 布局。这两个标志只对 `forward_includes_kv_cache_update=False` 的 backend 有意义，
 并且要看使用方怎样判定：Muse Spark 的融合 QK-norm+RoPE+KV 插入路径
 （`vllm/models/muse_spark/common/ops/fused_qk_norm_rope_kv.py`）只在 `decode_context_parallel_size<=1`、
@@ -1224,7 +1224,7 @@ verification、DCP、R-SWA 组合以及 backend 自定义组合条件。
 `KV_CACHE_DTYPES` 现在是可变列表，平台通过 `register_kv_cache_dtype(name)` 注册一个
 `KVCacheDTypeHandler`（给出存储 torch dtype 与 `KVQuantMode`）后，新名字会被追加进去并同时通过
 CLI/配置校验，`is_known_kv_cache_dtype()` 就是对这张列表做成员判断。随之，`is_quantized_kv_cache`
-从 `vllm/utils/torch_utils.py` 移到 `vllm/v1/kv_cache_interface.py:152`（`flash_attn.py` 与
+从 `vllm/utils/torch_utils.py` 移到 `vllm/v1/kv_cache_interface.py:145`（`flash_attn.py` 与
 `cuda.py` 的导入已同步改动）。这只扩展“有哪些 dtype 名字合法”，不改变上面逐 backend 的 KV dtype 校验：
 backend 的 `supported_kv_cache_dtypes` 不含该名字时仍会被拒绝。上游提交是
 [9499c949b](https://github.com/vllm-project/vllm/commit/9499c949b)
@@ -1266,7 +1266,7 @@ flowchart LR
 - 支持 sliding window、non-causal 和多种 attention type；
 - mm-prefix 能力要求可用 FA4；仍需通过具体组合校验，不能把类级能力表当作所有配置的保证；
 - 声明 `forward_includes_kv_cache_update=False`，并在 v0.33.0 起声明
-  `supports_kv_cache_update_bypass=True`（`flash_attn.py:287`，含义见 6.13；该取值由
+  `supports_kv_cache_update_bypass=True`（`flash_attn.py:281`，含义见 6.13；该取值由
   [0f6b26191](https://github.com/vllm-project/vllm/commit/0f6b26191)、
   [#61879](https://github.com/vllm-project/vllm/pull/61879) 加入，基类属性与框架分支来自 #62622）。
 
@@ -1295,7 +1295,7 @@ block_table_tensor, slot_mapping, causal
 [#60908](https://github.com/vllm-project/vllm/pull/60908)）和 XPU 平台
 （`current_platform.is_xpu()`，[35d01660f](https://github.com/vllm-project/vllm/commit/35d01660f)，
 [#62244](https://github.com/vllm-project/vllm/pull/62244)）也列为 `ALWAYS`，FA2 仍为 `UNIFORM_BATCH`
-（`FlashAttentionMetadataBuilder._cudagraph_support`，`flash_attn.py:619`）。v0.32.0 还要求 per-request `causal` tensor 预先是
+（`FlashAttentionMetadataBuilder._cudagraph_support`，`flash_attn.py:582`）。v0.32.0 还要求 per-request `causal` tensor 预先是
 `int32`：builder 遇到其他 dtype 直接报错，不在热路径临时转换并分配新 tensor，
 以免破坏 FULL CUDA Graph 对持久地址的依赖。
 

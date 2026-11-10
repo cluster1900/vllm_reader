@@ -3,8 +3,8 @@ title: "第08章 异步执行、torch.compile 与 CUDA Graph"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
-source_branch: v0.33.0
+source_commit: 05caae03c20f69436ff7ec23ded339ea104f1a01
+source_branch: main
 source_dirty: false
 verified_at: 2026-11-10
 content_complete: true
@@ -52,7 +52,7 @@ flowchart LR
 **核心结论：** 三者可以协同，但它们不是同一个开关，也不是严格的先后版本。定位性能
 问题时，必须先确认收益来自哪一层。
 
-本章绑定源码 revision `4ba787ec9959e566d3b587a796dff07673324da5`（vLLM v0.33.0 tag 所指提交；提交日期 2026-10-31，tag 日期 2026-11-01），沿用以下标签：
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，B6 已把源码引用与行号重新核对到此 revision，详见 `meta/upgrade-main-05caae03-2026-11-10/`），沿用以下标签：
 
 - **源码事实**：该 revision 下可直接定位的行为。
 - **设计意图**：源码注释或同 revision 设计文档给出的目标。
@@ -268,7 +268,7 @@ flowchart TD
 - MRV1 仅在 `pp_size <= 1` 时把 async 窗口设为 2；配置校验已拒绝 MRV1 + async + PP>1，
   不能把 property 中的 fallback 分支当作该组合受支持的证据。
 
-[源码] `vllm/config/vllm.py` - `VllmConfig.max_concurrent_batches`（@ `4ba787ec`）
+[源码] `vllm/config/vllm.py` - `VllmConfig.max_concurrent_batches`（@ `05caae03`）
 
 **v0.33.0 对 async scheduling 资格的改动。** `f1dbfef79`（#62521）把“投机解码方法不被支持”和
 “`disable_padded_drafter_batch=True`”这两条 async scheduling 限制收进一个只在 MRV1 下才计算的变量
@@ -362,7 +362,7 @@ sequenceDiagram
 - **确认进度**：即使所有在途 speculative token 被拒绝，也不会回退的位置。
 
 当前源码用 `request.num_output_placeholders` 表示未确认 token 数。
-`Scheduler._handle_stopped_request`（`scheduler.py` L2717 @ `4ba787ec`）里的 `safe_frontier` 就是用它算的。
+`Scheduler._handle_stopped_request`（`scheduler.py` L2774 @ `05caae03`）里的 `safe_frontier` 就是用它算的。
 
 [源码] `vllm/v1/core/sched/async_scheduler.py` - `AsyncScheduler._update_after_schedule`
 
@@ -508,25 +508,25 @@ sequenceDiagram
 
 ### 8.4.2 stale output 为什么不能扣 placeholder
 
-抢占时 placeholder 已被清零：`Scheduler._preempt_request`（`scheduler.py` L1799 @ `4ba787ec`）把
+抢占时 placeholder 已被清零：`Scheduler._preempt_request`（`scheduler.py` L1775 @ `05caae03`）把
 `num_output_placeholders` 设为 0，并把 `num_stale_output_tokens` 设为当时的 `num_in_flight_tokens`。若旧结果返回后
 再执行普通的 `num_output_placeholders -= len(new_token_ids)`，计数会下溢。
 
 v0.33.0 的实现（`2fb320d83`，#61589）里 `AsyncScheduler` 已经不再覆写 `_update_request_with_output`，
 这段逻辑直接位于基类 `Scheduler._update_request_with_output(request, new_token_ids, is_stale=False)`
-（`scheduler.py` L2744 @ `4ba787ec`），同步与异步调度共用。`Scheduler.update_from_output` 对每个请求先做三件事
-（L2316 起）：
+（`scheduler.py` L2801 @ `05caae03`），同步与异步调度共用。`Scheduler.update_from_output` 对每个请求先做三件事
+（L2284 起）：
 
 1. 把这一步的 token 数从 `num_in_flight_tokens` 扣掉；
 2. 若 `num_stale_output_tokens > 0`，按同样的数量扣减它，并把本次输出标为 `output_is_stale`；
-3. 如果请求是 `drop_stale_output` 模式（见 8.4.1 的第二条分支），stale 输出整份丢弃（L2338）。
+3. 如果请求是 `drop_stale_output` 模式（见 8.4.1 的第二条分支），stale 输出整份丢弃（L2306）。
 
 然后调用 `_update_request_with_output(..., is_stale=output_is_stale)`：逐个追加 token 并检查 stop；
 命中 stop 时修剪多余 token，只有非 stale 时才回退 `num_computed_tokens`；最后只在**非 stale 且
 `num_output_placeholders > 0`** 时，按**返回的全部 token 数**（含因 stop 被修剪的）扣减 placeholder，并断言
-不小于零（L2769）。stale 输出不再扣减，因为抢占已经清零。
+不小于零（L2826）。stale 输出不再扣减，因为抢占已经清零。
 
-[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler._update_request_with_output`（L2744 @ `4ba787ec`）、
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler._update_request_with_output`（L2801 @ `05caae03`）、
 `Scheduler.update_from_output`、`Scheduler._preempt_request`
 
 [源码] `vllm/v1/core/sched/async_scheduler.py` - `AsyncScheduler._update_after_schedule`（v0.33.0 中该类只剩
@@ -550,7 +550,7 @@ flowchart TD
 ### 8.4.3 KV cache 只能推进到确认边界
 
 v0.33.0 里，`cache_blocks` 的调用从已删除的 `AsyncScheduler._update_request_with_output` 搬到了
-`Scheduler.update_from_output`（`2fb320d83`，#61589；`scheduler.py` L2403–L2412 @ `4ba787ec`）。
+`Scheduler.update_from_output`（`2fb320d83`，#61589；`scheduler.py` L2372–L2390 @ `05caae03`）。
 同时满足下面三个条件才调用：输出**不是** stale；`_update_request_with_output` 之前请求状态为 `RUNNING`；
 更新前 `num_output_placeholders > 0`，或 `Scheduler` 自身的 `self.num_spec_tokens > 0`（配置的投机 token 数，与同步/异步调度无关）。
 调用形式是：
@@ -580,7 +580,7 @@ flowchart TD
 
 > **读图方法：** 从上往下依次过三个菱形。第一个菱形（output_is_stale?）答“是”就跳过；答“否”才继续。第二个（更新前是否为 RUNNING）和第三个（是否有 placeholder 或 num_spec_tokens > 0）必须都答“是”，才会走到 cache_blocks(request, computed - in_flight)。任一为“否”，直接走到 skip cache_blocks。第二个菱形排除更新前已不是 RUNNING 的请求（例如已被抢占）。
 
-[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.update_from_output`（`cache_blocks` 调用 L2412 @ `4ba787ec`）
+[源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.update_from_output`（`cache_blocks` 调用 L2390 @ `05caae03`）
 
 ```mermaid
 flowchart LR
@@ -786,7 +786,7 @@ classDiagram
 当 mode 为 `NONE` 或 `STOCK_TORCH_COMPILE`，或模型明确不支持时，装饰器内部路径可设置
 `do_not_compile`；stock mode 由更高层 Runner 处理，不能据此误判为完全未编译。
 
-v0.33.0 给装饰器加了一个参数 `use_aot_compile`（默认 `True`，`decorators.py` L128 附近 @ `4ba787ec`）。
+v0.33.0 给装饰器加了一个参数 `use_aot_compile`（默认 `True`，`decorators.py` L129 附近 @ `05caae03`）。
 设为 `False` 时，这个模型类在 `DYNAMO_TRACE_ONCE` 与 `VLLM_COMPILE` 两种 mode 下都不走模型级 AOT；
 `VLLM_COMPILE` 下还会跳过 mega 与 direct 编译产物，只保留底层 PyTorch 图缓存。这个开关会沿
 `TorchCompileWithNoGuardsWrapper` 传到 `CompilationConfig.init_backend(..., use_aot_compile=...)` 与
@@ -1164,7 +1164,7 @@ key 太少会把不兼容 batch 误配给同一图；key 太多会造成 graph �
 
 `set_forward_context` 在调用方没有传 `batch_descriptor` 但给了 `num_tokens` 时，会自己补一个只含
 `num_tokens` 的 `BatchDescriptor`。v0.32.0 只在 `cudagraph_runtime_mode != NONE` 时才补；v0.33.0 去掉了这个
-条件，`num_tokens` 非空就补（`forward_context.py` L332 @ `4ba787ec`，`a8be1500b`，#61388），源码注释的理由是“在模型级
+条件，`num_tokens` 非空就补（`forward_context.py` L328 @ `05caae03`，`a8be1500b`，#61388），源码注释的理由是“在模型级
 sequence parallelism 之前保留 batch 大小”；该提交标题是恢复 DP=1 下 TP 分片的 routed-expert 捕获。
 wrapper 仍只信任 dispatcher 给出的 runtime mode，这一点不受影响。
 
@@ -1444,10 +1444,10 @@ flowchart TD
 `_capture_stream` / `capture`
 
 v0.33.0 还修了 DBO 运行期的两处细节。`2c19f6793`（#63372）：`UBatchRunner` 把每个微批的起始 token 偏移
-`token_offsets` 传给微批线程（`vllm/v1/worker/gpu/ubatch_utils.py` L465），routed-experts capturer 写 `device_buffer` 时加上
-`dbo_current_ubatch_token_offset()`（`vllm/model_executor/layers/fused_moe/routed_experts_capturer.py` L97），否则各微批都从第 0 行写，会互相覆盖。
+`token_offsets` 传给微批线程（`vllm/v1/worker/gpu/ubatch_utils.py` L497），routed-experts capturer 写 `device_buffer` 时加上
+`dbo_current_ubatch_token_offset()`（`vllm/model_executor/layers/fused_moe/routed_experts_capturer.py` L115），否则各微批都从第 0 行写，会互相覆盖。
 `66bf93154`（#63476）：微批线程出错时，报告的是**最先记录**的失败（`failed = next(iter(errors))`，
-`vllm/v1/worker/gpu/ubatch_utils.py` L524 @ `4ba787ec`），而不是编号最小的微批。
+`vllm/v1/worker/gpu/ubatch_utils.py` L562 @ `05caae03`），而不是编号最小的微批。
 
 > **main 上的变化（未发版）**：本书正文已升到 v0.33.0（`4ba787ec`）；以下提交**不在** v0.33.0 祖先链内（#63372、#63476 已在 v0.33.0 中并入上文），暂不写入正文，留待后续基线处理。
 > - main 2026-10-28～10-29：[cdd2750cd5](https://github.com/vllm-project/vllm/commit/cdd2750cd5e7d90849282a16bc46c21bbc58bcbd)（[#61464](https://github.com/vllm-project/vllm/pull/61464)） 允许 DBO 与 speculative decoding / DCP 组合（见 ch07 注记）；[d7f68d4c7d](https://github.com/vllm-project/vllm/commit/d7f68d4c7d31004e257b7b2ff142b4edd83e0d8c)（[#62748](https://github.com/vllm-project/vllm/pull/62748)） idle 步跳过 sampler staged writes；[458334f00f](https://github.com/vllm-project/vllm/commit/458334f00f7cbff7c8a1feae449656aa7343c476)（[#63819](https://github.com/vllm-project/vllm/pull/63819)） `warmup_kernels` 末尾调用 `acceptance_estimator.warmup()`（`warmup.py` L255–L259 @ `36d4ef654`），并固定 DFlash prepare `BLOCK_SIZE=128`。详见 meta/main-tracking-2026-10-29.md。
@@ -1503,11 +1503,11 @@ flowchart LR
 capture 用的 dummy 输入在 v0.33.0 有两处和输出持久化同等重要的细节：
 
 - **DCP 的 FULL graph 要带 KV 上下文捕获。** `9b5c6707a`（#61496）新增 `set_dcp_capture_context`
-  （`cudagraph_utils.py` L806 @ `4ba787ec`）：当 `block_tables.cp_size > 1` 且捕获 FULL graph 时，先用
+  （`cudagraph_utils.py` L870 @ `05caae03`）：当 `block_tables.cp_size > 1` 且捕获 FULL graph 时，先用
   `set_dummy_context` 给 dummy batch 装上带 KV 的上下文，避免主机侧“跳过 DCP context attention”的分支被
   固化进 graph。
 - **后续 PP stage 不是一律把 `input_ids` 置空。** `d12ea8e30`（#61016）：非首 PP rank 捕获时，只有
-  `requires_raw_input_tokens(model)` 为假才设 `input_ids=None`（L696），需要原始 token 的模型要保留。
+  `requires_raw_input_tokens(model)` 为假才设 `input_ids=None`（L761），需要原始 token 的模型要保留。
 
 ### 8.14.6 piecewise 有两种实现来源
 
@@ -1614,7 +1614,7 @@ MRV2 现可使用 stock torch.compile，但 `_disable_cudagraphs_for_v2_stock_to
 - dynamic speculative decode 与 MRV1：MRV1 下若动态 SD 搭配 FULL graph，`cudagraph_mode` 会被覆盖为 `PIECEWISE`
   （`_maybe_override_dynamic_sd_cudagraph_mode`，L1069）；MRV1 下 speculative 方法不在 `ngram`/`eagle`/`eagle3`/`mtp`/
   `draft_model`/`dflash` 之内时，动态 SD 被关闭并回到静态 `num_speculative_tokens`（`_maybe_disable_dynamic_sd_for_v1`，
-  L1088 @ `4ba787ec`，`763e3f7c9`，#46399）；MRV2 不受这条限制。
+  L1088 @ `05caae03`，`763e3f7c9`，#46399）；MRV2 不受这条限制。
 - DeepEP high-throughput 等特定组合。
 - splitting ops、graph partition 与模型提供的 piecewise capture 的兼容关系。
 - 加载后的模型是否真的提供 piecewise capture；请求配置不等于实际 provider。
@@ -1744,9 +1744,9 @@ FULL graph 绑定 KV pointer，profiling 只捕获最大的少数 descriptor，�
 v0.33.0 在这条路径上有四处与旧正文相比的变化：
 
 1. **最小 KV cache 的构造方式。** `b54458740`（#53558）引入可插拔的 `KVCacheConfigBuilder`。
-   `_init_minimal_kv_cache_for_profiling`（`cudagraph_utils.py` L1042）在 v0.33.0 中先
+   `_init_minimal_kv_cache_for_profiling`（`cudagraph_utils.py` L1114）在 v0.33.0 中先
    `get_kv_cache_config_builder(vllm_config)`，再用 `get_kv_cache_groups_from_builder` 取 groups，最后
-   `builder.get_kv_cache_config_from_groups(..., num_blocks=min_blocks)`（L1057）；旧版先临时改写
+   `builder.get_kv_cache_config_from_groups(..., num_blocks=min_blocks)`（L1129）；旧版先临时改写
    `cache_config.num_gpu_blocks_override` 再恢复的做法已经删除。`min_blocks` 的取法没变。
 2. **什么时候需要 profile。** `profile_cudagraph_memory` 只在 `cudagraph_mode == NONE` 且
    `runner.needs_cudagraph_capture()` 也为假时才直接返回 0；并且是否还有 graph 要捕获统一问
@@ -1784,7 +1784,7 @@ profile 得到的非 KV 占用，`graph reserve` 是实际应用的 graph 估算
 `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1`；禁用该项只改变估算是否扣除，不代表 graph
 运行时不占显存。估算资格还检查 CUDA/ROCm 或 XPU 平台，并且 `cudagraph_mode` 非 `NONE`，或者（MRV2 且开启
 `cudagraph_mm_encoder` 且没有 `enforce_eager`）：后一个条件让只剩 encoder graph 的配置也会预留显存
-（`gpu_worker.py` L707 起 @ `4ba787ec`，`7128f568a`，#58243）。
+（`gpu_worker.py` L707 起 @ `05caae03`，`7128f568a`，#58243）。
 
 > **main 上的变化（未发版）**：本书正文已升到 v0.33.0（`4ba787ec`）；以下提交**不在** v0.33.0 祖先链内，暂不写入正文，留待后续基线处理。详见 meta/main-tracking-2026-10-28.md。
 > - [dc4d977d97](https://github.com/vllm-project/vllm/commit/dc4d977d97f9cfaa7c6dc2de7fd94a77204a6914)（[#63778](https://github.com/vllm-project/vllm/pull/63778)）：Worker 侧对 V2 runner 不再把“`cudagraph_mode != NONE`（或 encoder 特例）”作为调用 `profile_cudagraph_memory` 的前提；改为 `use_v2_model_runner or cudagraph_mode != NONE`（`gpu_worker.py` L716–L720 @ `0106c8abc`）。上文“估算资格还检查……非 NONE graph mode”在 V2 路径上需改为“由 runner 决定是否 profile（含 encoder graph）”。

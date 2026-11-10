@@ -3,8 +3,8 @@ title: "第01章 从 Transformer 到大模型推理"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
-source_branch: v0.33.0
+source_commit: 05caae03c20f69436ff7ec23ded339ea104f1a01
+source_branch: main
 source_dirty: false
 verified_at: 2026-11-10
 content_complete: true
@@ -54,7 +54,7 @@ prerequisites:
 > **本节先看：** 这一部分先划定结论成立的源码版本和讨论边界。超出范围的实现不能直接套用本章结论，需要重新核对源码。
 
 - 源码仓库：`vllm-project/vllm`
-- 源码 commit：`4ba787ec9959e566d3b587a796dff07673324da5`（v0.33.0）
+- 源码 commit：`05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，B6 已把源码引用与行号重新核对到此 revision，详见 `meta/upgrade-main-05caae03-2026-11-10/`）
 - 阅读主线：decoder-only 文本生成、vLLM V1 Engine、Llama 类模型。
 - 本章使用单层、单 attention head 的教学模型建立直觉；真实模型通常有多层、
   多个 query heads，并可能使用 GQA、量化、TP 和不同 attention backend。
@@ -562,7 +562,7 @@ Top-k 与 top-p 最终都通过 mask 排除候选，并对保留项重新归一�
 一定只剩两个 token。随书模型按排序后截取候选，是教学简化；其他 backend 的并列
 处理需分别核对，不能只凭 top-k 名称推断。v0.33.0（`4ba787ec`）的 Triton top-k-only 路径按索引打破第 k 位并列，
 保留恰好 k 项；PyTorch 参考实现可以额外保留并列项。对应测试只要求额外项确实与第 k 位同分，
-不再要求两条实现的候选数严格相同（`tests/v1/sample/test_topk_topp_sampler.py:254` 的注释）。
+不再要求两条实现的候选数严格相同（`tests/v1/sample/test_topk_topp_sampler.py:181` 的注释）。
 
 [测试] `tests/v1/sample/test_topk_topp_sampler.py` - `TestTritonTopkTopp`
 
@@ -610,7 +610,7 @@ flowchart TD
 > **读图方法：** 这是 Triton top-k/top-p 在一个 batch 内如何分工的决策图。先从上往下看三道条件：有没有 top-p、是不是小批量 CUDA、有没有带 top-k 的行；最后一个菱形就是上面公式的结果，它只决定“要不要多跑一遍 split top-p”。
 
 这个布尔值在 `SamplingStates.get_top_k_top_p()`（`vllm/v1/worker/gpu/sample/states.py:105`）里用 CPU 侧 numpy 数组
-一次算好，经 `apply_top_k_top_p(..., has_topp_only_rows=…)`（`vllm/v1/sample/ops/topk_topp_sampler.py:501`）传给
+一次算好，经 `apply_top_k_top_p(..., has_topp_only_rows=…)`（`vllm/v1/sample/ops/topk_topp_sampler.py:198`）传给
 `apply_top_k_top_p_triton()`（`vllm/v1/sample/ops/topk_topp_triton.py:1618`），其函数 docstring 明确要求：
 只要有行满足 $p<1$ 且 $k\ge V$，调用方必须传 `True`，否则这样的行会得不到 top-p。默认值是 `True`（保守）。
 上游提交：[7b6310c10](https://github.com/vllm-project/vllm/commit/7b6310c10)（[#61996](https://github.com/vllm-project/vllm/pull/61996)）。

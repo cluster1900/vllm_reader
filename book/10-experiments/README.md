@@ -3,8 +3,8 @@ title: "第10章 实验、性能分析与优化"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
-source_branch: v0.33.0
+source_commit: 05caae03c20f69436ff7ec23ded339ea104f1a01
+source_branch: main
 source_dirty: false
 verified_at: 2026-11-10
 content_complete: true
@@ -228,7 +228,7 @@ token 数，缺失时可能重新 tokenize 文本；ITL 列表则来自流式事
 就可能降低 chat 的 E2EL/TPOT，不能当作 GPU 提速。
 
 v0.33.0 又把 chat 适配器的“首事件”判定收紧：只有 `_choice_has_streamed_output()`
-（`vllm/benchmarks/lib/endpoint_request_func.py:392`）为真的 choice 才算已流出输出，才会启动 TTFT、
+（`vllm/benchmarks/lib/endpoint_request_func.py:398`）为真的 choice 才算已流出输出，才会启动 TTFT、
 追加 ITL 并推进末时间戳。判定规则是：`delta` 里有非空的 `content`、`reasoning`、`tool_calls` 或
 `function_call`；或者 `content` 恰为空串且**没有** `role` 字段（例如一个特殊 token 在
 `skip_special_tokens` 下解码成空串，仍是真实生成的 token）。只带 `role` 的开头元数据消息不再触发首事件计时。
@@ -251,7 +251,7 @@ flowchart TD
     ITL --> END
 ```
 
-> **读图方法：** 这是 chat 适配器处理每条流式消息的判定图。先看第一道判定“这条消息是否形成已流出输出”，只有通过的消息才能产生 TTFT 或 ITL；没通过的消息一律走左侧分支，源码里这是 `if … elif usage` 的 `elif`（`endpoint_request_func.py:487`），所以只要带 usage 就记 token 数，不论 choices 是否为空，也不改变任何计时。
+> **读图方法：** 这是 chat 适配器处理每条流式消息的判定图。先看第一道判定“这条消息是否形成已流出输出”，只有通过的消息才能产生 TTFT 或 ITL；没通过的消息一律走左侧分支，源码里这是 `if … elif usage` 的 `elif`（`endpoint_request_func.py:497`），所以只要带 usage 就记 token 数，不论 choices 是否为空，也不改变任何计时。
 
 此外，v0.33.0 不再对每个网络读到的字节块先 `strip()`：completion、chat、audio 三个适配器都直接把原始字节
 交给 `StreamedResponseHandler` 按 SSE 消息边界拼接，避免首尾空白在传输分块边界被吞掉
@@ -623,7 +623,7 @@ flowchart TD
 把第一请求和第 1000 个请求放在同一个平均值里，会同时测到部署冷启动与稳定态服务，通常
 无法解释。
 
-其中“KV memory profiling”这一步在 v0.33.0 多了一个前置动作：`Worker.init_device`（`vllm/v1/worker/gpu_worker.py:449`）在拍内存快照之前先用一次
+其中“KV memory profiling”这一步在 v0.33.0 多了一个前置动作：`Worker.init_device`（`vllm/v1/worker/gpu_worker.py:453`）在拍内存快照之前先用一次
 `torch.mm` 和一次带 bias 的 `torch.nn.functional.linear` 创建 cuBLAS/cuBLASLt handle
 （`vllm/v1/worker/gpu_worker.py` 中的注释：这些 handle 由 CUDA 直接分配显存，torch 看不见也无法回收缓存来满足它，
 profiling 若把 torch 缓存撑满，首次 cuBLAS 调用就会失败；先创建则让它们与 NCCL buffer 一样计入基线）
@@ -1062,7 +1062,7 @@ v0.33.0 的 `/start_profile` 请求体多了一个可选字段 `profiler_kwargs`
 Python API `LLM.start_profile(..., profiler_kwargs=...)` 同样接受。路由层只要求它是 JSON 对象，不检查键名。
 Worker 侧 `TorchProfilerWrapper` 把 `profiler_config` 派生的基础参数 `_base_profiler_kwargs` 与请求覆盖项合并
 （`vllm/profiler/wrapper.py`：`set_profiler_kwargs`，仅在 profiler 未处于 active 时生效，且保留原来的
-`on_trace_ready`）。`Worker.profile` 在每次 start 时都调用它（`vllm/v1/worker/gpu_worker.py:1439`），
+`on_trace_ready`）。`Worker.profile` 在每次 start 时都调用它（`vllm/v1/worker/gpu_worker.py:1562`），
 每次都从基础参数重新合并，所以上一次的覆盖不会泄漏到下一次。
 基类 `WorkerProfiler.set_profiler_kwargs` 是空操作，因此 CUDA、Proton 等非 torch profiler 会忽略该字段
 （[dd5e75449](https://github.com/vllm-project/vllm/commit/dd5e75449)，
