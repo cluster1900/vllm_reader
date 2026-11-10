@@ -14,7 +14,7 @@
 | 02 | 给出离线/在线请求的端到端地图 | `vllm/entrypoints/llm.py`、offline utils、Renderer、OpenAI chat serving、`AsyncLLM`、core client、输入/输出处理器 | ZMQ 多进程是在线主线；单 rank `UniProcExecutor` 的 Worker 位于 EngineCore 进程，不能把逻辑 Worker 一律画成额外进程 |
 | 03 | 解释 Engine 门面、client、EngineCore 生命周期和 IPC | `LLMEngine`、`EngineCoreClient`、`EngineCore`、`EngineCoreProc`、`EngineCoreActor` | 不展开 Scheduler 算法和 GPU tensor 构造 |
 | 04 | 解释 token 级调度与 Continuous Batching | `Scheduler`、`SchedulerOutput`、`RequestQueue`、`Request` | 负责“算谁、算多少”，不负责 kernel 如何计算 |
-| 05 | 解释 KV 规格、启动容量和 block 生命周期 | `KVCacheSpec`、`kv_cache_planning.get_global_kv_cache_groups` / `get_kv_cache_configs`、`KVCacheConfigBuilder`、`Worker.determine_available_memory`、`KVCacheManager`、`BlockPool`、coordinator、single-type managers | 常规命中以完整 block 为主；当前混合 KV 路径还支持条件化 partial-tail 命中和 CoW；EAGLE 的 lookahead 哈希只在未关闭、且没有 KV connector 或 connector 声明支持时启用；不展开 kernel 寻址 |
+| 05 | 解释 KV 规格、启动容量和 block 生命周期 | `KVCacheSpec`、`CacheConfig.DEFAULT_BLOCK_SIZE`、`enable_extensible_kv_cache` / `_resolve_extensible_kv_cache`、`ExtensibleKVCache`、`finalize_extensible_kv_cache`、`kv_cache_planning.get_global_kv_cache_groups` / `get_kv_cache_configs`、`KVCacheConfigBuilder`、`Worker.determine_available_memory`、`KVCacheManager`、`BlockPool`、coordinator、single-type managers | 常规命中以完整 block 为主；当前混合 KV 路径还支持条件化 partial-tail 命中和 CoW；EAGLE 的 lookahead 哈希只在未关闭、且没有 KV connector 或 connector 声明支持时启用；不展开 kernel 寻址 |
 | 06 | 解释 block table、slot mapping、ragged metadata 到 attention backend/kernel 的寻址与执行契约 | `Attention` 与 unified ops、backend interface/registry/selector、CUDA platform、MRV2 block table、FlashAttention、特定 `PagedAttention` helper | 历史 PagedAttention kernel 与当前实际 backend 必须分开；FlashAttention 等实现也可直接消费分页 KV |
 | 07 | 解释 SchedulerOutput 如何成为 GPU forward 和采样结果 | UniProc/Multiproc Executor、WorkerWrapper/GPU Worker、model registry/loader、MRV2 runner、sampler 与 outputs | unique reply 不等于单 rank 执行；V1 Engine 与 Runner 世代是两个维度，MRV1 已随 #63373 删除，MRV2 是唯一 GPU Runner |
 | 08 | 解释异步调度、compile 和 CUDA Graph 的开销优化 | `AsyncScheduler`、EngineCore batch queue、compile decorator/backend/ranges/cache、`CUDAGraphWrapper`、MRV2 `CudaGraphManager` | batch queue 与 async scheduler 分开；配置模式与 runtime mode 分开；`torch.compile` 与 CUDA Graph 分层讲；MRV2 manager 不是 wrapper 的别名 |
@@ -131,3 +131,8 @@ python3 scripts/check_book.py
 - 10：sweep warmup 与失败结果分离；profile session 迭代边界与前端 CPU trace 分开；KV fetch stage/cache source 指标说明。
 
 十章结论、逐文件差异和本次验证范围见[升级复核](upgrade-v0.32.0-2026-10-19/README.md)。
+
+
+## 2026-11-10 main `05caae03` 锚点（第 05 章）
+
+- 05：`vllm/config/cache.py` 的 `CacheConfig.DEFAULT_BLOCK_SIZE`（默认 64）与 `enable_extensible_kv_cache`；`vllm/config/vllm.py` 的 `_resolve_extensible_kv_cache`；`vllm/v1/worker/extensible_kv_cache.py` 的 `ExtensibleKVCache` / `extend_kv_cache`；`kv_cache_planning.finalize_extensible_kv_cache`。记录见 [核对说明](upgrade-main-05caae03-2026-11-10/b7-block64-extensible-kv.md)。
