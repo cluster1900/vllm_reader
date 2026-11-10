@@ -82,3 +82,20 @@
 - 当前基线仍为 003（`v0.32.0`）；不切换基线、不改写 v0.32.0 正文。
 - 跟踪范围：vLLM `main` `36d4ef654a83e227216b0c0b55cf4041d96b1675`..`2eae56c4ba0cf12087fec035514eedede83c257d`（#64610，2026-10-30），109 个提交。最新 GitHub Release 仍为 v0.32.0（2026-10-18）。git rc tag 有 `v0.32.1rc0`（2365177dd，2026-10-18，在 main 上、早于本区间起点）、`v0.33.0rc0`（4135590ff，2026-10-26，在 main 上、早于区间起点）、`v0.33.0rc1`（cbafc4690，2026-10-28，不在 main 历史上，位于发布分支）；三者都没有 GitHub Release 条目（连 pre-release 也没有），不是阅读基线。
 - 逐条 SHA/PR、受影响章节与升级动作见[main 跟踪记录](main-tracking-2026-10-30.md)；已在 ch02、ch05、ch06、ch07、ch08、ch09 加了“main 上的变化（未发版）”注记。#64279：v0.32.0 基线自身带 #42129 allow-list，Transformers backend + 整图编译会 KV 损坏。#64356：ch09 中 #63554 的 owner/row 规则已过时。本区间没有与 v0.32.0 正文直接冲突、升级时必须改写的提交。
+
+## 阅读基线 004：v0.33.0（2026-11-10 B0 钉扎）
+
+- Repository: `vllm-project/vllm`
+- Tag: `v0.33.0`（annotated tag 解引用 commit；tagger date **2026-11-01** 09:21:10 UTC；GitHub Release 名为「v0.33.0」的条目 `tag_name` 为 `v0.33.0rc3`，指向同一 commit，published 2026-11-02）
+- Commit: `4ba787ec9959e566d3b587a796dff07673324da5`
+- 前一基线：`5df63a7203cdb9328d824a27b682e77c7b9928be`（v0.32.0 / 基线 003）；旧记录、旧实验输出与 `meta/main-tracking-*.md` 注记原样保留。
+- Reader base：本 B0 PR 合入前的 `main`；本批钉扎 README / source-revisions / chapter-source-map / 十章 `source_commit`+`source_branch`，并把 check_book 的 6 处 map 失败改到 v0.33.0 实址（见下）；**不改写章节正文**（十章 `verified_at` 仍为 2026-10-19）。
+- 获取方式：同级 `../vllm` 以 detached HEAD 检出上述 commit（由 annotated tag `v0.33.0` 解引用核对）。
+- Python 要求仍为 `>=3.11,<3.15`（`pyproject.toml` `requires-python`）。
+- B0 map 再绑定（仅 JSON/md，正文留给后续批）：
+  - ch05：`check_enough_kv_cache_memory` / `get_kv_cache_config_from_groups` / `get_kv_cache_groups` / `get_kv_cache_configs` → `vllm/v1/core/kv_cache_planning.py`（正文仍提旧路径 → **B1**）
+  - ch08：`_update_request_with_output` → `vllm/v1/core/sched/scheduler.py`（**属 ch08，正文批 B2**，不是 B4/ch04）
+  - ch09：删除 `ray_executor.py` / `RayDistributedExecutor` 条目（类已不存在；既有 `ray_executor_v2.py` / `RayExecutorV2` 覆盖 → 正文 **B3**）
+- 正文落注记按 bot-hub #127：波次 1 仅落 **v0.33.0 ancestry** 内变更；非 ancestry 注记推迟波次 2（B6–B9）。
+- 章节继续 `draft` / `runtime_verified: false`。
+

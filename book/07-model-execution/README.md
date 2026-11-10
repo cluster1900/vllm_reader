@@ -3,8 +3,8 @@ title: "第07章 Executor、Worker 与 Model Runner"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 5df63a7203cdb9328d824a27b682e77c7b9928be
-source_branch: v0.32.0
+source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
+source_branch: v0.33.0
 source_dirty: false
 verified_at: 2026-10-19
 content_complete: true

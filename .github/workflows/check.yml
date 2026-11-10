@@ -1,0 +1,54 @@
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  book:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout vllm_reader
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Checkout pinned upstream vLLM as sibling ../vllm
+        run: |
+          set -euo pipefail
+          PIN="$(python3 -c "import json; print(json.load(open('meta/chapter-source-map.json'))['source_commit'])")"
+          echo "Pinned source_commit=${PIN}"
+          if ! printf '%s' "${PIN}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "source_commit must be a 40-char SHA" >&2
+            exit 1
+          fi
+          # check_book.py resolves source_path ../vllm relative to reader root.
+          # actions/checkout cannot place a repo outside GITHUB_WORKSPACE, so clone sibling via git.
+          DEST="${GITHUB_WORKSPACE}/../vllm"
+          rm -rf "${DEST}"
+          mkdir -p "${DEST}"
+          git init "${DEST}"
+          git -C "${DEST}" remote add origin https://github.com/vllm-project/vllm.git
+          git -C "${DEST}" fetch --depth 1 origin "${PIN}"
+          git -C "${DEST}" checkout --force FETCH_HEAD
+          ACTUAL="$(git -C "${DEST}" rev-parse HEAD)"
+          echo "Checked out ${ACTUAL}"
+          test "${ACTUAL}" = "${PIN}"
+          test -f "${DEST}/vllm/__init__.py"
+
+      - name: unit tests
+        run: python3 -m unittest discover -s tests
+
+      - name: enrich_pedagogy --check
+        run: python3 scripts/enrich_pedagogy.py --check
+
+      - name: check_book.py
+        run: python3 scripts/check_book.py
