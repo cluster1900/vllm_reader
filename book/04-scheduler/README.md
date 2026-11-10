@@ -1085,7 +1085,15 @@ $$
 例：文本 `TTTT` 后接 10 个图像 token，则 $s=4,L=10$。若 $c=4$（前 4 个文本 token 已算完，
 恰好站在 item 起点），预算只剩 $n=5$：$c+n=9<14$，应当切开。v0.32.0 的条件写成 $c<s$，
 $c=4$ 时 $4<4$ 为假，所以漏判，item 会被切成 5+5；v0.33.0（#52412，提交 `12b005eef`）把比较
-改成 $c\le s$，回退为 $n=s-c=0$，本轮不调度这个请求，下一轮再整体处理。encoder-decoder 模型
+改成 $c\le s$，并按下式回退：
+
+$$
+n' = \max\big(0,\ s-(c+\delta)\big)
+$$
+
+其中 $\delta$ 是 `shift_computed_tokens`（drafter 的前瞻位移，函数默认值为 0，调度循环传入
+`num_prefill_lookahead`），含义是“回退后的这一块连同前瞻也不能越过 item 起点”。没有 drafter 前瞻时
+$\delta=0$，上式就是 $n'=\max(0,s-c)$；本例得 $n'=0$，本轮不调度这个请求，下一轮再整体处理。encoder-decoder 模型
 被显式排除在这个检查之外。
 
 ```mermaid
@@ -1096,7 +1104,7 @@ flowchart TD
     C -->|否| OK
     C -->|是| D{c+n < s+L ?}
     D -->|否| OK
-    D -->|是| CUT[n = s − c，回退到 item 之前]
+    D -->|是| CUT["n = max(0, s − (c + δ))，回退到 item 之前"]
     CUT --> E{n 为 0?}
     E -->|是| SKIP[本轮不调度；waiting 请求被 skip，不阻塞后面的请求]
     E -->|否| OK2[只调度 item 之前的文本]
@@ -1114,7 +1122,7 @@ v0.32.0 为了照顾 drafter 的前瞻读取，在 `_free_encoder_inputs()` 里�
 `start_pos + num_tokens <= num_computed_tokens - num_output_placeholders`，截断也改为
 `num_new_tokens = min(num_new_tokens, start_pos - num_computed_tokens)`。依据是 drafter 只读取
 `num_computed_tokens` 之前的位置，读不到尚未编码的输入时回退为 token embedding，所以不会引用
-已释放的 encoder 输出。EPD 场景下，`_ec_transfer_pending` 现在用扣除 `prefix_replay_tokens`
+已释放的 encoder 输出。EPD（把视觉 encoder 阶段与 prefill/decode 拆到不同实例的部署，即 disaggregated encoder）场景下，`_ec_transfer_pending` 现在用扣除 `prefix_replay_tokens`
 之后的位置判断（窗口未随 KV 恢复时），确保回放前缀尾部所需的 encoder 输入也被计入（#62834）。
 
 [测试] `tests/v1/core/test_scheduler.py` - `test_drafter_lookahead_encoder_cache_cap_makes_progress`、
@@ -1168,7 +1176,7 @@ V2 Model Runner 会把 resumed request 合并进 new request 路径；旧路径�
 | `kv_cache_block_copies` | 本轮执行前需要完成的 CoW copy |
 | connector metadata | KV/encoder cache 传输协议数据 |
 | `num_spec_tokens_to_schedule` | 动态 speculative decoding 的 K |
-| `encoder_input_updates` | MRV2 专用：按请求下发 encoder 输入 CPU payload 的释放或恢复（v0.33.0） |
+| `encoder_input_updates` | MRV2（V2 Model Runner）专用：按请求下发 encoder 输入 CPU payload 的释放或恢复（v0.33.0） |
 | `skip_drafts` | 本轮之后提出的 draft 一定用不上，drafter 可以跳过（v0.33.0） |
 
 自 v0.32.0 起已删除 cascade attention 的执行与公共前缀统计链；保留字段不代表该优化仍可达。
@@ -1191,7 +1199,7 @@ drafting 就是浪费。v0.33.0（#62784，提交 `856b98415`）让 Scheduler �
 对每个本轮被调度的请求 $r$，`_drafts_unused` 判定“它之后的 draft 一定用不上”：
 
 $$
-\text{unused}(r)=\big[c+n<T\big]\ \vee\ \big[O+1+P\ge M\big]
+\text{unused}(r)=\big[c+n<T\big]\ \vee\ \big[O+1+a\ge M\big]
 $$
 
 $$
@@ -1199,7 +1207,7 @@ $$
 $$
 
 符号含义：$c$ 是本步前已算 token 数（含前缀缓存与 KV connector 命中）；$n$ 是本步调度的 token
-数；$T$ 是请求当前已知 token 总数（`num_tokens`）；$O$ 是已确认的输出 token 数；$P$ 在存在
+数；$T$ 是请求当前已知 token 总数（`num_tokens`）；$O$ 是已确认的输出 token 数；$a$ 在存在
 async output placeholder 时取 1（还有一个在途的采样步），否则取 0；$M$ 是 `max_tokens`。
 
 白话：第一项说“这一块还没到请求的最后一个已知 token”，也就是一个非末块 prefill，本步不采样，
@@ -1209,7 +1217,7 @@ stop token 与 stop string 无法提前知道，所以只按这两种“确定�
 所做的标记不会撤回（“stays set if preempted later”）。
 
 例：batch 里有 r1（prompt $T=100$，$c=0$，$n=64$，非末块）和 r2（$T=50$，$O=9$，$M=10$，
-$c=49$，$n=1$，$P=0$）。r1：$0+64<100$，成立；r2：$49+1<50$ 不成立，但 $9+1+0\ge10$ 成立。
+$c=49$，$n=1$，$a=0$）。r1：$0+64<100$，成立；r2：$49+1<50$ 不成立，但 $9+1+0\ge10$ 成立。
 两者都 unused，所以 `skip_drafts=True`。若 r2 的 $M=20$，则 $10<20$，r2 需要 draft，整轮
 `skip_drafts=False`。
 
@@ -1219,7 +1227,7 @@ flowchart TD
     A -->|是| B[逐个被调度请求判断 unused]
     B --> C{c+n < T ?}
     C -->|是| U[该请求 unused]
-    C -->|否| D{O+1+P ≥ max_tokens ?}
+    C -->|否| D{O+1+a ≥ max_tokens ?}
     D -->|是| U
     D -->|否| X[drafts_needed = True]
     U --> E{还有请求?}
@@ -1245,7 +1253,7 @@ MRV2 在 Worker 侧为每个请求保留多模态输入的 CPU payload，供需�
 - 新请求（含 resume、streaming 重新安装）的 `mm_features` 里，有 `data` 且不含 `"address"`
   （即不是共享内存描述符）的输入登记为 pending；共享内存描述符走处理器缓存自己的 ACK 协议，
   EngineCore 无法重放其解析后的 tensor。
-- 本轮要（重新）编码的输入若不在 pending 里，把 payload 放进更新表并重新登记。
+- 本轮要（重新）编码的输入若不在 pending 里，把 payload 放进更新表并重新登记；正在被编码的输入（`input_id in encoding`）在释放判断里直接跳过，不会被置 `None`。
 - 已确认消费的输入置 `None`（释放）：当 $\text{offset}+\text{length}\le \text{computed}$，
   其中确认进度 $\text{computed}=\text{num\_computed\_tokens}-\max(\text{num\_output\_placeholders},\text{num\_in\_flight\_tokens})$；
   encoder-decoder 模型只要 $\text{computed}>0$ 就释放。
@@ -1348,23 +1356,24 @@ Scheduler 乐观地把 draft 位置计入 computed；Model Runner 验证后若�
 必须从 `num_computed_tokens` 和 async placeholder 中减去拒绝数。
 
 v0.33.0 把“追加 token、检查 stop、结算 placeholder”统一放进基类
-`Scheduler._update_request_with_output()`，`AsyncScheduler` 不再覆盖这个方法（#58668，提交
-`d486219fc`）。关键是 stop 发生在一次返回的多个 token 中间时的账：设本次返回 $k$ 个 token，
-第 $j$ 个触发 stop（$1\le j\le k$），则
+`Scheduler._update_request_with_output()`，`AsyncScheduler` 不再覆盖这个方法：这一搬迁以及下文
+`cache_blocks` 的上移、placeholder 扣减都来自 #61589（提交 `2fb320d83`）。#58668（提交
+`d486219fc`）只新增了 stop 裁剪的账目。关键是 stop 发生在一次返回的多个 token 中间时的账：设本次返回
+$k$ 个 token，第 $j$ 个触发 stop（$1\le j\le k$），则
 
 $$
 c' = c-(k-j),\qquad P' = P-k
 $$
 
-$c$ 是 `num_computed_tokens`（乐观推进时已把这 $k$ 个都算上，且约定“覆盖到除最后一个新 token
-之外的全部”）；$P$ 是 `num_output_placeholders`。白话：被 stop 截掉的 $k-j$ 个 token 不会交付，
+$c$ 是 `num_computed_tokens`（已计入这 $k$ 个新 token 中除最后一个以外的全部）；$P$ 是
+`num_output_placeholders`，$P'=P-k$ 只在 $P>0$ 且输出不是 stale 时成立，同步调度下 $P=0$ 不扣。白话：被 stop 截掉的 $k-j$ 个 token 不会交付，
 所以要从 computed 里退掉，否则可恢复会话从错误的位置继续；但 placeholder 是为“这次返回的
 全部 token”预留的，所以按 $k$ 全额扣除。例：async + spec decode 一次返回 3 个 token，第 2 个
-触发 stop，则 $c'=c-1$，$P'=P-3$。stale 输出（`is_stale`）两项都不动。
+触发 stop，则 $c'=c-1$，$P'=P-3$（此时 $P>0$）。stale 输出（`is_stale`）两项都不动。
 
 之后，若请求原为 RUNNING、本次输出不是 stale，且此前有 placeholder 或开启了 spec decode，
 基类会调用 `kv_cache_manager.cache_blocks(request, num_computed_tokens - num_in_flight_tokens)`，
-只缓存已确认的部分；这段逻辑原先在 `AsyncScheduler` 里。
+只缓存已确认的部分；这段逻辑原先在 `AsyncScheduler` 里，由 #61589 搬到基类。
 
 [测试] `tests/v1/core/test_scheduler.py` - `test_finished_spec_request_caches_completed_blocks`、
 `test_async_output_does_not_cache_inflight_tokens`；
@@ -1428,7 +1437,7 @@ sequenceDiagram
 
 ### 4.20.1 异步 KV load 也要等 fence（v0.33.0）
 
-HiSparse 解码端在页面被池复用之前仍会读取已释放的页面，所以“往一个被复用的页面里加载 KV”
+HiSparse（把稀疏 MLA 的 KV 卸载到主机内存的方案）解码端在页面被池复用之前仍会读取已释放的页面，所以“往一个被复用的页面里加载 KV”
 也必须等在途 step 结束。v0.33.0（#63827，提交 `8780c3f83`）新增 `defer_async_loads`：
 它为真当且仅当 `defer_block_free` 已开启且 `kv_cache_config.hisparse_host_num_blocks` 不是
 `None`。准入时若 `load_kv_async and defer_async_loads and sched_step_seq > processed_step_seq`，
@@ -1502,8 +1511,7 @@ $$
 \text{defer}\iff I>1\ \wedge\ \neg B\ \wedge\ (N+1)-\ell<I\ \wedge\ \exists\,\text{running decode}
 $$
 
-符号含义：$I$ 是 `local_prefill_interval`；$B$ 是 `prefill_capacity_bound`（上一轮 prefill 已把
-waiting 队列清空时为真）；$N$ 是 `num_executed_steps`（只统计真正调度了 token 的步数，空
+符号含义：$I$ 是 `local_prefill_interval`；$B$ 是 `prefill_capacity_bound`（上一轮放行 prefill 后，waiting 队列里仍有没被接纳的请求，即容量已经占满时为真；源码为 `num_waiting > len(deferred_waiting)`）；$N$ 是 `num_executed_steps`（只统计真正调度了 token 的步数，空
 `schedule()` 不计）；$\ell$ 是 `last_prefill_step`（最近一次带 prefill 的步序号，初始化为
 $-I$，所以第一步不会被拦）；“running decode”指 `running` 里至少有一个不是 prefill chunk 的请求。
 

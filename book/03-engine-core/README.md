@@ -203,7 +203,7 @@ flowchart TB
 调小 `max_model_len`。
 
 auto-fit 缩小 `max_model_len` 之后，读取这个长度的组件也要同步，否则会沿用旧值。v0.33.0 中，
-MRV2 的 draft-model speculator 改为在 auto-fit 之后读取 `max_model_len`，draft attention
+MRV2（V2 Model Runner，新一代 Model Runner）的 draft-model speculator 改为在 auto-fit 之后读取 `max_model_len`，draft attention
 metadata 的 `max_seq_len` 取“draft 上限”与 `max_model_len` 的较小值（#60513，提交
 `636da2476`）。
 
@@ -324,11 +324,12 @@ v0.33.0 对这个 handler 有两处时序调整。其一，多模态处理器缓
 若漂移，EngineCore 会在输出里带回 `mm_cache_miss_hashes`；handler 现在在每个 chunk 的
 `process_outputs()` **之前**调用 `renderer.queue_mm_cache_invalidations()`，保证已经排队的
 渲染任务在下一次缓存查找前就看到失效标记，而不是等错误发布之后才清理（#62164）。
-其二，`generate()` / `encode()` 把 `GenerationError`（含可重试的 `RetryableRequestError`）与
+其二，`generate()` 与 `encode()` 都把 `GenerationError`（含可重试的 `RetryableRequestError`）与
 `VLLMClientError`、`GracefulHTTPError` 一样视为“请求级失败”：只记录并向调用者抛出，
-不当作引擎故障；`n>1` 时若一个子请求被拒绝，还会 abort 其余同胞请求以回收资源。
+不当作引擎故障。只有 `generate()` 在这条分支里额外中止兄弟请求：`n>1` 时若一个子请求被拒绝，
+它会 `abort(q.request_id, internal=True)` 回收其余同胞请求；`encode()` 这条分支不做这一步。
 
-[源码] `vllm/v1/engine/async_llm.py` - `AsyncLLM._run_output_handler`、`_add_request`
+[源码] `vllm/v1/engine/async_llm.py` - `AsyncLLM._run_output_handler`、`AsyncLLM.generate`、`AsyncLLM.encode`
 
 ## 3.4 Client 工厂：四种组合，三条有效路径
 
@@ -391,7 +392,7 @@ get_output  -> EngineCore.step_fn -> post_step
 
 ### 3.4.4 DP 变体：wave 由谁唤醒
 
-DP 部署里，所有 rank 要在同一个“wave”里一起空转或一起推进（MoE 需要各 rank 同步参与
+DP 部署里，所有 rank 要在同一个“wave”（各 rank 同步推进的一轮运行周期）里一起空转或一起推进（MoE 需要各 rank 同步参与
 all-to-all），所以只要有一个 rank 收到新请求，其余空闲 rank 也必须被叫醒。v0.32.0 里这件事
 由**前端**发起：`DPAsyncMPClient.add_request_async()` 发现 `engines_running` 为假，就把
 `("FIRST_REQ", engine)` 经内部 PAIR socket 交给统计任务，转给协调器。问题在于前端对
@@ -587,7 +588,7 @@ KV cache 的真实规格来自执行侧模型层，容量又依赖加载模型�
 2. 根据 backend 和模型能力解析 cache layout。
 3. 用 `get_global_kv_cache_groups` 合并各 worker 的 spec 并分组，据此
    `adjust_dcp_kv_cache_interleave_size`，再通过
-   `set_kv_cache_layout(layout, cp_kv_cache_interleave_size)` 把 layout 与 DCP interleave 一起下发。
+   `set_kv_cache_layout(layout, cp_kv_cache_interleave_size)` 把 layout 与 DCP（decode context parallel，把长上下文的 KV 按 token 维度分到多个 rank）的 interleave 大小一起下发。
 4. profile 可用内存。
 5. `get_kv_cache_configs` 生成各 worker cache config 和 scheduler 汇总 config，直接复用第 3 步的分组。
 6. 更新 block 数、block size、容量与可能 auto-fit 的最大长度。
@@ -597,7 +598,7 @@ KV cache 的真实规格来自执行侧模型层，容量又依赖加载模型�
 9. compile 或 warm up 模型。
 
 第 3 步是 v0.33.0 的顺序变化（#62330，提交 `3e75ccba2`）：全局分组与 DCP interleave 必须在
-profile 之前确定，使 NIXL 的 DCP interleave 大小在 profiling 开始时就是最终值；
+profile 之前确定，使 NIXL（跨实例传输 KV 的 connector）的 DCP interleave 大小在 profiling 开始时就是最终值；
 第 8 步（#52921）让 PP 与 spec decode 下各 worker 的 CPU offload 池大小一致，由 worker 汇报
 最终块数，缺失时直接 `assert` 失败。规划函数本身已迁到 `kv_cache_planning.py`（#61183），
 细节见第 05 章 5.5.5。
@@ -656,9 +657,10 @@ sequenceDiagram
 
 > **读图方法：** 这是“请求消息与 Utility RPC”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
-`profile` 这类 utility 在 v0.33.0 多带一个 `profiler_kwargs`（#51974）：HTTP `/start_profile`
-的 payload（如 `profile_prefix`）经 `AsyncLLM.start_profile` → `EngineCoreClient.profile` →
-`EngineCore.profile` → `executor.profile` 原样透传，不在中途解释。
+`profile` 这类 utility 在 v0.33.0 多带一个 `profiler_kwargs`（#51974）。它是与 `profile_prefix`
+并列的另一个字段（`profile_prefix` 仍是单独参数，不属于 `profiler_kwargs`）：`AsyncLLM.start_profile`
+收到的 `profiler_kwargs` 字典经 `EngineCoreClient.profile` → `EngineCore.profile` →
+`executor.profile` 原样透传，不在中途解释。
 
 返回值本身也可能是 Future，例如 pause 要等 engine 真正 idle。`_invoke_utility_method()`
 会注册 callback，而不是阻塞 core 主线程。
@@ -1603,6 +1605,9 @@ Actor mixin 提供 Ray 生命周期、可见 GPU 和免握手覆盖；EngineCore
 - [ ] 在真实 NVIDIA GPU 上采集 Future、CUDA stream 与 batch queue 时间线。
 - [ ] 启动真实在线服务验证信号、ZMQ 和 EngineDeadError 传播。
 - [ ] 由独立审阅者复核后将状态改为 `verified`。
+
+2026-11-10 已对照 v0.33.0（`4ba787ec9959`）静态复核，修订清单见
+[v0.33.0 升级核对](../../meta/upgrade-v0.33.0-2026-11-10/03-engine-core.md)。
 
 本章正文已经完整，`content_complete=true`。当前机器缺少可用 vLLM GPU runtime，
 因此 `runtime_verified=false`，按项目规则保持 `draft`。
