@@ -1662,8 +1662,7 @@ v0.33.0 在这条路径上有四处与旧正文相比的变化：
    graph 时也会得到估算（`7128f568a`，#58243）。
 3. **profiling pass 不测 adaptive verification。** `capture_model(profile_only=True)` 时跳过
    adaptive verification 的 cost 曲线 profiling（`4135590ff`，#63431），这类 dummy run 与 graph 内存无关。
-4. **EPLB 统计不受影响。** `GPUModelRunner.profile_cudagraph_memory` 整个包在 `eplb.suppress()` 里
-   （`87e7dce3a`，#56716），profiling/warmup 的 dummy 流量不进入 EPLB 负载统计。
+4. **EPLB 统计不受影响。** `GPUModelRunner.profile_cudagraph_memory`（`gpu/model_runner.py` L1129–L1136 @ `05caae03`）在开启 `enable_extensible_kv_cache` 时先直接返回 0，这一早退发生在 `eplb.suppress()` 之前；其余路径才把实际估算包在 `eplb.suppress()` 里（`87e7dce3a`，#56716），因此 profiling/warmup 的 dummy 流量不进入 EPLB 负载统计。
 
 ### 可选 cuMem graph pool 的边界
 

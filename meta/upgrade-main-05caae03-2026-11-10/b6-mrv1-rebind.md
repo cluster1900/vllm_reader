@@ -5,7 +5,7 @@
 - 触发变更：`aac1b2a4f36e742c1f55bcb34ca9aaa5e6e02592`（#63373，`[Core] Remove Model Runner V1`，2026-11-07）是 `05caae03` 与 `v0.34.0rc0` 的祖先，**不在** v0.33.0 里。删除后 `vllm/v1/worker/gpu_model_runner.py` 及其整套（`block_table.py`、`v1/sample/sampler.py`、`cudagraph_dispatcher.py`、`cp_utils` 里的 MRV1 符号等）不复存在，`vllm/v1/worker/gpu/…` 的 `GPUModelRunner` 是唯一 Runner。
 - 删除之后的配置面（正文均已按此重写）：`VLLM_USE_V2_MODEL_RUNNER` 未设置 OK、值为 `1` 只 warning、其他值在 `Platform.validate_environ` 里 `ValueError`；`_validate_model_runner` / `_get_model_runner_unsupported_features` 只剩 external_launcher+`PP>1` 与 DBO 的组合；standalone CPU Runner 有自己的不支持清单；Worker 另有 Triton 检查。
 - 章节仍为 draft，`runtime_verified=false`；全部静态源码核对，没有跑 GPU。
-- 约定：各章里“main 上的变化（未发版）”小节和 7.32、8.26 的发布祖先表保留为 v0.33.0 时代的历史记录；只有与新正文**直接矛盾**的条目被合并或删除（#61464、#60960、#63778）。
+- 约定：7.32、8.26 的发布祖先表保留为 v0.33.0 时代的历史记录；各章里原“main 上的变化（未发版）”注记已在 r2 改写为“已包含在本书基线中，正文尚未展开（后续批次补写）”，不再使用“未发版”标签（详见第五节第 6 项）。只有与新正文**直接矛盾**的条目被合并或删除（#61464、#60960、#63778）。
 - 写法约定：已删除的文件在正文里用短写（如 `v1/sample/sampler.py`），避免被 `check_book` 当成指向缺失文件的源码路径；历史对照引用 `docs/design/model_runner_v2.md`，并标明是历史对照。
 
 ## 一、MRV1 删除带来的改绑（按章）
@@ -46,7 +46,7 @@
 
 - ch08 §8.14 的 capture-size 配置拆分（`prefill_/decode_cudagraph_capture_*`）和 `_decode_descs` 请求数表只做了简短提示，没有展开重写；如要完整覆盖需另起一批。
 - MRV2 里没有对应 compile_sizes padding 校验，正文只写“已删除”，没有断言替代行为。
-- 7.32、8.26 的发布祖先表与“main 上的变化”注记保留 v0.33.0 时代口径，不是遗漏。
+- 7.32、8.26 的发布祖先表仍保留 v0.33.0 时代口径，不是遗漏。“main 上的变化”注记已在 r2 按第五节第 6 项改写，不再使用“未发版”标签。
 - 上游 `docs/` 里仍有 V1 历史叙述（含 `docs/design/model_runner_v2.md` 的 MRV1 对照），本批未据此改动；按规则不对外提交，仅记在 bot-hub。
 - B7（block_size=64、可扩展 KV）与 B8（XPress/FLy、Elastic EP、`/v1/decisions`、watchdog）内容未写；只在引用需要时点到。
 
