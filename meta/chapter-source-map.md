@@ -142,4 +142,4 @@ python3 scripts/check_book.py
 
 ## 2026-11-10 main `05caae03` 锚点（第 05 章）
 
-- 05：`vllm/config/cache.py` 的 `CacheConfig.DEFAULT_BLOCK_SIZE`（默认 64）与 `enable_extensible_kv_cache`；`vllm/config/vllm.py` 的 `_resolve_extensible_kv_cache`；`vllm/v1/worker/extensible_kv_cache.py` 的 `ExtensibleKVCache` / `extend_kv_cache`；`kv_cache_planning.finalize_extensible_kv_cache`。记录见 [核对说明](upgrade-main-05caae03-2026-11-10/b7-block64-extensible-kv.md)。
+- 05：`vllm/config/cache.py` 的 `CacheConfig.DEFAULT_BLOCK_SIZE`（配置默认 64）与 `enable_extensible_kv_cache`；`vllm/platforms/interface.py` 的 `update_block_size_for_backend`；`vllm/config/vllm.py` 的 `_resolve_extensible_kv_cache`；`vllm/v1/worker/extensible_kv_cache.py` 的 `ExtensibleKVCache` / `extend_kv_cache`；`kv_cache_planning.finalize_extensible_kv_cache`。记录见 [核对说明](upgrade-main-05caae03-2026-11-10/b7-block64-extensible-kv.md)。

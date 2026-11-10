@@ -205,8 +205,17 @@ flowchart LR
 
 采用一组典型参数演示，不把它当成对任意模型配置的承诺。未显式传入 `--block-size` 时，
 `CacheConfig.DEFAULT_BLOCK_SIZE` 现为 **64**（`732e49d44`，[#63231](https://github.com/vllm-project/vllm/pull/63231)）；
-在此之前同一常量是 16。显式传入 16 仍然合法，只是会把 `user_specified_block_size` 置真。
-下面的算例改用当前默认，以便与启动后真实 `block_size` 对齐。
+在此之前同一常量是 16。这只是配置默认：启动时平台、backend 和混合模型对齐可能改成别的值
+（`Platform.update_block_size_for_backend`，`vllm/platforms/interface.py:760` @ `05caae03`）。
+多 backend 时取各 backend 都支持的块大小的最小公倍数（`_preferred_block_size_for_backends`，
+`interface.py:710`），FlashAttention 有自己的偏好（`get_preferred_block_size`，
+`backend.py:159`、`flash_attn.py:334`）；混合模型还会把 attention 块对齐到 mamba page
+（`_align_hybrid_block_size`，`interface.py:950`，写入 `:1140`）。CPU 路径的偏好起点是
+128，CPU MLA 会改成 16，DeepSeek-V4 CPU 会改成 256（`cpu.py:561`、`:297`、`:308`）。
+显式传入 16 会把 `user_specified_block_size` 置真，从而跳过「按 backend 偏好改写配置默认」
+这一步，但混合模型对齐和部分平台（例如 CPU MLA）仍可能覆盖用户指定的值
+（`interface.py:793-804`）。下面的算例使用配置默认 64，只用于数量级直觉，不代表启动后的最终
+`block_size`。
 
 | 参数 | 值 |
 |---|---:|
@@ -215,7 +224,7 @@ flowchart LR
 | head size | 128 |
 | KV dtype | BF16，2 bytes |
 | TP | 1 |
-| block size | 64 tokens（当前默认） |
+| block size | 64 tokens（配置默认） |
 
 每 token：
 
@@ -239,8 +248,9 @@ B_{\mathrm{sequence}}=(8192\,\mathrm{token})\times128\,\frac{\mathrm{KiB}}{\math
 $$
 
 白话：每个 token 的 KV 仍是 128 KiB，整段 8192 token 仍约占 1 GiB——这两项只取决于层数、
-头数、维度和 dtype，与 block 切分无关。改变的是一块里装多少 token：默认从 16 变成 64 之后，
+头数、维度和 dtype，与 block 切分无关。改变的是一块里装多少 token：配置默认从 16 变成 64 之后，
 每块从 2 MiB 变成 8 MiB，同样长的序列会占用更少的 block 条目，尾块可能浪费更多位置。
+启动时的最终块大小仍可能与这个配置默认不同。
 
 随书函数可复算这个结果：
 
@@ -259,6 +269,8 @@ assert per_token * 8192 == 1024**3
 ```
 
 [源码] `vllm/config/cache.py` - `CacheConfig.DEFAULT_BLOCK_SIZE`、`_apply_block_size_default`（`:185`、`:475` @ `05caae03`）
+
+[源码] `vllm/platforms/interface.py` - `Platform.update_block_size_for_backend`（`:760`）
 
 ### 5.2.2 TP 不能总按 $1/\mathrm{TP}$ 生搬硬套
 
@@ -710,9 +722,9 @@ Worker 只负责接收并赋值。
 ### 5.6.5 Extensible KV：先预留地址，再按实测定稿
 
 > **本节先看：** 上一小节里的 `num_blocks` 在普通路径上是 profiling 估计后再一次性分配的结果。
-> Extensible KV 把「地址空间」和「物理页」拆开：先预留够大的虚拟区间，warmup 与 CUDA Graph
-> 捕获完成后再按真实空闲内存把前缀定稿。`KVCacheSpec` 与 block ID 规划不变，变的是这些字节
-> 何时真正占显存。
+> Extensible KV 把「地址空间」和「物理页」拆开：先预留够大的虚拟区间，warmup 结束后按各 rank
+> 实测的空闲内存 finalize 容量，再 extend、commit 前缀并重建视图。`KVCacheSpec` 与 block ID
+> 规划不变，变的是这些字节何时真正占显存。
 
 主提交是 `860da3daf`（[#56492](https://github.com/vllm-project/vllm/pull/56492)）；其后还有
 segment padding（#65225）、按实测空闲量重新拟合 `--max-model-len auto`（#65463）、UMA / ROCm
@@ -723,7 +735,10 @@ segment padding（#65225）、按实测空闲量重新拟合 `--max-model-len au
 `VllmConfig._resolve_extensible_kv_cache`（`vllm/config/vllm.py:3176` @ `05caae03`）在
 CUDA/ROCm 上、且没有 `kv_cache_memory_bytes`、`num_gpu_blocks_override`、Elastic EP，以及
 若干 KV connector 限制时，把它落成 `True`；显式要求却不支持则抛 `ValueError`。NIXL 占用
-device memory 且没有 IMEX 通道时默认关掉，避免同机 NVLink 退化。开启后，未指定的
+device memory 且没有 IMEX 通道时默认关掉，避免同机 NVLink 退化。配置落定之后，Engine 在
+`_initialize_kv_caches` 里还会再查一次 `extensible_kv_cache_unsupported_reason`；若有原因
+（例如某 rank 的 VMM 不可用），就调用 `disable_extensible_kv_cache` 关掉
+（`core.py:312-317` @ `05caae03`）。开启后，未指定的
 `gpu_memory_utilization` 可落到 1.0（`CacheConfig.resolved_gpu_memory_utilization`，
 `:488`），因为物理页是按实测 commit，不再靠 0.92 预留余量。这也解释了 §5.6.1 第 3 项：
 extensible 路径下 `profile_cudagraph_memory()` 返回 0——捕获占用会在定稿时按实测扣除，
@@ -733,35 +748,41 @@ extensible 路径下 `profile_cudagraph_memory()` 返回 0——捕获占用会�
 
 1. **enable / resolve**：上面的开关落定。若关闭或不支持，仍走 §5.6.1–5.6.3 的估计后一次性分配。
 2. **规划容量**：`get_kv_cache_configs` 给出的 `num_blocks` 此时是**预留上限**，不是已占用的块数。
-   `ExtensibleKVCache`（`extensible_kv_cache.py:71`）按 layout 预留虚拟地址。
-3. **extend**：warmup / CUDA Graph 期间可按需 `commit` 前缀；捕获结束后 `extend_kv_cache`
-   （`:450`）按量测结果把物理前缀定稿（必要时缩小或整理映射），再绑定 KV 视图。
-4. **finalize**：Engine 侧 `finalize_extensible_kv_cache`（`kv_cache_planning.py:1839`）把
-   Scheduler 可见的 `num_blocks` 收成最终值。`--max-model-len auto` 还可能再拟合一次。
+   `ExtensibleKVCache`（`extensible_kv_cache.py:71`）按 layout 预留虚拟地址。warmup 期间可
+   通过 `ensure_kv_cache_blocks`（`:443`）按需 commit 前缀；CUDA Graph 捕获本身不会为此加 commit。
+3. **finalize**：各 rank 在 warmup 结束后量测可 commit 的块数，并取最小值
+   （`gpu_worker.py:1233-1243`）。Engine 先调用 `finalize_extensible_kv_cache`
+   （`kv_cache_planning.py:1839`，调用点 `core.py:413`）按这个最小值收束 Scheduler
+   容量，必要时再拟合 `--max-model-len auto`。
+4. **extend**：然后 `model_executor.extend_kv_cache(num_blocks)`（`core.py:422`）让各
+   Worker `commit` 定稿前缀并重建视图（`extend_kv_cache`，`extensible_kv_cache.py:450`）。
 
 ```mermaid
 flowchart TB
     EN[enable_extensible_kv_cache<br/>默认未决] --> RES["_resolve_extensible_kv_cache<br/>按平台与限制落定"]
     RES -->|开启| PLAN[规划 num_blocks 为容量上限]
     PLAN --> ALLOC[ExtensibleKVCache<br/>预留虚拟地址]
-    ALLOC --> EXT[extend_kv_cache<br/>按实测定稿前缀]
-    EXT --> FIN[finalize_extensible_kv_cache<br/>Scheduler 使用最终块数]
+    ALLOC --> FIN[finalize_extensible_kv_cache<br/>取各 rank 量测最小值<br/>写入 Scheduler 容量]
+    FIN --> EXT[extend_kv_cache<br/>Worker commit 并重建视图]
     RES -->|关闭或不支持| OLD[走估计后一次性分配]
 ```
 
-> **读图方法：** 先看左侧「开启」一条主链：enable → resolve → 预留 → extend → finalize。
-> 右边「关闭或不支持」回到 §5.6.1 的估计分配。定稿前的 `num_blocks` 只是容量上限，不要把它
-> 读成已经占用的显存块数。
+> **读图方法：** 先看左侧「开启」一条主链：enable → resolve → 预留 → finalize → extend。
+> finalize 在 extend 之前：Engine 先按各 rank 量测的最小值写好 Scheduler 容量，再让 Worker
+> commit 并重建视图。右边「关闭或不支持」回到 §5.6.1 的估计分配。finalize 之前的
+> `num_blocks` 只是容量上限，不要把它读成已经占用的显存块数。
 
 [源码] `vllm/config/cache.py` - `enable_extensible_kv_cache`（`:388` @ `05caae03`）
 
 [源码] `vllm/config/vllm.py` - `_resolve_extensible_kv_cache`（`:3176`）
 
-[源码] `vllm/v1/worker/extensible_kv_cache.py` - `ExtensibleKVCache`、`extend_kv_cache`（`:71`、`:450`）
+[源码] `vllm/v1/worker/extensible_kv_cache.py` - `ExtensibleKVCache`、`ensure_kv_cache_blocks`、`extend_kv_cache`（`:71`、`:443`、`:450`）
 
 [源码] `vllm/v1/core/kv_cache_planning.py` - `finalize_extensible_kv_cache`（`:1839`）
 
-[源码] `vllm/v1/engine/core.py` - `_initialize_kv_caches` 中 extensible 分支（`:312`、`:386`、`:413`）
+[源码] `vllm/v1/engine/core.py` - `_initialize_kv_caches` 中 extensible 分支（`:312-317`、`:413`、`:422`）
+
+[源码] `vllm/v1/worker/gpu_worker.py` - warmup 结束后的 `measure_kv_cache_blocks`（`:1233-1243`）
 
 ## 5.7 管理栈的职责拆分
 
@@ -1634,8 +1655,8 @@ $$
 白话：窗口再往左的整块页，后面的 kernel 一定不需要，就别再让它们指向可能已被复用的物理页，
 统一指到 null。算例：窗口 128、无额外保留（`R=127`），`T=16`，`p=300`：
 `(300-127)//16 = 10`，前 10 个 entry（覆盖 token 0–159，都在 173 以下）被置为 null。
-这里的 `T=16` 只是为了让整除关系好看的教学取值，不是当前默认；未指定时默认 block size 是
-64，见 §5.2.1。这是对源码规则的手算，不是 GPU 运行结果。Context parallel（`cp_size>1`）时 block table 的列
+这里的 `T=16` 只是为了让整除关系好看的教学取值，不是当前配置默认；未指定时配置默认
+block size 是 64，见 §5.2.1。启动时平台、backend 和混合模型对齐可能改成别的值。这是对源码规则的手算，不是 GPU 运行结果。Context parallel（`cp_size>1`）时 block table 的列
 不再对应连续的 token 区间，这道保险被关闭。
 
 ```mermaid

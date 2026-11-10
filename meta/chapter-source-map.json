@@ -84,6 +84,7 @@
       {"path": "vllm/v1/core/kv_cache_planning.py", "symbols": ["def check_enough_kv_cache_memory", "def get_kv_cache_config_from_groups", "def get_kv_cache_groups", "def get_kv_cache_configs", "def get_global_kv_cache_groups", "class DefaultKVCacheConfigBuilder", "def finalize_extensible_kv_cache"]},
       {"path": "vllm/v1/core/kv_cache_config_builder.py", "symbols": ["class KVCacheConfigBuilder", "def get_kv_cache_config_builder"]},
       {"path": "vllm/config/cache.py", "symbols": ["DEFAULT_BLOCK_SIZE", "enable_extensible_kv_cache", "def _apply_block_size_default"]},
+      {"path": "vllm/platforms/interface.py", "symbols": ["def update_block_size_for_backend"]},
       {"path": "vllm/config/vllm.py", "symbols": ["def _resolve_num_hash_lookahead_tokens", "def adjust_dcp_kv_cache_interleave_size", "def _resolve_extensible_kv_cache"]},
       {"path": "vllm/v1/core/kv_cache_manager.py", "symbols": ["class KVCacheBlocks", "class KVCacheManager", "def get_computed_blocks", "def allocate_slots", "def free", "def cache_blocks"]},
       {"path": "vllm/v1/core/kv_cache_coordinator.py", "symbols": ["class KVCacheCoordinator", "class UnitaryKVCacheCoordinator", "class HybridKVCacheCoordinator", "def find_longest_cache_hit", "def replay_boundaries", "def reset_prefix_cache", "def get_num_cacheable_tokens"]},
