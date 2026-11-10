@@ -84,7 +84,7 @@ benchmark 测性能，profiler 解释耗时所在。先保留原始样本，再�
 
 **第一遍走法：** 读 10.1–10.4、10.7、10.10、10.18，运行 10.23，再做综合案例；
 多种 profiler 与扫参工具可第二遍选读。**停下来算：** 发送后 0.3 秒收到首 token，
-共 5 token，末 token 在 0.5 秒，TPOT=$\frac{0.5-0.3}{4}=0.05$ 秒；客户端发前排队另计。
+共 5 token，末 token 在 0.5 秒，$\mathrm{TPOT}=\frac{0.5-0.3}{5-1}=0.05$ 秒（分母是 5 个 token 之间的 4 个间隔）；客户端发前排队另计。
 
 ## 10.1 先定义“谁觉得快”
 
@@ -146,11 +146,11 @@ sequenceDiagram
 
 > **读图方法：** 这是“客户端看到的时间线”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
-先采用每个内容事件对应一个 token 的教学模型。所有 `t` 来自同一客户端时钟，
-以下时间差统一用秒；`N` 是输出 token 数，不是响应消息条数。由此定义：
+先采用每个内容事件对应一个 token 的教学模型。所有 $t$ 来自同一客户端时钟，
+以下时间差统一用秒；$N_{\mathrm{out}}$ 是这个请求的输出 token 数，不是响应消息条数。由此定义：
 
 $$
-T_{\mathrm{client\ queue}}=t_{\mathrm{send}}-t_{\mathrm{arrival}}
+\Delta t_{\mathrm{client\ queue}}=t_{\mathrm{send}}-t_{\mathrm{arrival}}
 $$
 
 $$
@@ -158,18 +158,61 @@ $$
 $$
 
 $$
-\mathrm{ITL}_j=t_j-t_{j-1}
+\mathrm{ITL}_j=t_j-t_{j-1},\qquad j=2,3,\dots,N_{\mathrm{out}}
 $$
 
 $$
 \mathrm{E2EL}=t_{\mathrm{last}}-t_{\mathrm{send}}
 $$
 
-若输出 token 数为 `N>1`：
+**白话：**在一个请求的时间线上标出四类点：到达、发出、第一次收到输出、最后一次收到输出；每个指标都是其中两个点相减。
+
+**其中：**$t_{\mathrm{arrival}}$ 是请求到达 load generator（创建任务）的时刻；$t_{\mathrm{send}}$ 是请求函数里 `session.post(...)` 之前读的时钟（`start_time`）；
+$t_j$ 是第 $j$ 个被计入的流式事件的时刻，$t_1=t_{\mathrm{first}}$，$t_{N_{\mathrm{out}}}=t_{\mathrm{last}}$（教学模型里一个事件一个 token，所以事件数等于 $N_{\mathrm{out}}$）。
+$\Delta t_{\mathrm{client\ queue}}$ 是请求在客户端 semaphore 前等的时间，$\mathrm{TTFT}$ 是首 token 时延，$\mathrm{ITL}_j$ 是第 $j-1$ 与第 $j$ 个事件的间隔（第 1 个事件前面没有“上一个事件”，所以从 $j=2$ 起），
+$\mathrm{E2EL}$ 是端到端时延；单位都是秒。
+
+**怎么算出来：**这四个式子是定义式，每个差值对应源码里一条读时钟语句。以 completion 适配器为例：`st = time.perf_counter()` 记下 $t_{\mathrm{send}}$（`vllm/benchmarks/lib/endpoint_request_func.py:248`）；
+首个被计入的事件执行 `output.ttft = timestamp - st`（`:289`）；之后每个事件把 `timestamp - most_recent_timestamp` 追加进 `output.itl`（`:293`）；
+结束时 `output.latency = most_recent_timestamp - st`（`:313`）。客户端排队则在 `vllm/benchmarks/serve.py:1016`：`output.client_queue_time = output.start_time - request_arrival_time`，其中 `request_arrival_time` 在创建请求任务时读取（`:1110`）。
+chat 适配器的对应语句在 `:450`、`:487`、`:491`、`:514`，形状相同。
+
+再取一个教学用的请求走一遍（数字不是实测）：$t_{\mathrm{arrival}}=0$，$t_{\mathrm{send}}=0.2$，5 个事件的时刻依次是 $0.50$、$0.53$、$0.60$、$0.65$、$0.70$（秒），即 $t_{\mathrm{first}}=0.50$、$t_{\mathrm{last}}=0.70$。
+
+- $\Delta t_{\mathrm{client\ queue}}=0.2-0=0.2$ 秒；
+- $\mathrm{TTFT}=0.50-0.2=0.3$ 秒；
+- $\mathrm{ITL}_2,\dots,\mathrm{ITL}_5$ 依次是 $0.53-0.50=0.03$、$0.60-0.53=0.07$、$0.65-0.60=0.05$、$0.70-0.65=0.05$ 秒，共 $N_{\mathrm{out}}-1=4$ 个样本；
+- $\mathrm{E2EL}=0.70-0.2=0.5$ 秒。
+
+单位检查：每个量都是两个时间戳相减，所以都是秒。$\mathrm{E2EL}$ 从 $t_{\mathrm{send}}$ 起算，不含那 0.2 秒客户端排队；需要含排队时，`serve.py:1362-1368` 另报 `e2el_including_client_queue`
+（$=\mathrm{E2EL}+\Delta t_{\mathrm{client\ queue}}$，仅在设置了 max concurrency 且 request rate 有限时），本例是 $0.5+0.2=0.7$ 秒。
+
+**核对：**随书 `examples/ch10_benchmark_reasoning.py` 的 `RequestTrace(arrival_time=0.0, send_time=0.2, token_times=(0.50, 0.53, 0.60, 0.65, 0.70), prompt_tokens=1)`
+给出的 `client_queue_time`、`ttft`、`itls`、`e2el` 与上面一致（浮点误差在 $10^{-12}$ 秒以内）；它的 `ttft`、`itls`、`e2el` 属性与上面三条定义逐行同义。
+
+若输出 token 数 $N_{\mathrm{out}}>1$：
 
 $$
-\mathrm{TPOT}=\frac{\mathrm{E2EL}-\mathrm{TTFT}}{N-1},\qquad N>1
+\mathrm{TPOT}=\frac{\mathrm{E2EL}-\mathrm{TTFT}}{N_{\mathrm{out}}-1},\qquad N_{\mathrm{out}}>1
 $$
+
+**白话：**TPOT 是“首个 token 之后，平均每多生成一个 token 要多久”：先从总耗时里扣掉首 token 的那一段，再平摊到剩下的 token 上。
+
+**其中：**$N_{\mathrm{out}}$ 是这个请求实际输出的 token 数（token）；$\mathrm{E2EL}-\mathrm{TTFT}$ 是首事件之后的时间（秒）；$\mathrm{TPOT}$ 的单位是秒/token。
+$N_{\mathrm{out}}=1$ 时首 token 之后没有 token，分母为 0，所以要求 $N_{\mathrm{out}}>1$。
+
+**怎么算出来：**
+
+1. 把 $t_{\mathrm{send}}$ 到 $t_{\mathrm{last}}$ 拆成两段：先是到首事件的 $\mathrm{TTFT}$，然后是首事件之后的各个间隔，即
+   $\mathrm{E2EL}=\mathrm{TTFT}+\sum_{j=2}^{N_{\mathrm{out}}}\mathrm{ITL}_j$（相邻时刻之差相加，中间的时刻互相抵消，只剩 $t_{\mathrm{last}}-t_{\mathrm{send}}$）；
+2. 移项得 $\mathrm{E2EL}-\mathrm{TTFT}=\sum_{j=2}^{N_{\mathrm{out}}}\mathrm{ITL}_j$，这是 $N_{\mathrm{out}}-1$ 个间隔之和；
+3. 首 token 之后还剩 $N_{\mathrm{out}}-1$ 个 token，平均每个 token 的耗时就是这个和除以 $N_{\mathrm{out}}-1$。
+
+代入上面的算例：$\mathrm{TPOT}=\frac{0.5-0.3}{5-1}=0.05$ 秒/token，恰好等于 4 个 ITL 样本的平均 $\frac{0.03+0.07+0.05+0.05}{4}=0.05$。单位检查：秒 $\div$ token $=$ 秒/token。
+
+**核对：**`vllm/benchmarks/serve.py:655-658`：`if output_len > 1:` 才计算 `tpot = (latency - ttft) / (output_len - 1)`，与上式一致。
+但源码里的 `output_len` 优先取 usage 的 `completion_tokens`，缺失时才用 tokenizer 重数（`:636-651`），所以分母是 token 数，不是事件数：
+一个事件带多个 token 时，TPOT 仍按 token 数平摊，而 ITL 样本数是事件数减 1，“TPOT 等于 ITL 平均”只在上面“一事件一 token”的教学模型里成立。
 
 ### 生活化直觉：聊天体验与测量指标怎样对应
 
@@ -180,12 +223,20 @@ SSE 事件。下表沿用本章 `bench serve` 的客户端计时起点，并与�
 | 指标 | 体验上的近似对应 | 本章测量口径 | 需要注意 |
 |---|---|---|---|
 | TTFT | 等待首次响应 | 请求函数内 HTTP 调用前的计时点，到首个被适配器计入的流式事件 | 不含请求函数前的 semaphore 排队；也未必等于首个可见汉字 |
-| TPOT | 首次响应后的平均生成速度 | $\frac{\mathrm{E2EL}-\mathrm{TTFT}}{N-1}$，`N>1` | 单位为秒/token，不能按汉字数计算 |
+| TPOT | 首次响应后的平均生成速度 | $\frac{\mathrm{E2EL}-\mathrm{TTFT}}{N_{\mathrm{out}}-1}$，$N_{\mathrm{out}}>1$ | 单位为秒/token，不能按汉字数计算 |
 | ITL | 流式更新是否有长间隔 | 相邻被计入的流式事件间隔 | 事件可能含多个 token，不是逐字时间 |
-| E2EL | 等待整个回复结束 | 请求函数内 HTTP 调用前的计时点，到适配器规定的末计时点 | 相同口径且 `N>1` 时为 $\mathrm{TTFT}+(N-1)\mathrm{TPOT}$ |
+| E2EL | 等待整个回复结束 | 请求函数内 HTTP 调用前的计时点，到适配器规定的末计时点 | 相同口径且 $N_{\mathrm{out}}>1$ 时为 $\mathrm{TTFT}+(N_{\mathrm{out}}-1)\,\mathrm{TPOT}$ |
 
-例如生成 5 个 token，TTFT=0.3 秒、TPOT=0.05 秒，则 E2EL=0.5 秒；若用户在发送
+**白话：**表里 TPOT 与 E2EL 两行互为移项：知道 TTFT、TPOT 和 token 数，就能算出 E2EL，反过来也一样。
+
+**其中：**符号同 10.2.1：$N_{\mathrm{out}}$ 是输出 token 数，TTFT、E2EL 的单位是秒，TPOT 的单位是秒/token。
+
+**怎么算出来：**把 $\mathrm{TPOT}=\frac{\mathrm{E2EL}-\mathrm{TTFT}}{N_{\mathrm{out}}-1}$ 两边乘 $N_{\mathrm{out}}-1$、再加 $\mathrm{TTFT}$，
+得 $\mathrm{E2EL}=\mathrm{TTFT}+(N_{\mathrm{out}}-1)\,\mathrm{TPOT}$：首 token 的等待，加上其余 $N_{\mathrm{out}}-1$ 个 token 各自的平均耗时。
+例如生成 5 个 token，$\mathrm{TTFT}=0.3$ 秒、$\mathrm{TPOT}=0.05$ 秒/token，则 $\mathrm{E2EL}=0.3+(5-1)\times0.05=0.5$ 秒；若用户在发送
 之前已经等待 0.2 秒，UI 的总体验还需单独计入这段等待。
+
+**核对：**与 10.2.1 的算例（$0.3$、$0.05$、$0.5$）一致。
 
 [源码] `vllm/benchmarks/serve.py` - `calculate_metrics`
 
@@ -280,33 +331,69 @@ flowchart TD
 
 ### 10.3.1 三种吞吐分母相同，分子不同
 
-设 benchmark duration 为 `T` 秒、成功请求数为 `R`、成功请求的输入和输出 token 总数
-分别为 `I`、`O`。请求吞吐单位是 request/s，token 吞吐单位是 token/s：
+设 benchmark duration 为 $\Delta t_{\mathrm{bench}}$ 秒、成功请求数为 $n_{\mathrm{req}}$、成功请求的输入和输出 token 总数
+分别为 $N_{\mathrm{in}}^{\Sigma}$、$N_{\mathrm{out}}^{\Sigma}$。请求吞吐单位是 request/s，token 吞吐单位是 token/s：
 
 $$
-\text{request throughput}=\frac{R}{T}
-$$
-
-$$
-\text{output throughput}=\frac{O}{T}
+\mathrm{thr}_{\mathrm{req}}=\frac{n_{\mathrm{req}}}{\Delta t_{\mathrm{bench}}}
 $$
 
 $$
-\text{total token throughput}=\frac{I+O}{T}
+\mathrm{thr}_{\mathrm{out}}=\frac{N_{\mathrm{out}}^{\Sigma}}{\Delta t_{\mathrm{bench}}}
 $$
+
+$$
+\mathrm{thr}_{\mathrm{tot}}=\frac{N_{\mathrm{in}}^{\Sigma}+N_{\mathrm{out}}^{\Sigma}}{\Delta t_{\mathrm{bench}}}
+$$
+
+**白话：**同一段时间里数三样东西：完成了多少请求、产出了多少输出 token、一共处理了多少输入加输出 token，各自除以这段时间，就是请求吞吐、输出吞吐和总 token 吞吐。
+
+**其中：**$\mathrm{thr}_{\mathrm{req}}$ 是请求吞吐（request throughput，request/s），$\mathrm{thr}_{\mathrm{out}}$ 是输出吞吐（output throughput，token/s），
+$\mathrm{thr}_{\mathrm{tot}}$ 是总 token 吞吐（total token throughput，token/s）；$\Delta t_{\mathrm{bench}}$ 是整个 benchmark 的时长（秒）；
+$n_{\mathrm{req}}$ 是成功请求数（request）；$N_{\mathrm{in}}^{\Sigma}$、$N_{\mathrm{out}}^{\Sigma}$ 是这些成功请求的输入、输出 token 总数（token）。
+
+**怎么算出来：**三个式子的分母是同一个 $\Delta t_{\mathrm{bench}}$，只有分子不同：请求数、输出 token 总数、输入加输出 token 总数。
+取教学数字：$\Delta t_{\mathrm{bench}}=20$ 秒，成功请求 $n_{\mathrm{req}}=100$ 个，每个请求输入 512 token、输出 128 token，
+所以 $N_{\mathrm{in}}^{\Sigma}=100\times512=51200$ token，$N_{\mathrm{out}}^{\Sigma}=100\times128=12800$ token。则
+
+- $\mathrm{thr}_{\mathrm{req}}=100\ \mathrm{request}\div20\ \mathrm{s}=5\ \mathrm{request/s}$；
+- $\mathrm{thr}_{\mathrm{out}}=12800\ \mathrm{token}\div20\ \mathrm{s}=640\ \mathrm{token/s}$；
+- $\mathrm{thr}_{\mathrm{tot}}=(51200+12800)\ \mathrm{token}\div20\ \mathrm{s}=3200\ \mathrm{token/s}$。
+
+单位检查：个数除以秒得到“每秒个数”，分子是请求就是 request/s，是 token 就是 token/s。同一次运行里 $\mathrm{thr}_{\mathrm{tot}}$ 是 $\mathrm{thr}_{\mathrm{out}}$ 的 5 倍，
+这正是下一段说的：输入很长时 total tokens/s 会远高于 output tokens/s。
+
+**核对：**`vllm/benchmarks/serve.py:778-781`：`request_throughput=completed / dur_s`、`output_throughput=sum(actual_output_lens) / dur_s`、
+`total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s`；`dur_s` 是 `:1123` 的 `benchmark_duration`；
+`total_input` 与输出 token 数只累计成功请求（`:653`；失败请求在 `:667` 记 0 个输出 token）。
 
 输入很长、输出很短时，total tokens/s 可能很高，却不能说明 decode 很快。报告 tokens/s
 时必须写清是 input、output 还是 total。
 
 ### 10.3.2 goodput 把 SLO 加入分子
 
-若一个请求必须同时满足 $\mathrm{TTFT}\le S_{\mathrm{ttft}}$、
-$\mathrm{TPOT}\le S_{\mathrm{tpot}}$、$\mathrm{E2EL}\le S_{\mathrm{e2el}}$，
-令 $R_{\mathrm{SLO}}$ 为达标的成功请求数，$G$ 为 goodput（request/s）：
+若一个请求必须同时满足 $\mathrm{TTFT}\le\mathrm{SLO}_{\mathrm{ttft}}$、
+$\mathrm{TPOT}\le\mathrm{SLO}_{\mathrm{tpot}}$、$\mathrm{E2EL}\le\mathrm{SLO}_{\mathrm{e2el}}$，
+令 $n_{\mathrm{SLO}}$ 为达标的成功请求数，$G$ 为 goodput（request/s）：
 
 $$
-G=\frac{R_{\mathrm{SLO}}}{T}
+G=\frac{n_{\mathrm{SLO}}}{\Delta t_{\mathrm{bench}}}
 $$
+
+**白话：**goodput 的算法和请求吞吐一样，只是分子不再数“所有成功请求”，而是只数“同时满足全部 SLO 的成功请求”。
+
+**其中：**$\mathrm{SLO}_{\mathrm{ttft}}$、$\mathrm{SLO}_{\mathrm{tpot}}$、$\mathrm{SLO}_{\mathrm{e2el}}$ 是三个阈值（这里按秒写；命令行 `--goodput` 用毫秒）；
+$n_{\mathrm{SLO}}$ 是达标的成功请求数（request）；$\Delta t_{\mathrm{bench}}$ 同 10.3.1；$G$ 的单位是 request/s。
+
+**怎么算出来：**先对每个成功请求逐条检查已配置的阈值，全部满足才算达标（AND），再数一数达标的请求，除以 $\Delta t_{\mathrm{bench}}$。
+取教学数字：$\Delta t_{\mathrm{bench}}=20$ 秒，成功请求 $n_{\mathrm{req}}=100$ 个；其中 12 个请求 TTFT 超标，8 个请求 TPOT 超标，这两组里有 5 个请求是同一批（两项都超标），没有请求 E2EL 超标。
+不达标的请求数是 $12+8-5=15$（两组相加会把“两项都超标”的 5 个数两次，要减掉一次），所以 $n_{\mathrm{SLO}}=100-15=85$，
+$G=85\div20=4.25\ \mathrm{request/s}$。同一次运行的请求吞吐是 $100\div20=5\ \mathrm{request/s}$，所以 $G$ 是它的 $85\%$；
+因为 $n_{\mathrm{SLO}}\le n_{\mathrm{req}}$，$G$ 永远不会高于请求吞吐。只输出 1 个 token 的请求没有 TPOT 样本，判定时按 TPOT 为 0 处理（见 10.2.2）。
+
+**核对：**`vllm/benchmarks/serve.py:669-692`：每个已配置的阈值把对应的样本列表（`ttfts`、`all_tpots`、`e2els`）和阈值放进 `valid_metrics`、`slo_values`，
+毫秒阈值除以 `MILLISECONDS_TO_SECONDS_CONVERSION`（`:65`，值为 1000）；`is_good_req = all([s >= r for s, r in zip(slo_values, req_metric)])`
+即“实测值不超过阈值”，对应上式的 $\le$；`request_goodput=good_completed / dur_s`（`:779`）。
 
 当前 `bench serve` 的 goodput 对已配置门槛采用 AND 关系，只计成功请求。CLI 的
 `--goodput` 阈值用毫秒，计算时转为秒；未配置门槛时内部 `BenchmarkMetrics.request_goodput` 为 0，
@@ -498,23 +585,49 @@ flowchart LR
 ### 10.7.3 到达过程
 
 当 request rate 有限时，默认 `burstiness=1` 使用 Poisson arrival，也就是指数分布间隔。
-更一般地从 Gamma 分布采样。令 $\Delta t$ 为间隔（秒），$\lambda$ 为
-`rate` 对应的到达率（request/s），$b$ 为 burstiness：
+更一般地从 Gamma 分布采样。令 $\Delta t$ 为相邻两个请求的发送间隔（秒），$\lambda$ 为
+`request_rate` 对应的到达率（request/s），$b$ 为 burstiness（源码参数 `burstiness`）：
 
 $$
 \Delta t\sim\operatorname{Gamma}\!\left(\text{shape}=b,\;\text{scale}=\frac{1}{\lambda b}\right)
 $$
 
-- `b<1` 更 bursty；
-- `b=1` 是 Poisson process；
-- `b` 趋近无穷时，间隔趋近常数 `1/rate`；
+**白话：**请求之间的间隔是随机的。Gamma 分布有两个旋钮：先把平均间隔固定成 $1/\lambda$（保证平均每秒来 $\lambda$ 个请求），
+再用 $b$ 决定间隔忽长忽短的程度，$b$ 越小，间隔越不均匀，请求越“成团”。
+
+**其中：**$b$ 是本节的局部字母（无单位的正数），不是字节数 $b_{\mathrm{elem}}$，也不是第 9 章的偏置 $b_i$；
+$\text{shape}$、$\text{scale}$ 是 Gamma 分布的形状参数与尺度参数，对应源码 `np.random.gamma(shape=burstiness, scale=...)`。
+
+- $b<1$ 更 bursty；
+- $b=1$ 是 Poisson process；
+- $b$ 趋近无穷时，间隔趋近常数 $1/\lambda$；
 - `request_rate=inf` 时所有 delay 为 0，近似一次性压入全部请求。
 
-`rate` 的单位为 request/s，`b` 是无单位正数，间隔以秒计；其平均值为 `1/rate`。
-例如 10 request/s 的平均间隔是 0.1 秒，不表示每个间隔都恰好为 0.1 秒。
-固定 request rate 时，代码还会将累计 delay 缩放到 `N/rate`，减少总负载漂移。
+**怎么算出来：**Gamma 分布的均值是 $\text{shape}\times\text{scale}$，方差是 $\text{shape}\times\text{scale}^2$。代入 $\text{shape}=b$、$\text{scale}=\frac{1}{\lambda b}$：
+
+1. 均值 $=b\times\frac{1}{\lambda b}=\frac{1}{\lambda}$，$b$ 约掉了，所以不管 $b$ 取多少，平均间隔都是 $1/\lambda$，平均到达率都是 $\lambda$；
+2. 方差 $=b\times\left(\frac{1}{\lambda b}\right)^2=\frac{1}{\lambda^2 b}$，标准差是 $\frac{1}{\lambda\sqrt b}$，标准差除以均值得 $\frac{1}{\sqrt b}$：$b$ 越小，相对波动越大；
+3. $b=1$ 时 $\text{shape}=1$，Gamma 分布就是指数分布，也就是 Poisson 到达；$b\to\infty$ 时相对波动 $1/\sqrt b\to0$，间隔趋近常数 $1/\lambda$。
+
+代入 $\lambda=10$ request/s（教学数字），平均间隔都是 $1/10=0.1$ 秒，不表示每个间隔都恰好为 0.1 秒：
+
+| $b$ | $\text{scale}=\frac{1}{\lambda b}$ | 均值 $=b\times\text{scale}$ | 标准差 $=\sqrt b\times\text{scale}$ | 标准差 ÷ 均值 |
+|---|---|---|---|---|
+| 0.5 | $\frac{1}{10\times0.5}=0.2$ | $0.5\times0.2=0.1$ | $\sqrt{0.5}\times0.2\approx0.141$ | $\approx1.41$ |
+| 1 | $\frac{1}{10\times1}=0.1$ | $1\times0.1=0.1$ | $1\times0.1=0.1$ | $1$ |
+| 4 | $\frac{1}{10\times4}=0.025$ | $4\times0.025=0.1$ | $2\times0.025=0.05$ | $0.5$ |
+
+三行的均值相同（0.1 秒），只有波动不同；这也是 10.24 的实验 D“保持平均 RPS 不变，只改 burstiness”的依据。
+
+固定 request rate 时，代码还会把累计 delay 缩放到 `total_requests / request_rate`（待发请求数除以速率），减少总负载漂移：
+`total_requests` 个请求有同样多个间隔（第一个请求之前也要先等一个间隔），累计相加后最后一个请求的发送时刻是这些间隔之和，平均应是 `total_requests` $\times\frac{1}{\lambda}$，所以目标总时长取 `total_requests` $\div\lambda$。
+例如 `total_requests` 为 100、$\lambda=10$ request/s，目标是 $100\div10=10$ 秒；若这次随机抽样累计得到 10.2 秒（教学数字），就把每个累计 delay 乘 $10\div10.2\approx0.980$，最后一个请求恰在第 10 秒发出。
 严格地说，这使最终间隔不再是相互独立的指数样本；“Poisson”描述原始采样方式，
 不是归一化后有限序列的精确概率性质。
+
+**核对：**`vllm/benchmarks/serve.py` 的 `get_request`：`assert burstiness > 0`（`:468`）；`request_rate` 为无穷时 delay 取 0（`:497`）；
+`burstiness` 为无穷时 delay 取 `1.0 / current_request_rate`（`:499-502`）；其余情况 `theta = 1.0 / (current_request_rate * burstiness)`（`:504`，即上面的 scale）
+并 `np.random.gamma(shape=burstiness, scale=theta)`（`:508`）；间隔累加成累计 delay（`:511-512`）；固定速率时 `target_total_delay_s = total_requests / request_rate` 并整体缩放（`:524-526`）。
 
 [源码] `vllm/benchmarks/serve.py` - `get_request`、`calculate_metrics`
 
@@ -715,6 +828,16 @@ flowchart LR
 
 若 treatment 收益 2%，但 baseline 自身 CV 是 5%，目前证据不足以宣称稳定优化。
 
+**白话：**CV 用“波动占均值的几分之几”来衡量噪声；收益比噪声还小，就分不清是优化还是运气。
+
+**其中：**CV 是变异系数，等于样本标准差除以均值，无单位，常写成百分数；样本标准差是各次结果与均值之差的平方和除以（次数减 1）后开方。
+
+**怎么算出来：**取教学数字：同一配置重复 5 次，吞吐是 98、102、100、95、105 token/s。均值是 $(98+102+100+95+105)\div5=100$；各次与均值之差是 $-2$、$+2$、$0$、$-5$、$+5$，
+平方和是 $4+4+0+25+25=58$；除以 $5-1=4$ 得方差 $14.5$，开方得标准差约 $3.81$ token/s；$\mathrm{CV}\approx3.81\div100=3.8\%$。
+这组数据里，一次重复就可以相差 4% 左右，所以 2% 的差异落在自然波动之内。
+
+**核对：**`examples/ch10_benchmark_reasoning.py` 的 `ExperimentRun.throughput_cv`（`:238`）用 `statistics.stdev`（除以次数减 1）除以均值，与上面的算法一致。
+
 ---
 
 ## 10.11 客户端 metrics 与 vLLM 内部 metrics 对齐
@@ -727,23 +850,64 @@ flowchart LR
 wall-clock，EngineCore events 是 monotonic。`IterationStats` 最终形成：
 
 $$
-T_{\mathrm{queue}}=t_{\mathrm{scheduled},\mathrm{first}}-t_{\mathrm{queued},\mathrm{first}}
+\Delta t_{\mathrm{queue}}=t_{\mathrm{scheduled},\mathrm{first}}-t_{\mathrm{queued},\mathrm{first}}
 $$
 
 $$
-T_{\mathrm{prefill}}=t_{\mathrm{token},\mathrm{first}}-t_{\mathrm{scheduled},\mathrm{first}}
+\Delta t_{\mathrm{prefill}}=t_{\mathrm{token},\mathrm{first}}-t_{\mathrm{scheduled},\mathrm{first}}
 $$
 
 $$
-T_{\mathrm{decode}}=t_{\mathrm{token},\mathrm{last}}-t_{\mathrm{token},\mathrm{first}}
+\Delta t_{\mathrm{decode}}=t_{\mathrm{token},\mathrm{last}}-t_{\mathrm{token},\mathrm{first}}
 $$
 
 $$
-T_{\mathrm{inference}}=t_{\mathrm{token},\mathrm{last}}-t_{\mathrm{scheduled},\mathrm{first}}
+\Delta t_{\mathrm{inference}}=t_{\mathrm{token},\mathrm{last}}-t_{\mathrm{scheduled},\mathrm{first}}
 $$
 
-preemption 发生在 prefill 或 decode 时，其等待会包含在对应区间内。`scheduled_ts` 只记录
-第一次 scheduled，避免抢占后重排覆盖起点。
+**白话：**服务端在每个请求身上盖四个时间戳：入队、第一次被调度、第一个 token、最后一个 token；
+相邻两个戳相减，得到排队、prefill、decode 三段，再加上“从第一次被调度到最后一个 token”的 inference 总段。
+
+**其中：**$t_{\mathrm{queued},\mathrm{first}}$ 是第一次 QUEUED 事件的时刻（源码 `queued_ts`），$t_{\mathrm{scheduled},\mathrm{first}}$ 是第一次 SCHEDULED 事件的时刻（`scheduled_ts`），
+$t_{\mathrm{token},\mathrm{first}}$、$t_{\mathrm{token},\mathrm{last}}$ 是第一个、最后一个 NEW_TOKEN 的时刻（`first_token_ts`、`last_token_ts`），它们都来自 EngineCore 的单调时钟（秒）。
+$\Delta t_{\mathrm{queue}}$ 只表示**单个请求**的排队等待；$\Delta t_{\mathrm{prefill}}$ 是从第一次被调度到首 token；$\Delta t_{\mathrm{decode}}$ 是首 token 到末 token；$\Delta t_{\mathrm{inference}}$ 是第一次被调度到末 token。
+这里的 $\Delta t_{\mathrm{prefill}}$、$\Delta t_{\mathrm{decode}}$ 是服务端口径，与客户端的 $\mathrm{TTFT}$（10.2.1，含网络与前端）不是同一段。
+
+```mermaid
+flowchart TB
+    ARR["arrival_time (frontend, wall-clock)"] -. "different clocks: do not subtract" .-> Q
+    subgraph EC["EngineCore events, monotonic clock"]
+        Q["queued_ts: QUEUED event"] -->|"queue: scheduled_ts - queued_ts"| S["scheduled_ts: first SCHEDULED event"]
+        S -->|"prefill: first_token_ts - scheduled_ts"| F["first_token_ts: first NEW_TOKEN"]
+        F -->|"decode: last_token_ts - first_token_ts"| L["last_token_ts: last NEW_TOKEN"]
+        S -. "inference = prefill + decode" .-> L
+    end
+```
+
+> **读图方法：** 先看实线主链：入队、第一次被调度、首 token、末 token 四个时间戳，相邻两个之间的边就是排队、prefill、decode 三段；
+> 再看右侧虚线：inference 不是第四段，而是 prefill 与 decode 两段连起来的总长，它不含排队。最上面的 `arrival_time` 来自 frontend 的 wall-clock，
+> 和下面框内的 monotonic 时间戳不在同一个时钟上，所以虚线旁写着不能相减。
+
+**怎么算出来：**每一段都是两个相邻时间戳之差，源码在请求结束时依次计算（`vllm/v1/metrics/stats.py` 的 `update_from_finished_request`）：
+`queued_time = scheduled_ts - queued_ts`（`:601`）、`prefill_time = first_token_ts - scheduled_ts`（`:605`）、`decode_time = last_token_ts - first_token_ts`（`:609`）、
+`inference_time = last_token_ts - scheduled_ts`（`:613`）。因为 $t_{\mathrm{token},\mathrm{last}}-t_{\mathrm{scheduled},\mathrm{first}}=(t_{\mathrm{token},\mathrm{first}}-t_{\mathrm{scheduled},\mathrm{first}})+(t_{\mathrm{token},\mathrm{last}}-t_{\mathrm{token},\mathrm{first}})$
+（中间的 $t_{\mathrm{token},\mathrm{first}}$ 抵消），所以 $\Delta t_{\mathrm{inference}}=\Delta t_{\mathrm{prefill}}+\Delta t_{\mathrm{decode}}$。
+
+取教学数字（秒，EngineCore 单调时钟读数，不是实测）：$t_{\mathrm{queued},\mathrm{first}}=10.00$，$t_{\mathrm{scheduled},\mathrm{first}}=10.12$，
+$t_{\mathrm{token},\mathrm{first}}=10.30$，$t_{\mathrm{token},\mathrm{last}}=11.10$。则
+
+- $\Delta t_{\mathrm{queue}}=10.12-10.00=0.12$ 秒；
+- $\Delta t_{\mathrm{prefill}}=10.30-10.12=0.18$ 秒；
+- $\Delta t_{\mathrm{decode}}=11.10-10.30=0.80$ 秒；
+- $\Delta t_{\mathrm{inference}}=11.10-10.12=0.98$ 秒，等于 $0.18+0.80$。
+
+若这个请求共输出 $N_{\mathrm{out}}=17$ 个 token，源码的 `mean_time_per_output_token` 是 $\Delta t_{\mathrm{decode}}\div(N_{\mathrm{out}}-1)=0.80\div16=0.05$ 秒/token
+（`stats.py:616-619`，同样不计 prefill 产出的首 token），与客户端 TPOT 的分母同形，只是分子换成服务端的 $\Delta t_{\mathrm{decode}}$。
+
+**核对：**`stats.py:577-582`：QUEUED 事件写 `queued_ts`，SCHEDULED 事件只在 `scheduled_ts == 0.0` 时写入（“ignore preemptions”，所以是第一次）；
+`stats.py:557` 在 prefill 阶段把 `first_token_ts` 设为该次输出的 EngineCore 时间戳，`:562` 每次输出更新 `last_token_ts`。
+普通请求只在 `Scheduler.add_request` 记一次 QUEUED（`vllm/v1/core/sched/scheduler.py:3020`），被抢占时只记 PREEMPTED（`:1815`）不再记 QUEUED，所以 $t_{\mathrm{queued},\mathrm{first}}$ 就是这唯一一次；
+流式输入会话在更新时会再记一次 QUEUED（`:1899`），那条路径上 `queued_ts` 取最近一次，不在本节讨论范围内。
 
 这些差值的起止点需来自同一时钟；不要用 wall-clock 的 arrival time 去减 monotonic
 的 scheduled 时间。按同一请求计算完整区间后再汇总，不能用 E2EL p99 减去各阶段
@@ -812,10 +976,42 @@ v0.33.0 的 `bench serve` 可以把服务端自己测的两段耗时随请求一
 `n=1`。满足时，最后一条 usage chunk 的 `metrics` 字段携带 `queue_time_ms` 与 `time_to_first_token_ms`，
 客户端适配器把它们除以 1000，存为 `RequestFuncOutput.server_queue_time` 与 `server_ttft`（秒）。
 
-要点是**口径不同于客户端 TTFT**：服务端的 `queue_time_ms` 是 `scheduled_ts - queued_ts`，
-`time_to_first_token_ms` 是 `first_token_ts - scheduled_ts`（`vllm/entrypoints/generate/base/serving.py` 的
-`build_per_request_timing_metrics`），即“从首次被调度到首 token”，不含排队、渲染、网络和客户端 semaphore 等待。
+要点是**口径不同于客户端 TTFT**：服务端的 `queue_time_ms` 是 `scheduled_ts - queued_ts`（即 10.11.1 的 $\Delta t_{\mathrm{queue}}$，毫秒），
+`time_to_first_token_ms` 是 `first_token_ts - scheduled_ts`（即 $\Delta t_{\mathrm{prefill}}$，毫秒；`vllm/entrypoints/generate/base/serving.py` 的
+`build_per_request_timing_metrics`，`:73`、`:67`）。后者只覆盖“从首次被调度到首 token”，不含排队、渲染、网络和客户端 semaphore 等待。
 客户端 TTFT 与它相减得到的是“排队 + 渲染 + 传输 + 客户端”的合计，不能直接当作网络延迟（参见 10.11.1 关于同一时钟的约束）。
+
+```mermaid
+sequenceDiagram
+    participant C as bench serve client
+    participant F as API server frontend
+    participant E as EngineCore scheduler
+    C->>F: HTTP request sent at t_send
+    Note over F: render and tokenize
+    F->>E: add_request
+    Note over E: QUEUED at queued_ts
+    Note over E: SCHEDULED at scheduled_ts
+    Note over E: first NEW_TOKEN at first_token_ts
+    E-->>F: first output
+    F-->>C: first streamed chunk at t_first
+    Note over E: server_queue_time = scheduled_ts - queued_ts
+    Note over E: server_ttft = first_token_ts - scheduled_ts
+    Note over C,E: client TTFT = t_first - t_send
+```
+
+> **读图方法：** 先只看三条竖线上的事件顺序：客户端发出请求、frontend 渲染并交给 EngineCore、EngineCore 内部依次盖入队、被调度、首 token 三个戳，最后首个输出沿原路回到客户端。
+> 再看右下三个注释：服务端两段（排队、首次调度到首 token）只占中间一部分，客户端 TTFT 则横跨全部三条线，两者的差就是图中没有被服务端戳覆盖的部分。
+
+**白话：**同一个请求，客户端从“发出”量到“收到首个输出”，服务端只量了自己内部的两段，两者相减能看出“服务端之外”或“服务端排队之外”花了多少。
+
+**其中：**$\Delta t_{\mathrm{queue}}$、$\Delta t_{\mathrm{prefill}}$ 同 10.11.1（秒；字段里是毫秒，客户端适配器除以 1000 后存为 `server_queue_time`、`server_ttft`）；$\mathrm{TTFT}$ 是客户端 TTFT（10.2.1，秒）。
+
+**怎么算出来：**客户端 TTFT 覆盖整条路径，而 $\Delta t_{\mathrm{prefill}}$ 只是其中一段，所以 $\mathrm{TTFT}-\Delta t_{\mathrm{prefill}}$ 里仍包含 $\Delta t_{\mathrm{queue}}$。
+取教学数字：客户端 $\mathrm{TTFT}=0.50$ 秒，服务端 `queue_time_ms`=120、`time_to_first_token_ms`=180，即 $\Delta t_{\mathrm{queue}}=120\div1000=0.12$ 秒、$\Delta t_{\mathrm{prefill}}=180\div1000=0.18$ 秒。
+相减得 $0.50-0.18=0.32$ 秒；其中 $0.12$ 秒是服务端排队，剩下 $0.32-0.12=0.20$ 秒才是渲染、传输和客户端处理的合计，所以不能把 $0.32$ 秒当作网络延迟。
+
+**核对：**`build_per_request_timing_metrics` 里 `time_to_first_token_ms = (first_token_ts - scheduled_ts) * 1000`（`serving.py:67`）、`queue_time_ms = (scheduled_ts - queued_ts) * 1000`（`:73`）；
+客户端适配器 `_update_server_metrics` 取这两个字段并除以 1000（`vllm/benchmarks/lib/endpoint_request_func.py:124-125`）。
 
 结果 JSON 里新增 `server_queue_times` 与 `server_ttfts` 两个逐请求列表；只有当至少一个请求带回了这些值时才出现
 （`_get_server_metrics_results`，`vllm/benchmarks/serve.py:391`），缺失的请求位置为 `null`。它们与 `ttfts`、`itls`
@@ -906,13 +1102,55 @@ xychart-beta
 左侧，而不是选择峰值 throughput 对应的过载点。
 
 **排队论直觉：Little’s Law 是平均量之间的关系。** 在相应长期平均存在、观察边界
-一致等条件下，利特尔法则（Little's Law）成立：$L=\lambda W$。`L` 是系统中平均请求数，`λ` 是有效到达率（request/s），
-`W` 是请求在系统中的平均停留时间（秒，包含等待与服务）。若只讨论排队部分，
-应使用对应的 $L_q=\lambda W_q$，不能把系统在途数与纯排队等待时间混用。
+一致等条件下，利特尔法则（Little's Law）成立：
 
-例如平均有 20 个请求在系统中，每秒处理 10 个请求，则平均停留时间为 2 秒。
+$$
+n_{\mathrm{sys}}=\lambda\,\overline{\Delta t}_{\mathrm{sys}}
+$$
+
+其中 $n_{\mathrm{sys}}$ 是系统中平均请求数，$\lambda$ 是有效到达率（request/s），
+$\overline{\Delta t}_{\mathrm{sys}}$ 是请求在系统中的平均停留时间（秒，包含等待与服务）。若只讨论排队部分，
+应使用对应的
+
+$$
+n_{\mathrm{queue}}=\lambda\,\overline{\Delta t}_{\mathrm{wait}}
+$$
+
+其中 $n_{\mathrm{queue}}$ 是队列中的平均请求数，$\overline{\Delta t}_{\mathrm{wait}}$ 是请求在队列里的平均等待时间（秒）；不能把系统在途数与纯排队等待时间混用。
+横线表示“平均”，与 10.11.1 单个请求的 $\Delta t_{\mathrm{queue}}$ 是两个量。
+
+**白话：**平均排着多少个请求，等于每秒来多少个请求，乘以每个请求平均待多久；就像浴缸里的水量等于进水速度乘以每滴水停留的时间。
+
+**怎么算出来：**取一段足够长的观察时间。这段时间里到达了“到达率 $\times$ 观察时长”个请求，每个请求在系统里待了各自的停留时间；把所有请求的停留时间加起来，
+得到“请求 $\cdot$ 秒”的总量，等于请求数乘以平均停留时间，即 $\lambda\times$ 观察时长 $\times\overline{\Delta t}_{\mathrm{sys}}$。
+这个总量除以观察时长，就是任意时刻系统里的平均请求数，观察时长约掉，得到 $n_{\mathrm{sys}}=\lambda\,\overline{\Delta t}_{\mathrm{sys}}$；把“系统”换成“队列”，同样的推理给出第二式。
+
+例如平均有 20 个请求在系统中，每秒处理 10 个请求（稳态下到达率等于处理率，$\lambda=10$ request/s），则 $\overline{\Delta t}_{\mathrm{sys}}=20\div10=2$ 秒。
+再设其中平均有 6 个请求在队列里（教学数字），则 $\overline{\Delta t}_{\mathrm{wait}}=6\div10=0.6$ 秒，剩下的 $2-0.6=1.4$ 秒是平均服务时间。
+单位检查：request $=$ (request/s) $\times$ s。
+
+**核对：**这是排队论的定理，不对应 vLLM 的某一行源码，所以没有源码引用。服务端口径上可以做粗略自检：`vllm:num_requests_running` 加 `vllm:num_requests_waiting`（10.11.2）的时间平均对应 $n_{\mathrm{sys}}$，
+`waiting` 的时间平均对应 $n_{\mathrm{queue}}$；这两个 gauge 只覆盖引擎内的请求，不含客户端 semaphore 排队，边界必须与 $\lambda$、$\overline{\Delta t}$ 的口径一致。
+
 这条关系本身不提供 p99，也不能单独推出延迟按 $\frac{1}{1-\rho}$ 发散。后者需要特定
 队列模型及到达/服务过程假设；vLLM 的动态批处理、变长请求和并行执行不自动符合。
+
+**白话：**$\frac{1}{1-\rho}$ 来自最简单的单窗口队列：平均停留时间是“纯服务时间”的 $\frac{1}{1-\rho}$ 倍，越接近满载放大越厉害；它是一个模型结论，不是 vLLM 的实测规律。
+
+**其中：**这里的 $\rho=\lambda/\mu$ 是利用率（0 到 1），$\mu$ 是单个服务台每秒能服务的请求数（request/s，本节局部字母），$P_k$ 是稳态时系统里恰有 $k$ 个请求的概率。
+所谓“特定队列模型”指 M/M/1：到达是 Poisson、服务时间是指数分布、只有一个服务台，且 $\lambda<\mu$。
+
+**怎么算出来：**
+
+1. 稳态下，“从 $k$ 个变成 $k+1$ 个”的速率等于“从 $k+1$ 个变成 $k$ 个”的速率：$\lambda P_k=\mu P_{k+1}$，即 $P_{k+1}=\rho P_k$，所以 $P_k=\rho^kP_0$；
+2. 所有概率之和为 1：$P_0\sum_{k\ge0}\rho^k=\frac{P_0}{1-\rho}=1$，得 $P_0=1-\rho$，$P_k=(1-\rho)\rho^k$；
+3. 平均请求数 $n_{\mathrm{sys}}=\sum_{k\ge0}kP_k=\frac{\rho}{1-\rho}$；
+4. 由 Little 法则，$\overline{\Delta t}_{\mathrm{sys}}=\frac{n_{\mathrm{sys}}}{\lambda}=\frac{\rho}{\lambda(1-\rho)}=\frac{1}{\mu}\cdot\frac{1}{1-\rho}$（用了 $\rho/\lambda=1/\mu$）。
+
+代入数字：$\frac{1}{1-\rho}$ 在 $\rho=0.5$ 时是 2，$\rho=0.9$ 时是 10，$\rho=0.99$ 时是 100：只有在这个模型里，利用率从 90% 升到 99%，平均停留时间才放大 10 倍。
+
+**核对：**这是教学模型，不对应 vLLM 源码；也没有说明 vLLM 在某个利用率下实际会慢几倍，需要按 10.13.2 的做法在真实 workload 上测曲线。
+
 [MIT 对 Little’s Law 的说明](https://web.mit.edu/urban_or_book/www/book/chapter4/4.4.html)
 强调了平均人数、有效到达率和停留时间的对应关系。
 
@@ -1249,12 +1487,28 @@ Cache 或 GPU attention 性能。
 
 ### 10.17.4 微基准收益怎样传回端到端
 
-先假设其他阶段耗时不变、阶段串行且工作量固定。`f` 是该 kernel 占原耗时的比例
-（0 到 1），`s` 是其加速倍数，两者无单位，Amdahl 加速上限为：
+先假设其他阶段耗时不变、阶段串行且工作量固定。$f$ 是该 kernel 占原耗时的比例
+（0 到 1），$s$ 是其加速倍数，两者无单位，Amdahl 加速上限为：
 
 $$
-S_{\mathrm{total}}\leq\frac{1}{(1-f)+f/s}
+\mathrm{speedup}_{\mathrm{total}}\leq\frac{1}{(1-f)+f/s}
 $$
+
+**白话：**只有一部分耗时被加速，其余部分原样不动，所以整体能快多少，取决于被加速的部分占多大。
+
+**其中：**$\mathrm{speedup}_{\mathrm{total}}$ 是端到端加速比（原耗时除以新耗时，无单位）；$f$、$s$ 是本节的局部字母（占比与加速倍数，$s>1$ 表示变快）。
+
+**怎么算出来：**把原来的总耗时记作 1：
+
+1. 没被加速的部分占 $1-f$，耗时不变；
+2. 被加速的部分原来占 $f$，快 $s$ 倍后只剩 $f/s$；
+3. 新总耗时是 $(1-f)+f/s$，加速比是原耗时除以新耗时，即 $\frac{1}{(1-f)+f/s}$。
+
+在上面的假设（串行、其余不变、工作量固定）下这是等式；实际中收益被瓶颈转移或额外开销吃掉时只会更低，所以把它当上限。
+代入 $f=0.05$、$s=2$：新总耗时 $0.95+0.05/2=0.975$，加速比 $1\div0.975\approx1.0256$，即速度提升约 2.6%（耗时减少 $1-0.975=2.5\%$）。
+即使 $s\to\infty$，新总耗时也不会低于 $1-f=0.95$，加速比不超过 $1\div0.95\approx1.053$，约 5.3%。
+
+**核对：**这是通用定律，不对应 vLLM 源码；上面的数字可以手算验证。
 
 一个占 5% 的 kernel 即使快 2 倍，端到端理论收益也只有约 2.6%。如果报告端到端提升 20%，
 说明还改变了别的机制或测量条件，应继续调查。
@@ -1306,6 +1560,15 @@ $x_{\mathrm{baseline}}$ 为相同单位的测量值，百分比变化为：
 $$
 \Delta_{\%}=\left(\frac{x_{\mathrm{treatment}}}{x_{\mathrm{baseline}}}-1\right)\times100\%
 $$
+
+**白话：**用 treatment 的值除以 baseline 的值，看比 1 多了还是少了，再换成百分数。
+
+**其中：**$x_{\mathrm{treatment}}$、$x_{\mathrm{baseline}}$ 是同一指标在 treatment 和 baseline 下的测量值（单位相同，常取多次重复的均值）；$\Delta_{\%}$ 是相对变化，无单位，用百分数表示，$\Delta_{\%}$ 是本节的局部字母。
+
+**怎么算出来：**比值 $x_{\mathrm{treatment}}/x_{\mathrm{baseline}}$ 等于 1 表示没变；减去 1 得到“相对 baseline 多了几分之几”，乘 $100\%$ 变成百分数。
+例如 p99 TTFT 从 800 ms 变成 680 ms（教学数字）：$680\div800=0.85$，$0.85-1=-0.15$，即 $-15\%$；吞吐从 1000 token/s 变成 1080 token/s：$1080\div1000=1.08$，$1.08-1=0.08$，即 $+8\%$。
+
+**核对：**与 `examples/ch10_benchmark_reasoning.py` 的 `compare_runs`（`throughput_change_pct`、`p99_latency_change_pct`，`:271-278`）的写法一致：`treatment / baseline - 1` 再乘 100。
 
 对于 latency，负 change 是改善；对于 throughput，正 change 是改善。报告中必须明确方向。
 
@@ -1469,25 +1732,37 @@ v0.32.0 新增 `--warmup-num-prompts`，在每个参数组合前执行一轮不�
 
 ### 10.20.3 每用户与每 GPU 效率
 
-令 $Q_{\mathrm{out}}$ 为输出吞吐（token/s），$N_{\mathrm{users}}$ 为用户数，
-$N_{\mathrm{GPU}}$ 为 GPU 数。每用户与每 GPU 的生成速率分别为：
+令 $\mathrm{thr}_{\mathrm{out}}$ 为输出吞吐（token/s），$n_{\mathrm{users}}$ 为用户数，
+$n_{\mathrm{GPU}}$ 为 GPU 数。每用户与每 GPU 的生成速率分别为：
 
 $$
-Q_{\mathrm{user}}=\frac{Q_{\mathrm{out}}}{N_{\mathrm{users}}}
+\mathrm{thr}_{\mathrm{user}}=\frac{\mathrm{thr}_{\mathrm{out}}}{n_{\mathrm{users}}}
 $$
 
 $$
-Q_{\mathrm{GPU}}=\frac{Q_{\mathrm{out}}}{N_{\mathrm{GPU}}}
+\mathrm{thr}_{\mathrm{GPU}}=\frac{\mathrm{thr}_{\mathrm{out}}}{n_{\mathrm{GPU}}}
 $$
 
-$Q_{\mathrm{user}}$ 的单位为 token/(s·user)，$Q_{\mathrm{GPU}}$ 为 token/(s·GPU)。
+$\mathrm{thr}_{\mathrm{user}}$ 的单位为 token/(s·user)，$\mathrm{thr}_{\mathrm{GPU}}$ 为 token/(s·GPU)。
+
+**白话：**把总的输出速度平摊到每个用户、每张卡上，看“一个用户能分到多快”“一张卡产出多快”。
+
+**其中：**$\mathrm{thr}_{\mathrm{out}}$ 同 10.3.1；$n_{\mathrm{users}}$ 是用户数（或并发数，user）；$n_{\mathrm{GPU}}$ 是 GPU 数（GPU）。
+
+**怎么算出来：**两式都只是一次除法，单位跟着分母走：$\frac{\mathrm{token/s}}{\mathrm{user}}=\mathrm{token/(s\cdot user)}$，$\frac{\mathrm{token/s}}{\mathrm{GPU}}=\mathrm{token/(s\cdot GPU)}$。
+取教学数字 $\mathrm{thr}_{\mathrm{out}}=4000$ token/s、$n_{\mathrm{users}}=50$、$n_{\mathrm{GPU}}=8$：
+$\mathrm{thr}_{\mathrm{user}}=4000\div50=80$ token/(s·user)，$\mathrm{thr}_{\mathrm{GPU}}=4000\div8=500$ token/(s·GPU)。总产出不变时，GPU 越多，$\mathrm{thr}_{\mathrm{GPU}}$ 越低。
+
+**核对：**`vllm/benchmarks/sweep/plot_pareto.py` 的 `_prepare_records`：`tokens_per_user = throughput / user_count`（`:122`）、`tokens_per_gpu = throughput / gpu_count`（`:123`），
+其中 `throughput` 取 `output_throughput`（`:115`），与上面两式同形。
 
 **工具行为与物理含义需要分开。** `_infer_user_count` 优先使用指定字段，否则用
 `request_rate`，最后才回退到 peak concurrency。但 request/s 不是用户数：
-`1000 token/s ÷ 10 request/s = 100 token/request`，不能标成每用户生成速率。
+$1000\ \mathrm{token/s}\div10\ \mathrm{request/s}=100\ \mathrm{token/request}$，单位是 token/request，不能标成每用户生成速率。
 要使用上面的第一式，应显式提供有定义的活跃用户/并发数，并在图上写清分母。
 
-GPU 数可由显式字段或 TP×PP×DP 推导；当前默认推导未计入 PCP，含 PCP 实验应
+GPU 数可由显式字段或 $n_{\mathrm{GPU}}=\mathrm{TP}\times\mathrm{PP}\times\mathrm{DP}$ 推导（缺失的字段按 1 计，`_infer_gpu_count` 逐项相乘，`plot_pareto.py:80-87`）；
+例如 $\mathrm{TP}=2$、$\mathrm{PP}=1$、$\mathrm{DP}=4$ 得 $2\times1\times4=8$ 张卡。当前默认推导未计入 PCP，含 PCP 的实验真实卡数是 $\mathrm{TP}\times\mathrm{PP}\times\mathrm{PCP}\times\mathrm{DP}$（第 9 章的 $W_{\mathrm{all\_dp}}$），应
 显式提供 GPU count。这些是对上游工具结果的解释限制，不是推荐照搬的估算方法。
 
 [源码] `vllm/benchmarks/sweep/plot_pareto.py` - `_infer_user_count`、`_infer_gpu_count`、
@@ -1543,7 +1818,9 @@ GPU 数可由显式字段或 TP×PP×DP 推导；当前默认推导未计入 PCP
 
 ### 10.21.4 自动回归阈值要考虑噪声
 
-固定 `throughput >= baseline * 0.99` 在噪声 3% 的机器上会频繁误报。更稳妥的方法是建立
+固定 `throughput >= baseline * 0.99` 在噪声 3% 的机器上会频繁误报。
+这条阈值只容许比 baseline 低 1%；若把“噪声 3%”理解为单次测量相对均值的标准差（教学假设），1% 只有 $1\div3\approx0.33$ 个标准差，
+在正态近似下，一次什么都没改的测量落到阈值以下的概率约为 37%，所以会频繁误报。更稳妥的方法是建立
 历史分布、控制运行环境、使用重复样本并为不同 benchmark 设置不同容差。阈值也不能掩盖
 严重错误率或正确性失败。
 
