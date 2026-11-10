@@ -52,3 +52,43 @@ jobs:
 
       - name: check_book.py
         run: python3 scripts/check_book.py
+
+      # The steps below build the EPUB and the formula preview exactly as a reader
+      # would, so that anything Pandoc/MathJax/Mermaid cannot render (for example
+      # Chinese inside \text{} in a formula) fails the PR instead of the next release.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install Pandoc 3.9
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/pandoc.deb" \
+            https://github.com/jgm/pandoc/releases/download/3.9/pandoc-3.9-1-amd64.deb
+          sudo dpkg -i "${RUNNER_TEMP}/pandoc.deb"
+          pandoc --version | head -n 1
+
+      - name: Install Mermaid CLI and MathJax
+        run: pnpm install --frozen-lockfile
+
+      - name: Point Mermaid CLI at the runner's Chrome
+        run: |
+          set -euo pipefail
+          CHROME="$(command -v google-chrome)"
+          echo "Using ${CHROME}: $("${CHROME}" --version)"
+          # epub/puppeteer-config.json in the repo points at macOS Chrome; rewrite it
+          # in this CI workspace only (nothing is committed).
+          printf '{"executablePath":"%s","args":["--no-sandbox","--disable-dev-shm-usage"]}\n' "${CHROME}" \
+            > epub/puppeteer-config.json
+
+      - name: Build EPUB and validate it (build_epub.py runs check_epub.py)
+        run: python3 scripts/build_epub.py
+
+      - name: Build formula preview (Pandoc MathML vs MathJax SVG)
+        run: python3 scripts/build_math_preview.py
