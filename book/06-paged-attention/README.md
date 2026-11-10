@@ -400,7 +400,7 @@ $$
 
 **怎么算出来：**源码在绑定 packed cache 时用 `kernel_block_stride = kv_cache.stride(0) // page_stride`
 （`vllm/v1/worker/utils.py:476`）：相邻 manager page 起点的距离，除以一个 kernel page 的距离。
-这个商里既包含本层的 $\kappa$ 份，也包含夹在中间的其他层的页。例如教学布局 $\kappa=2$、`kernel_block_stride` 为 5，
+这个商里既包含本层的 $\kappa$ 份，也包含夹在中间的其他层的页。例如取教学用数字 $\kappa=2$、`kernel_block_stride` 为 5（不是某个真实模型的取值），
 ID 3 展开成 $3\times5+0=15$、$3\times5+1=16$，即 `[15,16]`，而不是连续拆页的 $3\times2+0=6$、$3\times2+1=7$ 即 `[6,7]`；
 ID 4 的起点是 $4\times5=20$，中间的 17、18、19 是其他层的页，本层永远不会读到。
 
@@ -429,14 +429,18 @@ $$
 
 **白话：**同一个 token 的槽位，在 packed 视图里比 manager 坐标多出“前面每个 manager block 多占的那段间隔”。
 
-**其中：**$\mathtt{kernel\_slot}$ 是 kernel 坐标下的槽位，其余符号同上；$\lfloor \mathrm{slot}/B_{\mathrm{mgr}}\rfloor$ 就是该 token 所在的 manager 块号 $b$。
+**其中：**$\mathtt{kernel\_slot}$ 是本书为说明起见起的记号（源码里没有同名变量，它对应 `map_to_kernel_slot_mapping()` 的返回值），表示 kernel 坐标下的槽位，其余符号同上；$\lfloor \mathrm{slot}/B_{\mathrm{mgr}}\rfloor$ 就是该 token 所在的 manager 块号 $b$。
 
 **怎么算出来：**manager 坐标里 $\mathrm{slot}=b\,B_{\mathrm{mgr}}+\mathrm{off}$（$\mathrm{off}$ 为块内偏移），$\lfloor \mathrm{slot}/B_{\mathrm{mgr}}\rfloor=b$。
 kernel 坐标里块 $b$ 的起点是 $b\cdot\mathtt{kernel\_block\_stride}\cdot B_{\mathrm{ker}}$，所以新槽位是 $b\cdot\mathtt{kernel\_block\_stride}\cdot B_{\mathrm{ker}}+\mathrm{off}$，
 与旧槽位相差 $b\,(\mathtt{kernel\_block\_stride}\cdot B_{\mathrm{ker}}-B_{\mathrm{mgr}})$，这正是源码里的 `shift`（`:429`，
-`slot_mapping < 0` 的 padding 槽位保持不变）。代入 $B_{\mathrm{mgr}}=32$、$B_{\mathrm{ker}}=16$、`kernel_block_stride` 为 5、
+`slot_mapping < 0` 的 padding 槽位保持不变）。代入 $B_{\mathrm{mgr}}=32$、$B_{\mathrm{ker}}=16$、`kernel_block_stride` 为 5（同样是教学用数字）、
 $b=3$、$\mathrm{off}=20$：$\mathrm{slot}=3\times32+20=116$，$\mathtt{shift}=5\times16-32=48$，$\mathtt{kernel\_slot}=116+3\times48=260$；
 另一头验证：偏移 20 落在第 $\lfloor 20/16\rfloor=1$ 份，kernel ID 为 $3\times5+1=16$，页内偏移 $20\bmod16=4$，$16\times16+4=260$，一致。
+
+**核对：**`AttentionGroup.map_to_kernel_slot_mapping()`（`vllm/v1/worker/utils.py:415`）在 `:429` 写 `shift = self.kernel_block_stride * self.kernel_block_size - block_size`，
+对应上式的 $\mathtt{kernel\_block\_stride}\cdot B_{\mathrm{ker}}-B_{\mathrm{mgr}}$（`block_size` 取的是 `self.kv_cache_spec.block_size`，即 manager 粒度）；`kernel_block_stride` 为 0 或没有 kernel slot buffer 时原样返回；
+`:60` 的 `_kernel_slots_kernel` 是 CUDA 上同一计算的单次 launch 版本。
 
 源码会校验可表达的 cache view，不兼容的 token/state 布局会抛错并提示降低 block size
 或选择 layer-compact layout。`prepare_kernel_block_sizes()` 也不会对 block-outer
@@ -449,7 +453,7 @@ packing 无条件做 group-wide 拆分。因此 backend 接受某个除数，并
 ### 6.5.2 写地址与读地址如何保持一致
 
 普通连续拆页下，$B_{\mathrm{mgr}}=32$、$B_{\mathrm{ker}}=16$、manager ID 3 内偏移 20，写 slot 是
-`3*32+20=116`；kernel 表对应 ID 7（偏移 20 在第 1 份，$3\times2+1=7$）、页内偏移 $20\bmod16=4$，读 slot 是 `7*16+4=116`。
+$3\times32+20=116$；kernel 表对应 ID 7（偏移 20 在第 1 份，$3\times2+1=7$）、页内偏移 $20\bmod16=4$，读 slot 是 $7\times16+4=116$。
 这证明该教学布局两套坐标可指向同一位置，不代表 packed layout 的每个地址都能用
 同一个扁平公式比较；packed 时要先按上一小节的 `kernel_slot` 换算（同一个 token 变成 260），还必须核对 tensor view 的 stride。
 
@@ -593,7 +597,7 @@ $$
 n_{\mathrm{null}}=\left\lfloor \frac{\max(\mathrm{pos}_0-N_{\mathrm{ret}},\,0)}{B_{\mathrm{blk}}} \right\rfloor
 $$
 
-**白话：**先算出本步第一个 query 能看到的最早 token 位置 $\mathrm{pos}_0-N_{\mathrm{ret}}$，再数这个位置之前有多少个**完整**的
+**白话：**先算出窗口起点 $\mathrm{pos}_0-N_{\mathrm{ret}}$（无额外保留时就是本步第一个 query 能看到的最早 token 位置），再数这个位置之前有多少个**完整**的
 block；这些块整块都在窗口之外，可以安全换掉。跨在窗口边界上的那个块不能换，因为里面还有窗口内的 token。
 
 **其中：**
@@ -627,7 +631,7 @@ block；这些块整块都在窗口之外，可以安全换掉。跨在窗口边
 **核对：**GPU 的 `_gather_block_tables_kernel` 里写作 `tl.where(reach > 0, tl.maximum(first_pos - reach, 0) // block_size, 0)`
 （`vllm/v1/worker/gpu/block_table.py:319-321`，`reach` 即 $N_{\mathrm{ret}}$，`first_pos` 即 $\mathrm{pos}_0$）；
 CPU runner 的 `CPUBlockTables.gather_block_tables()` 用 `num_computed_tokens[idx_mapping].sub(reach)`、`clamp_min_(0)`、`div(block_size, rounding_mode="floor")`
-算出同一个数（`vllm/v1/worker/cpu/block_table.py:133-136`）。上面三个算例的数字用脚本复算过，输出写在 PR 正文里。
+算出同一个数（`vllm/v1/worker/cpu/block_table.py:133-136`）。上面三个算例都可以手算复核：$\lfloor(30-7)/4\rfloor=5$、$\lfloor(31-7)/4\rfloor=6$、$\max(5-7,0)=0$。
 
 ```mermaid
 flowchart TD
@@ -748,7 +752,7 @@ cache group 的 manager block size 为单位。区别在于输出形态：
 可以看作本轮 token 的投递地址表；block table 则是读取历史时使用的目录。
 
 - **写入**：扁平的是 token 这一维；K/V 本身还包含 head 与向量维度，不是只有
-  一个数的一维数组。第 i 行 K/V 按 `slot_mapping[i]` 写入对应物理槽。
+  一个数的一维数组。第 $i$ 行 K/V 按 `slot_mapping[i]` 写入对应物理槽。
 - **读取**：整个 batch 的 block table 通常是二维的，一个请求使用其中一行。
   kernel 按该行寻找所需 K/V；它可边读 tile 边计算，不必先重建完整连续 K/V 数组。
 
@@ -887,6 +891,10 @@ $N_{\mathrm{ctx},r}$ 是已有的 context token 数，也就是 `num_computed_to
 | B | `[3,4)` | 1 | 25 | 24 |
 | C | `[4,6)` | 2 | 6 | 4 |
 
+**核对：**表中三行都满足 $S_r=N_{\mathrm{ctx},r}+N_{q,r}$（$8+3=11$、$24+1=25$、$4+2=6$）。GPU 的 `vllm/v1/worker/gpu/input_batch.py:383` 写 `seq_len = num_computed_tokens + query_len`，
+`query_len` 是 `query_start_loc` 相邻两项之差（`:379-381`），`:389` 的 `pos = num_computed_tokens + block` 让本步 query 的位置从 $N_{\mathrm{ctx},r}$ 起依次加 1；
+反向的 device 计算见下面的 `compute_num_computed_tokens()`（`vllm/v1/attention/backend.py:491`）。
+
 ```mermaid
 flowchart TB
     QL["query lengths: 3,1,2"] --> ADD["add prior context: 8,24,4"]
@@ -993,7 +1001,7 @@ CPU 一份的调用方是 `cpu/model_states/default.py:145` 与 `cpu/model_state
 另有几处**不经过** `build_attn_metadata()` 的构造：encoder-only 模型状态直接构造（`gpu/model_states/encoder_only.py:216`、`cpu/model_states/encoder_only.py:167`，
 用的是 dummy block table 与 dummy slot mapping），以及从已有对象派生新对象的 `CommonAttentionMetadata.unpadded()`（`vllm/v1/attention/backend.py:526`）、
 `make_local_attention_virtual_batches()`（`vllm/v1/attention/backends/utils.py:754`）和 `make_kv_sharing_fast_prefill_common_attn_metadata()`（同文件 `:841`）。
-所以“只有 GPU 的 `build_attn_metadata()` 才构造它”不成立。
+所以 `build_attn_metadata()` 是主要入口，但不是 `CommonAttentionMetadata` 的唯一构造方式：另有 encoder-only 的直接构造，以及上面几个派生函数。
 
 数值怎么来取决于调用方：GPU 的 `DefaultModelState.prepare_attn`（`vllm/v1/worker/gpu/model_states/default.py:166`）按 CUDA Graph 模式选值：FULL graph 时（`:178`）取 padded 的
 `num_reqs_after_padding` / `num_tokens_after_padding`（`:180-181`），piecewise 与 eager 取未 padding 的 `num_reqs` / `num_tokens`（`:184-185`）；
@@ -1621,7 +1629,7 @@ $t$ 是对所有位置求和的下标；$v_j$ 是第 $j$ 个位置的 value 向�
 - $o=0.090\,(1,0)+0.245\,(0,1)+0.665\,(1,1)=(0.755,\,0.910)$。
 
 **核对：**随书 `contiguous_attention()` 默认 `scale = 1/sqrt(len(query))`，并用 softmax 之后对 value 加权求和（`examples/ch06_paged_addressing.py`）；
-上面三步的数字用脚本复算过。FlashAttention 等 kernel 为了不保存完整分数向量，把这三步做成分块累计，见 6.19.4。
+上面三步的数字都可以用计算器逐步复核（$e^0=1$、$e^1=2.718$、$e^2=7.389$，和 $11.107$）。FlashAttention 等 kernel 为了不保存完整分数向量，把这三步做成分块累计，见 6.19.4。
 
 分页实现改变的是取得 $k_j$、$v_j$ 的方式：
 
@@ -1772,9 +1780,10 @@ $$
 **核对：**Triton 版的递推在 `softmax_step()`（`vllm/v1/attention/ops/triton_attention_helpers.py:462`）：
 `m_j = tl.maximum(M, tl.max(S, axis=1))`（$m'$，`:472`）、`alpha = tl.exp(M - safe_m_j)`（$e^{m-m'}$，`:481`）、
 `L_new = L * alpha + l_j`（$Z'$，`:483`；`safe_m_j` 在最大值仍是 $-\infty$ 时改用 0，使第一个 tile 的 `alpha` 为 0，对应上面 $m=-\infty,Z=0$ 的约定）。
-调用方 `vllm/v1/attention/ops/triton_unified_attention.py` 在 `:682-683` 取回 `alpha` 并把累加器乘上去，之后 `acc += tl.dot(P_v, V)`（`:703`），
-最后 `acc = acc / L[:, None]`（`:773`）：源码里的 `acc` 存的是未归一化的 $Z\,o$，结果与上面先归一化再重标定的写法等价。上面的数字用脚本复算过（见 PR 正文）。
-DCP 或 split-K 最终合并的正是这类 `(output, LSE)` 状态（第 09 章用 $\operatorname{LSE}_i$ 写同一个量），而不是
+调用方 `vllm/v1/attention/ops/triton_unified_attention.py` 在 `:682-683` 取回 `alpha` 并把累加器乘上去，之后按 V 的量化方式分两个分支累加：开启 per-token-head scale 时 `P_v = (P * v_token_head_scales[None, :]).to(V.dtype)`（`:702`）再 `acc += tl.dot(P_v, V)`（`:703`）；
+默认分支是 `acc += tl.dot((P * p_scale).to(V.dtype), V) / p_scale`（`:713`），`p_scale` 在 FP8 的 V 上取 256 或 128、其余为 1，只是为了让 FP8 点积里的权重不下溢，点积之后再除回去，数学上与不缩放相同。
+非 3D 路径在收尾处 `acc = acc / L[:, None]`（`:773`）归一化；3D（`IS_3D`）路径先存每段的局部结果，由 `reduce_segments` 合并。源码里的 `acc` 存的是未归一化的 $Z\,o$，结果与上面先归一化再重标定的写法等价。上面的数字可以按 6.18 节的三个分数手算复核（$\log 11.107=2.408$）。
+DCP 或 split-K 最终合并的正是这类 `(output, LSE)` 状态（第 09 章现在把同一个量写作 $L_i$，按 glossary/notation.md 的约定，之后会统一成 $\operatorname{LSE}_i$），而不是
 直接平均各分区输出。随书教学模型没有实现 online softmax（见 6.20）。
 
 [源码] `vllm/v1/attention/ops/triton_attention_helpers.py` - `softmax_step`
