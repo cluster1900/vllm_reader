@@ -263,7 +263,7 @@ $$
 维度上的分片。量化 KV 可能加入 scale 或 zero-point，某些布局还会 padding。v0.33.0 起
 `--kv-cache-dtype` 的取值还可以由平台后端通过 `KVCacheDTypeHandler` 注册：
 `get_kv_quant_mode` 会先询问已注册的 handler，没有 handler 时才落到内置映射（#52670）。
-所以“dtype 字符串对应多少字节”不能只查内置表。因此正确做法是：
+本书上面的静态表因此不能再覆盖全部取值：平台可以注册自己的 dtype，`register_kv_cache_dtype` 会把 handler 的 `torch_dtype()` 写入共享的 `STR_DTYPE_TO_TORCH_DTYPE`。运行时的 handler 与最终的 `KVCacheConfig` 才是权威。正确做法是：
 
 1. 用简单公式形成数量级直觉；
 2. 用实际 `KVCacheSpec.page_size_bytes` 得到当前 backend 的物理页大小；
@@ -552,7 +552,7 @@ flowchart TB
     GC --> MIN[取各 worker 最小 num_blocks]
 ```
 
-> **读图方法：** 这张图用于压缩“规划模块与可插拔的 KV 配置 builder”的整体关系。左上两个函数是 Core 持有的固定流程，右侧 builder 只回答“怎样放置”；先找谁调用谁，再确认平台钩子只影响 builder 的选择，不改变流程本身。
+> **读图方法：** 这张图用于压缩“规划模块与可插拔的 KV 配置 builder”的整体关系。`get_global_kv_cache_groups`、`get_kv_cache_configs` 是 Core 持有的流程，`KVCacheConfigBuilder` 只决定放置；先找谁调用谁，再确认平台钩子只影响 builder 的选择，不改变流程本身。
 
 接口文档明确写着它是**实验性**的：钩子和 `num_blocks` 契约在稳定前可能变化；
 `_get_pool_bytes_per_block` 是私有、过渡性的钩子，返回 `None` 时由 Core 用“一个 block、
@@ -670,7 +670,7 @@ sequenceDiagram
 > **读图方法：** 这是“从字节数到 block 数”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
 v0.33.0 把“合并 spec、建 groups”从 `get_kv_cache_configs` 里提前出来（#62330）：EngineCore
-先调用 `get_global_kv_cache_groups`，再用分组结果为 NIXL P/D 的 DCP 确定
+先调用 `get_global_kv_cache_groups`，再用分组结果为 NIXL P/D（NIXL 是跨实例传输 KV 的 connector，P 实例算 prompt、D 实例接着生成）的 DCP 确定
 `cp_kv_cache_interleave_size`（`adjust_dcp_kv_cache_interleave_size`：只在 DCP>1 且配置了
 KV transfer 实例时才可能改动，“自动对齐到最小 group 的 block_size”这一步只针对
 `NixlConnector`），`set_kv_cache_layout` 同时把 layout 与 interleave 发给各 Worker；
@@ -811,11 +811,14 @@ null block 有三个特殊点：
 - `ref_cnt` 不按普通 block 维护；
 - 容量检查和 usage 计算要减去它。
 
-v0.33.0 把“`ref_cnt` 不按普通 block 维护”写成了显式的短路：`BlockPool.touch` 与
-`free_blocks` 遇到 `is_null` 的 block 直接 `continue`，不再先判断 `ref_cnt == 0` 再排除
-null（#61724）。Sliding Window 的 block table 前缀往往是一长串 null，这样每次 free 或
-touch 都不必逐个处理它们。同一个 PR 还新增了 `null_head_len` 与 `trim_null_head`：
-所有 null 条目是同一个对象，所以前缀长度可以用二分加一次 `count` 求出，再用切片去掉。
+v0.33.0 把“`ref_cnt` 不按普通 block 维护”写成了显式的短路（#61724），两处的情形不同：
+
+- `BlockPool.touch` 与 `free_blocks` 仍然逐个遍历传入的 block，只是遇到 `is_null` 的 block 直接跳过（`continue`），
+  不再先判断 `ref_cnt == 0` 再排除 null。Sliding Window 的 block table 前缀往往是一长串 null，
+  每个 null 现在只花一次 `is_null` 判断，而不走 `ref_cnt`、free queue 与统计逻辑。
+- `null_head_len` 与 `trim_null_head` 则是真正不逐个遍历：所有 null 条目是同一个对象，所以前缀长度先用二分
+  找出候选位置，再用一次 `count`（在 C 层执行）确认这一段全是 null，最后用切片去掉。只有这一段
+  不是同一个对象时才回退到逐个扫描。
 `pop_blocks_for_free`、`KVCacheBlocks.get_unhashed_block_ids_all_groups` 等出口都会先 `trim_null_head`。
 
 [源码] `vllm/v1/core/kv_cache_utils.py` - `null_head_len`、`trim_null_head`
@@ -1070,8 +1073,8 @@ request.num_tokens - 1
 
 v0.33.0 给它（以及 `get_computed_blocks_for_connector()`）加了可选参数
 `max_cache_hit_length`：调用方显式给出命中上限时用它，不给才用上面的默认值。
-目前 Scheduler 在配置了 aux output connector 时，用 `aux_output_connector.max_cache_hit(request)`
-填这个参数，让命中不要越过仍保留着 routed experts 等辅助输出的位置（#62591）。
+目前 Scheduler 在配置了 aux output connector（它保存与 KV block 对应的辅助输出）时，用 `aux_output_connector.max_cache_hit(request)`
+填这个参数，让命中不要越过仍保留着 routed experts（MoE 里每个 token 选中的专家编号）等辅助输出的位置（#62591）。
 
 因为模型仍需对最后一个 prompt token 执行计算以得到下一 token 的 logits。当前
 `allocate_slots()` 又要求常规 computed token 边界满足 block 对齐，所以一个 8-token prompt、
@@ -1159,11 +1162,11 @@ flowchart TD
     D -->|否| ON[L = num_prefill_lookahead_tokens]
     ON --> S1[Scheduler: use_eagle_block_drop = False]
     ON --> S2[coordinator: drop_eagle_group_ids 为空，group 仍标记为 EAGLE]
-    ON --> S3[Mamba checkpoint: proof_limit = 长度 - max 1 和 L]
+    ON --> S3["Mamba checkpoint: proof_limit = 长度 − max(1, L)"]
     ON --> S4[BlockStored 事件带 lookahead_token_ids]
 ```
 
-> **读图方法：** 这是“EAGLE 的 lookahead 哈希（v0.33.0）”的判定流程图。从上往下看四个条件如何依次把 `L` 归零，只有全部通过才得到 `L>0`；右下四个框是 `L>0` 之后各组件的连带变化，用来核对“为什么 EAGLE 末块回退在这条路径上被关掉”。
+> **读图方法：** 这是“EAGLE 的 lookahead 哈希（v0.33.0）”的判定流程图。从上往下看四个条件如何依次把 `L` 归零，只有全部通过才得到 `L>0`；`L>0` 之后的 Scheduler、coordinator、Mamba checkpoint、`BlockStored` 事件四个节点是各组件的连带变化，用来核对“为什么 EAGLE 末块回退在这条路径上被关掉”。
 
 启用条件在 `VllmConfig.num_hash_lookahead_tokens` 里：必须启用了 EAGLE 末块回退、没有设置
 `disable_lookahead_block_hashes`、开启了 prefix caching，并且**没有配置 KV connector**
@@ -1174,7 +1177,7 @@ flowchart TD
 - `BlockPool` 保存 `num_hash_lookahead_tokens`，`BlockStored` 事件新增
   `lookahead_token_ids` 字段，事件的 `extra_keys` 也按同一窗口计算，外部 KV 事件消费者要
   用相同设置才能复算 hash；
-- `resumable`（流式续写）请求在重新计算 KV 前会清空并重算 `block_hashes`，因为驻留的 KV 可能
+- `resumable`（流式输入会话：一段输入处理完后可以接着追加下一段，请求本身不结束）请求在重新计算 KV 前会清空并重算 `block_hashes`，因为驻留的 KV 可能
   保留着已被丢弃的 streaming token 的 hash；
 - `SingleTypeKVCacheManager.cache_blocks` 只缓存 hash 已经发出的 block
   （`min(num_tokens, 已有 hash 数 × hash_block_size)`），不会为还没有 hash 的块登记。
@@ -1400,7 +1403,7 @@ P2P 失败处理 [#63708](https://github.com/vllm-project/vllm/pull/63708)（sen
 > - main 2026-10-29～10-30：KV offload / P2P / OBJ / SimpleCPUOffload（#64400、#59099、#63618、#62930、#63566、#63788、#64251、#59322、#63937、#64501、#64345、#62444、#64256、#64224、#52838）：partial-tail 去重、`reset_cache` 可重入、idle P2P-only 可 park、跨节点拒绝 secondary tier、传输故障降级缓存等。
 > - main 2026-10-29～10-30：[7ab756940](https://github.com/vllm-project/vllm/commit/7ab756940a89a7464ebd6ab26c7c6a1f3b7d08da)（[#63047](https://github.com/vllm-project/vllm/pull/63047)）：`sparse_attn_indexer` profile dummy 把 prefill FP32 copy 计入 workspace（`sparse_attn_indexer.py` L519–L543 @ `2eae56c4b`），接续 #62860。
 
-### 5.15.5 v0.32.0 的 checkpoint 与 cache group 边界
+### 5.15.5 checkpoint 与 cache group 边界（v0.32.0 起，v0.33.0 补充）
 
 新版 `KVCacheSpec.prefix_cacheable` 区分可命中的持久状态与只服务运行的 cache group。
 coordinator 只为允许 caching 的 manager 登记 prefix，不能把所有分配的页都当成前缀缓存。
@@ -1455,6 +1458,8 @@ v0.33.0 还修了两处与 prefix 交汇相关的边界：
 - Mamba 的 prompt 尾部 checkpoint 如果已经带着当前 token 数对应的 hash（命中或更早的
   step 已登记过），不再重复登记，否则会把它标成“本 step 刚缓存”，导致所有命中它的兄弟
   请求被推迟一步（#62841，`MambaManager._cache_partial_tail_block` 里对 `block_hash_num_tokens` 的检查）。
+
+[测试] `tests/v1/core/test_prefix_caching.py` - `test_swa_shared_prefix_reuse_under_zero_retention`
 
 另外，`MambaManager` 现在直接断言 `mamba_cache_mode == "align"` 或未启用缓存：
 `"all"` 模式的残留代码已在 #60043 中删除，`MambaCacheMode` 只剩 `align` 与 `none`。

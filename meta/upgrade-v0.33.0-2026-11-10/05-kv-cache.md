@@ -4,6 +4,7 @@
 - Source：`4ba787ec9959e566d3b587a796dff07673324da5`（v0.33.0）；旧正文基线 `5df63a7203cdb9328d824a27b682e77c7b9928be`（v0.32.0）；Reader base：`ed2676df`。
 - 日期：2026-11-10；静态源码验证，章节保持 draft / runtime_verified=false。
 - 跟踪：[bot-hub #127](https://github.com/cluster1900/bot-hub/issues/127)。
+- 审计范围：ch05 source map 中 15 个文件（含新增的 `kv_cache_planning.py`、`kv_cache_config_builder.py`、`vllm/config/vllm.py` 等）在 v0.32.0→v0.33.0 之间的 `git diff` 已逐一核对：12 个有变更，3 个无变化（`test_partial_prefix_cache_primitives.py`、`test_reset_prefix_cache_e2e.py`、`vllm/v1/worker/utils.py`）；map 之外另核对了 `vllm/v1/worker/gpu/block_table.py`（5.16.1）。
 - 范围：只写 v0.33.0 祖先链里真实存在的变化（每个提交均用 `git merge-base --is-ancestor <commit> 4ba787ec9959` 核对）；不在祖先链的 main 变化仍以“未发版”注记保留，留给第二波。
 
 ## 证据与修订
