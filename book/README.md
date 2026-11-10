@@ -112,8 +112,8 @@ flowchart LR
 
 - 当前写作基线记录在 `meta/source-revisions.md`。
 - 主体叙事以 vLLM V1 Engine 为准。
-- 必须区分 vLLM V1 Engine、Model Runner V1（MRV1）和 Model Runner V2
-  （MRV2）。
+- 必须区分 vLLM V1 Engine 与 Model Runner：MRV1（Model Runner V1）已随 #63373 删除，
+  GPU Runner 现在只有 MRV2（Model Runner V2）；旧版本资料里的 MRV1 只作历史对照。
 - V0、历史 PagedAttention kernel 和旧架构仅用于解释演进，不作为当前行为。
 - 每完成一章，将该章从 `outline` 改为 `draft`；完成源码和实验复核后才改为
   `verified`。

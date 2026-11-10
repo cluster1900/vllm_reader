@@ -3,8 +3,8 @@ title: "第10章 实验、性能分析与优化"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
-source_branch: v0.33.0
+source_commit: 05caae03c20f69436ff7ec23ded339ea104f1a01
+source_branch: main
 source_dirty: false
 verified_at: 2026-11-10
 content_complete: true
@@ -228,7 +228,7 @@ token 数，缺失时可能重新 tokenize 文本；ITL 列表则来自流式事
 就可能降低 chat 的 E2EL/TPOT，不能当作 GPU 提速。
 
 v0.33.0 又把 chat 适配器的“首事件”判定收紧：只有 `_choice_has_streamed_output()`
-（`vllm/benchmarks/lib/endpoint_request_func.py:392`）为真的 choice 才算已流出输出，才会启动 TTFT、
+（`vllm/benchmarks/lib/endpoint_request_func.py:398`）为真的 choice 才算已流出输出，才会启动 TTFT、
 追加 ITL 并推进末时间戳。判定规则是：`delta` 里有非空的 `content`、`reasoning`、`tool_calls` 或
 `function_call`；或者 `content` 恰为空串且**没有** `role` 字段（例如一个特殊 token 在
 `skip_special_tokens` 下解码成空串，仍是真实生成的 token）。只带 `role` 的开头元数据消息不再触发首事件计时。
@@ -251,7 +251,7 @@ flowchart TD
     ITL --> END
 ```
 
-> **读图方法：** 这是 chat 适配器处理每条流式消息的判定图。先看第一道判定“这条消息是否形成已流出输出”，只有通过的消息才能产生 TTFT 或 ITL；没通过的消息一律走左侧分支，源码里这是 `if … elif usage` 的 `elif`（`endpoint_request_func.py:487`），所以只要带 usage 就记 token 数，不论 choices 是否为空，也不改变任何计时。
+> **读图方法：** 这是 chat 适配器处理每条流式消息的判定图。先看第一道判定“这条消息是否形成已流出输出”，只有通过的消息才能产生 TTFT 或 ITL；没通过的消息一律走左侧分支，源码里这是 `if … elif usage` 的 `elif`（`endpoint_request_func.py:497`），所以只要带 usage 就记 token 数，不论 choices 是否为空，也不改变任何计时。
 
 此外，v0.33.0 不再对每个网络读到的字节块先 `strip()`：completion、chat、audio 三个适配器都直接把原始字节
 交给 `StreamedResponseHandler` 按 SSE 消息边界拼接，避免首尾空白在传输分块边界被吞掉
@@ -623,7 +623,7 @@ flowchart TD
 把第一请求和第 1000 个请求放在同一个平均值里，会同时测到部署冷启动与稳定态服务，通常
 无法解释。
 
-其中“KV memory profiling”这一步在 v0.33.0 多了一个前置动作：`Worker.init_device`（`vllm/v1/worker/gpu_worker.py:449`）在拍内存快照之前先用一次
+其中“KV memory profiling”这一步在 v0.33.0 多了一个前置动作：`Worker.init_device`（`vllm/v1/worker/gpu_worker.py:453`）在拍内存快照之前先用一次
 `torch.mm` 和一次带 bias 的 `torch.nn.functional.linear` 创建 cuBLAS/cuBLASLt handle
 （`vllm/v1/worker/gpu_worker.py` 中的注释：这些 handle 由 CUDA 直接分配显存，torch 看不见也无法回收缓存来满足它，
 profiling 若把 torch 缓存撑满，首次 cuBLAS 调用就会失败；先创建则让它们与 NCCL buffer 一样计入基线）
@@ -673,7 +673,7 @@ size 已经就绪。第 8 章说明 compile range 与 CUDA Graph descriptor 都�
 - container image 或依赖 lock；
 - power/clock policy 与同机干扰任务。
 
-> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；下面这条**不包含在** v0.33.0 中，下一次升级基线时复核。[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：记录环境时须写明 `ParallelConfig.numa_bind`（`parallel.py` L329–L344 @ `0106c8abc`）。默认 `None` 为 best-effort 自动绑定（多 NUMA、`numactl`、spawn、mp/uni 等条件满足时软 memory preference）；显式 `True` 严格绑定（失败即启动错误），`False` 关闭。仅写“NUMA 拓扑”而不写该开关的取值，无法复现 Worker 子进程是否被绑核。详见 meta/main-tracking-2026-10-28.md。
+> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：记录环境时须写明 `ParallelConfig.numa_bind`（`parallel.py` L329–L344 @ `0106c8abc`）。默认 `None` 为 best-effort 自动绑定（多 NUMA、`numactl`、spawn、mp/uni 等条件满足时软 memory preference）；显式 `True` 严格绑定（失败即启动错误），`False` 关闭。仅写“NUMA 拓扑”而不写该开关的取值，无法复现 Worker 子进程是否被绑核。详见 meta/main-tracking-2026-10-28.md。
 
 ### 10.10.2 固定 workload
 
@@ -1062,7 +1062,7 @@ v0.33.0 的 `/start_profile` 请求体多了一个可选字段 `profiler_kwargs`
 Python API `LLM.start_profile(..., profiler_kwargs=...)` 同样接受。路由层只要求它是 JSON 对象，不检查键名。
 Worker 侧 `TorchProfilerWrapper` 把 `profiler_config` 派生的基础参数 `_base_profiler_kwargs` 与请求覆盖项合并
 （`vllm/profiler/wrapper.py`：`set_profiler_kwargs`，仅在 profiler 未处于 active 时生效，且保留原来的
-`on_trace_ready`）。`Worker.profile` 在每次 start 时都调用它（`vllm/v1/worker/gpu_worker.py:1439`），
+`on_trace_ready`）。`Worker.profile` 在每次 start 时都调用它（`vllm/v1/worker/gpu_worker.py:1562`），
 每次都从基础参数重新合并，所以上一次的覆盖不会泄漏到下一次。
 基类 `WorkerProfiler.set_profiler_kwargs` 是空操作，因此 CUDA、Proton 等非 torch profiler 会忽略该字段
 （[dd5e75449](https://github.com/vllm-project/vllm/commit/dd5e75449)，
@@ -1782,8 +1782,9 @@ throughput、goodput、p99 TTFT/TPOT、client queue、server queue。
     `benchmarks/attention_benchmarks/`：组件与 kernel 层实例。
 16. `tests/benchmarks/`：CLI、dataset adapter、sweep 和参数稳定性测试。
 
-本章正文已按 v0.33.0 静态复核（复核日期 2026-11-10），指标教学代码的 CPU 测试通过；源码基线为 commit
-`4ba787ec9959e566d3b587a796dff07673324da5`。当前机器没有可用的 NVIDIA GPU vLLM
+本章源码基线为 vLLM main commit `05caae03c20f69436ff7ec23ded339ea104f1a01`（2026-11-10 重新钉扎；前一基线 v0.33.0 为
+`4ba787ec9959e566d3b587a796dff07673324da5`），指标教学代码的 CPU 测试通过。这次重新钉扎核对了源码引用与行号，并重新绑定了
+Model Runner V1 删除带来的变化；其余行为没有在 `05caae03` 上逐一重新核实（清单见 `meta/upgrade-main-05caae03-2026-11-10/`）。当前机器没有可用的 NVIDIA GPU vLLM
 运行环境，因此 profiler、NCCL 与真实服务性能数据仍标记为 `runtime_verified: false`。
 本章给出的数值曲线均为教学示意，不能冒充实测结果。
 

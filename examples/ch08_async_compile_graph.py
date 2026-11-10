@@ -172,7 +172,11 @@ def pad_to_capture_size(num_tokens: int, capture_sizes: Iterable[int]) -> int | 
 
 
 class GraphDispatcher:
-    """Small MRV1-like dispatcher with FULL > PIECEWISE > NONE priority."""
+    """Small teaching dispatcher with FULL > PIECEWISE > NONE priority.
+
+    The idea comes from the removed MRV1 ``CudagraphDispatcher`` (#63373); it is
+    not a copy of MRV2 ``CudaGraphManager``.
+    """
 
     def __init__(
         self,

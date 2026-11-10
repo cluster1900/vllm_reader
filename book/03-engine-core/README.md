@@ -3,8 +3,8 @@ title: "第03章 Engine 与 EngineCore"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
-source_branch: v0.33.0
+source_commit: 05caae03c20f69436ff7ec23ded339ea104f1a01
+source_branch: main
 source_dirty: false
 verified_at: 2026-11-10
 content_complete: true
@@ -36,7 +36,7 @@ LLMEngine / AsyncLLM
 执行期间到达的 abort 怎样生效、多个 batch 如何保持在途，以及进程退出或 worker
 故障如何被前端看见。
 
-本章绑定源码 revision `4ba787ec9959e566d3b587a796dff07673324da5`（vLLM v0.33.0）。文中区分：
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，2026-11-10 重新钉扎到此 revision：源码引用与行号已逐条核对，Model Runner V1 删除已重新绑定；其余行为未在 05caae03 上全面重核，清单见 `meta/upgrade-main-05caae03-2026-11-10/`）。文中区分：
 
 - **源码事实**：可在固定 revision 的实现或测试中直接定位。
 - **设计含义**：由多个源码事实推导出的工程解释。
@@ -207,7 +207,12 @@ MRV2（V2 Model Runner，新一代 Model Runner）的 draft-model speculator 改
 metadata 的 `max_seq_len` 取“draft 上限”与 `max_model_len` 的较小值（#60513，提交
 `636da2476`）。
 
-[源码] `vllm/v1/worker/gpu/spec_decode/speculator.py` - 读取 `max_model_len` 的 draft metadata 构造
+`05caae03` 里这条链更完整：`DraftModelSpeculator.max_model_len` 是 property，每次读 `model_config.max_model_len`；
+CUDA graph 里的 draft 步改读一个 GPU 标量 `max_model_len_gpu`。EngineCore 在 auto-fit 把 `max_model_len` 改小后
+调用 `collective_rpc("update_max_model_len", ...)`（`vllm/v1/engine/core.py:364`），经 Worker、MRV2 Runner（`gpu/model_runner.py:378-382`）
+传到 `speculator.update_max_model_len`，对 `max_model_len_gpu` 做 `fill_`（`speculator.py:272-273`），这样 capture 之后的缩小也作用于 graph replay。
+
+[源码] `vllm/v1/worker/gpu/spec_decode/speculator.py` - 读取 `max_model_len` 的 draft metadata 构造、`update_max_model_len`
 
 多进程模式下，EngineCore 通过 `EngineCoreReadyResponse` 把最终的
 `max_model_len`、`num_gpu_blocks`、`block_size`、dtype 和并行大小回传给 client；client
@@ -616,10 +621,10 @@ profile 之前确定，使 NIXL（跨实例传输 KV 的 connector）的 DCP int
 - 值为 1：`step_fn = step`。
 - 值大于 1：创建有界 deque，`step_fn = step_with_batch_queue`。
 
-设 `P` 为 PP stage 数（至少 1）。关闭 async scheduling 时容量为 `P`；开启时，
-MRV2 容量为 `P+1`，MRV1 在 `P=1` 时为 2，在 `P>1` 时仍返回 `P`。这是
-`VllmConfig.max_concurrent_batches` 的规则；其他配置校验还可能拒绝不支持的组合。
-例如 MRV2、PP=4、async 开启时容量为 5，并不是固定 2。
+设 `P` 为 PP stage 数（至少 1）。关闭 async scheduling 时容量为 `P`；开启时容量为 `P+1`
+（`vllm/config/vllm.py:559-565`）。MRV1 已随 #63373 删除，曾经的“MRV1 在 `P=1` 时为 2、`P>1` 时仍返回 `P`”分支不再存在。
+这是 `VllmConfig.max_concurrent_batches` 的规则；其他配置校验还可能拒绝不支持的组合。
+例如 PP=4、async 开启时容量为 5，并不是固定 2。
 
 [源码] `vllm/config/vllm.py` - `VllmConfig.max_concurrent_batches`
 
@@ -1107,7 +1112,7 @@ v0.33.0 还让 NIXL pull connector 支持 sleep（#59635）：唤醒时若 `tags
 `release_kv_cache_memory()` 与释放某个请求的 block 引用不同：它要求 pause 已完成、
 Scheduler 无可推进工作、batch queue 已排空，而且 Executor 的内存当前全部驻留。
 满足条件后先 `_reset_caches()`，再 `model_executor.discard(("kv_cache",))`，丢弃 KV
-物理内存。`keep` 保留的逻辑请求在唤醒后需重算，不能继续读取已丢弃的 KV。
+物理内存。`release_kv_cache_memory(reset_connector=True)` 的 `reset_connector` 参数和 `sleep` 一样，决定清缓存时是否连外部 KV connector 的缓存一起重置（默认为真，`core.py:1189`、`:1206`）。`keep` 保留的逻辑请求在唤醒后需重算，不能继续读取已丢弃的 KV。
 这也不是一般的 `sleep(level=...)` 替代品：前置条件不满足就抛 `RuntimeError`，不会
 替调用者自动等待 pause 完成。
 

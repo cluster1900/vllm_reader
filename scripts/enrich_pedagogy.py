@@ -108,7 +108,7 @@ Model Runner 把调度结果装配成 tensor，模型执行数值计算，Sample
 Runner 的 batch 构造混在一起。
 
 第一次阅读追单 GPU、普通文本生成的完整 step；第二次加入 TP/PP 广播和返回值规则；
-第三次再看 MRV1/MRV2、warmup、CUDA Graph 与异步输出。模型内部算子已经在第 01 和
+第三次再看 MRV2 的 persistent batch、warmup、CUDA Graph 与异步输出。模型内部算子已经在第 01 和
 第 06 章建立基础，本章重点是它们怎样被系统正确地调用。
 """,
     "08-compile-cuda-graph": """## 如何阅读本章
@@ -122,7 +122,7 @@ vLLM 如何把它们组合起来。
 无法 replay，shape 不匹配则需要 padding、换图或回退 eager。
 
 第一次阅读只比较 eager、compile、CUDA Graph 三条路径；第二次研究 async scheduler
-的 placeholder 和确认边界；第三次再进入 MRV1/MRV2 dispatcher。性能图必须同时看
+的 placeholder 和确认边界；第三次再进入 MRV2 的 `CudaGraphManager`。性能图必须同时看
 冷启动、稳定态、显存和正确性，不能只比较一个平均延迟数字。
 """,
     "09-distributed": """## 如何阅读本章

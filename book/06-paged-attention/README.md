@@ -3,8 +3,8 @@ title: "第06章 PagedAttention 与 Attention Backend"
 status: draft
 source_repository: vllm-project/vllm
 source_path: ../vllm
-source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
-source_branch: v0.33.0
+source_commit: 05caae03c20f69436ff7ec23ded339ea104f1a01
+source_branch: main
 source_dirty: false
 verified_at: 2026-11-10
 content_complete: true
@@ -34,7 +34,7 @@ prerequisites:
 寻址与执行契约。FlashAttention、FlashInfer、Triton 和平台专用实现都可能消费分页 KV；
 仓库中的 `vllm/v1/attention/ops/paged_attn.py` 也不是所有当前 GPU 路径的统一入口。
 
-本章绑定源码 revision `4ba787ec9959e566d3b587a796dff07673324da5`（v0.33.0），继续使用三种证据标签：
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，2026-11-10 重新钉扎到此 revision：源码引用与行号已逐条核对，Model Runner V1 删除已重新绑定；其余行为未在 05caae03 上全面重核，清单见 `meta/upgrade-main-05caae03-2026-11-10/`），继续使用三种证据标签：
 
 - **源码事实**：能在固定 revision 的实现或测试中直接定位。
 - **设计含义**：由多个源码事实共同推出的系统解释。
@@ -192,9 +192,9 @@ logical block 2 = positions 8,9,10,11
 
 ### 6.3.3 KV cache allocation block
 
-这是 cache manager 分配的页粒度，一页可同时对应许多层的同一个 block ID。v0.32.0
-的持久 `BlockTable.block_size` 和 MRV2 `BlockTables.block_sizes` 都使用这个 manager
-粒度；它们不再在追加 ID 时自动展开 kernel blocks。
+这是 cache manager 分配的页粒度，一页可同时对应许多层的同一个 block ID。MRV2 的
+`BlockTables.block_sizes`（`vllm/v1/worker/gpu/block_table.py:35`）使用这个 manager
+粒度；它不会在追加 ID 时自动展开 kernel blocks。（旧的 MRV1 持久 `BlockTable` 类随 #63373 一起删除，不再需要对照。）
 
 ### 6.3.4 kernel block
 
@@ -302,8 +302,8 @@ flowchart LR
 ## 6.5 Allocation Block 与 Kernel Block：在 backend 边界转换
 
 allocation block 与 kernel block 仍可能不同，但 v0.32.0 改变了转换所在层。旧版在
-`BlockTable.map_to_kernel_blocks()` 或 `BlockTables.append_block_ids()` 中展开 ID；
-现在前者已删除，后者只保留 manager ID。持久表、gather 和 slot mapping 都先使用
+MRV1 的 `BlockTable.map_to_kernel_blocks()` 或 `BlockTables.append_block_ids()` 中展开 ID；
+v0.32.0 起前者已删除（#63373 又把整个 MRV1 `BlockTable` 类删掉），后者（`:125`）只保留 manager ID。持久表、gather 和 slot mapping 都先使用
 manager 坐标，直到构造 backend metadata 时才由 `AttentionGroup` 转换读取表。
 
 例如 allocation page 为 32 token，kernel 读取页为 16 token，且物理布局允许连续拆页：
@@ -330,13 +330,11 @@ flowchart LR
 
 **源码事实：** `AttentionGroup.create_metadata_builders()` 解析 kernel size 并分配每个
 ubatch 的持久输出表；`build_metadata()` 经 `_with_kernel_block_table()` 调用
-`map_to_kernel_block_table()`，再进入具体 builder。MRV1 的 metadata 复用分支也显式
-映射表；MRV2 通过 `build_attn_metadata()` 进入同一 `AttentionGroup` 包装。
+`map_to_kernel_block_table()`（`vllm/v1/worker/utils.py:398`），再进入具体 builder。MRV2 通过
+`build_attn_metadata()`（`vllm/v1/worker/gpu/attn_utils.py:503`）进入同一 `AttentionGroup` 包装。
 
 [源码] `vllm/v1/worker/utils.py` - `AttentionGroup.create_metadata_builders`、
 `build_metadata`、`_with_kernel_block_table`、`map_to_kernel_block_table`
-
-[源码] `vllm/v1/worker/gpu_model_runner.py` - `_build_attn_group_metadata`
 
 [源码] `vllm/v1/worker/gpu/attn_utils.py` - `build_attn_metadata`
 
@@ -426,7 +424,7 @@ flowchart LR
 
 > **读图方法：** 这张图用于压缩“从状态行 gather 成本轮批次行”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
-MRV1 路径使用 `commit_block_table()` 把 CPU buffer 的有效请求行复制到设备。MRV2 的
+MRV2 的
 单 cache group 路径调用 `StagedWriteTensor.apply_write()`，把写入内容通过 H2D 复制到设备，让 GPU 通过 UVA
 访问映射后的主机端索引、起点与长度，再更新 GPU block table，最后按本轮请求顺序 gather。
 这段描述对应支持 UVA 且 block table 驻留 GPU 的常规分支。v0.31.0 的
@@ -444,7 +442,7 @@ UVA 不是所有数据都免拷贝的保证；须同时检查平台能力和 ten
 
 [源码] `vllm/v1/worker/gpu/buffer_utils.py` - `StagedWriteTensor.apply_write`、`FusedStagedWriter.apply`
 
-> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，**不包含在** v0.33.0 中，下一次升级基线时复核。详见 meta/main-tracking-2026-10-27.md。
+> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）。详见 meta/main-tracking-2026-10-27.md。
 > - [78e2f7960](https://github.com/vllm-project/vllm/commit/78e2f796019384b07c9f9b6d8a371e3ea958b33a)（[#63633](https://github.com/vllm-project/vllm/pull/63633)）：main 删除了写入内容的 `async_tensor_h2d` 分支。`StagedWriteTensor.apply_write` 与 `FusedStagedWriter.apply` 都用 `UvaBufferPool.copy_chunks_to_uva` 把暂存内容拼入轮转 UVA 缓冲，kernel 经 UVA 读取；上文“写入内容通过 H2D 复制到设备”“内容不总是单独 H2D”在 main 上应改为“内容与元数据都经 UVA 缓冲（无 UVA 时由 `NonUvaBuffer` 拷贝）”。
 
 [源码] `vllm/v1/worker/gpu/block_table.py` - `BlockTables.apply_staged_writes`、`gather_block_tables`
@@ -493,7 +491,7 @@ write 是互补保护，不能以“table 已清零”替代有效 request 检�
 mask 只能在算分数时屏蔽它们，若那块内存里恰好是 NaN，NaN 仍会传进输出（这是源码 docstring 描述的风险）。
 所以 v0.33.0 在 gather 时就把这些表项改成 null block（ID 0），让 kernel 读到的永远是合法内存。
 主 forward 路径传入 `num_computed_tokens=self.req_states.num_computed_tokens.gpu`
-（`vllm/v1/worker/gpu/model_runner.py:1602`）；没有传入、没有滑窗 group，或 context parallelism
+（`vllm/v1/worker/gpu/model_runner.py:1672`）；没有传入、没有滑窗 group，或 context parallelism
 大于 1 时，`sliding_window_reach` 为 0，kernel 不做这一步。
 
 要换成 null block 的表项个数是：
@@ -510,7 +508,7 @@ block；这些块整块都在窗口之外，可以安全换掉。跨在窗口边
 - $p_0$：该请求本步第一个被调度 token 的位置，即 `num_computed_tokens`，单位 token；
 - $R$：该 KV cache group 的 `sliding_window_reach`，等于
   `SlidingWindowSpec.num_retained_tokens = sliding_window - 1 + extra_retained_tokens`
-  （`vllm/v1/kv_cache_interface.py:911`），单位 token；
+  （`vllm/v1/kv_cache_interface.py:929`），单位 token；
 - $B$：该 group 的 manager block size，单位 token/block；
 - $n_{\mathrm{null}}$：从这一行开头数起要换成 null block 的表项个数，即逻辑块下标 $i<n_{\mathrm{null}}$ 的表项。
 
@@ -549,7 +547,7 @@ flowchart TD
 staged write 的任务是把“某个请求行从第几列起写入哪些 block ID”提交到设备上的持久表。
 新请求的 prompt 很长时，一行可以有上千个 block ID。v0.32.0 里一条写入由一个 Triton program 循环复制；
 v0.33.0 把 kernel grid 改成二维：第 0 维是写入条数 $n$，第 1 维是块数 $n_{\mathrm{chunk}}$，
-每个 program 只复制 `_WRITE_BLOCK_SIZE = 1024` 个元素（`vllm/v1/worker/gpu/buffer_utils.py:24`）。
+每个 program 只复制 `_WRITE_BLOCK_SIZE = 1024` 个元素（`vllm/v1/worker/gpu/buffer_utils.py:27`）。
 
 $$
 n_{\mathrm{chunk}}=\max\left(\left\lceil \frac{L_{\max}}{1024} \right\rceil,\ 1\right)
@@ -559,10 +557,10 @@ $$
 
 其中：
 
-- $L_{\max}$：本批 staged write 中最长一条的元素数（`_staged_write_max_len`，`StagedWriteTensor` 在 `:135`，
+- $L_{\max}$：本批 staged write 中最长一条的元素数（`_staged_write_max_len`，`StagedWriteTensor` 在 `:169`，
   单 group 与 `FusedStagedWriter.apply` 都取各 tensor 的最大值）；
 - $1024$：`_WRITE_BLOCK_SIZE`，每个 program 负责的元素数；
-- $n_{\mathrm{chunk}}$：grid 第 1 维大小，由 `_num_write_chunks`（`:311`）计算。
+- $n_{\mathrm{chunk}}$：grid 第 1 维大小，由 `_num_write_chunks`（`:369`）计算。
 
 手算例子：本批有 3 条写入，长度分别为 5、3000、64 个元素，则 $L_{\max}=3000$，
 $n_{\mathrm{chunk}}=\lceil 3000/1024\rceil=3$，grid 为 $(3,3)$ 共 9 个 program；长度 5 的那条只有第 0 块有活干，
@@ -584,8 +582,8 @@ flowchart LR
 
 这只改变并行方式，不改变语义：写到哪一行、哪一列起、写什么内容都与分块前一致，所以
 上文单 group `apply_write()` 与多 group `FusedStagedWriter.apply()` 的描述仍然成立
-（二者都以 `_apply_write_kernel[(…, _num_write_chunks(max_len))]` 启动，`:223`、`:296`；
-kernel 本体在 `:317`）。官方 v0.33.0 release notes 把该改动列为 GB200 上长 prompt staged write 提速 31–120 倍，
+（二者都以 `_apply_write_kernel[(…, _num_write_chunks(max_len))]` 启动，`:271`、`:354`；
+kernel 本体在 `:375`）。官方 v0.33.0 release notes 把该改动列为 GB200 上长 prompt staged write 提速 31–120 倍，
 这是上游 PR 的自述数字，本书没有复测。上游提交是
 [fc2b6ab45](https://github.com/vllm-project/vllm/commit/fc2b6ab45)
 （[#62698](https://github.com/vllm-project/vllm/pull/62698)），测试为
@@ -750,9 +748,9 @@ flowchart TB
 
 > **读图方法：** 这是“Ragged Batch：两个边界数组胜过 padding 矩阵”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
-**源码事实：** `CommonAttentionMetadata.naive_query_lens()` 计算 start location 的相邻差；
-`compute_num_computed_tokens()` 在 device 上执行 `seq_lens - query_lens`。源码还弃用了隐式生成
-CPU `seq_lens` 的便捷路径，因为 H-D 同步会破坏全异步调度。
+**源码事实：** `CommonAttentionMetadata.compute_num_computed_tokens()`（`vllm/v1/attention/backend.py:491`）
+在 device 上执行 `seq_lens - query_lens`，其中 `query_lens` 就是 `query_start_loc` 的相邻差（`:494`），结果缓存在
+`_num_computed_tokens_cache`。旧的 `naive_query_lens()` 辅助方法随 #63373 删除，调用者直接用这个相邻差。
 
 ## 6.9 Prefill、Decode 与 Mixed Batch
 
@@ -820,9 +818,8 @@ CUDA Graph 或所有 attention feature。能力验证和 metadata builder 正是
 | batch control | `num_reqs`、`num_actual_tokens`、`causal` | metadata 覆盖规模（可能含 padding）和 mask 语义 |
 
 其余字段支持 encoder/cross attention、DCP、multimodal prefix、R-SWA、ReplaySSM 等功能。
-其中 multimodal prefix 的双向注意力范围，v0.33.0 起由两个 Runner 共用同一个函数
-`compute_mm_prefix_ranges()`（`vllm/v1/attention/backends/utils.py:78`）：MRV1
-（`gpu_model_runner.py`）与 MRV2（`gpu/model_states/default.py`）都从这里取每个请求的 doc ranges；
+其中 multimodal prefix 的双向注意力范围，由 `compute_mm_prefix_ranges()`（`vllm/v1/attention/backends/utils.py:78`）
+统一计算（v0.33.0 起由 MRV1 与 MRV2 共用，MRV1 删除后只剩 MRV2 的 `gpu/model_states/default.py` 调用）；
 v0.32.0 里 MRV2 专用的 `gpu/attn_utils.py::compute_mm_prefix_ranges` 已被删除
 （[b3b0bc305](https://github.com/vllm-project/vllm/commit/b3b0bc305)，
 [#56937](https://github.com/vllm-project/vllm/pull/56937)）。
@@ -838,10 +835,14 @@ flowchart TD
 
 > **读图方法：** 阅读“`CommonAttentionMetadata`：跨后端的最小公共语言”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
-`num_actual_tokens` 不是跨 Runner 通用的“去 padding token 数”。在本章固定 revision，
-`CommonAttentionMetadata` 声明旁仍保留重命名 TODO；MRV1 构造 `cm_base` 时明确传入
-`num_tokens_padded`，`num_reqs` 同样取 padded 请求数。因而这个字段描述的是当前 metadata
-覆盖的执行规模，不能用它代替 Scheduler 的 `total_num_scheduled_tokens` 统计有效工作。
+`num_actual_tokens` 不是通用的“去 padding token 数”。在本章固定 revision，
+`CommonAttentionMetadata` 声明旁仍保留重命名 TODO（`vllm/v1/attention/backend.py:417`，“可能含 padding，名字有误导性”）。
+唯一的主构造点是 MRV2 的 `build_attn_metadata()`（`attn_utils.py:578`），它把调用方传入的 `num_tokens` 原样写入
+`num_actual_tokens`、`num_reqs` 原样写入 `num_reqs`；而调用方 `DefaultModelState.prepare_attn`
+（`vllm/v1/worker/gpu/model_states/default.py:166`）按 CUDA Graph 模式选值：FULL graph 时（`:178`）取 padded 的
+`num_reqs_after_padding` / `num_tokens_after_padding`（`:180-181`），piecewise 与 eager 取未 padding 的 `num_reqs` / `num_tokens`（`:184-185`）。
+因而这个字段描述的是当前 metadata 覆盖的执行规模（FULL graph 下含 padding），不能用它代替 Scheduler 的
+`total_num_scheduled_tokens` 统计有效工作。
 
 FlashAttention builder 将该值传到自己的 metadata；forward 按它切片 query/output，并不会仅因
 字段名含有 actual 就自动去除全部 padding。真实请求边界还要结合 `query_start_loc`、
@@ -850,7 +851,9 @@ FlashAttention builder 将该值传到自己的 metadata；forward 按它切片 
 
 [源码] `vllm/v1/attention/backend.py` - `CommonAttentionMetadata`
 
-[源码] `vllm/v1/worker/gpu_model_runner.py` - `CommonAttentionMetadata` 构造
+[源码] `vllm/v1/worker/gpu/attn_utils.py` - `build_attn_metadata`（`CommonAttentionMetadata(` 构造）
+
+[源码] `vllm/v1/worker/gpu/model_states/default.py` - `DefaultModelState.prepare_attn`
 
 [源码] `vllm/v1/attention/backends/flash_attn.py` - `FlashAttentionMetadataBuilder.build`、
 `FlashAttentionImpl.forward`
@@ -905,8 +908,7 @@ sequenceDiagram
 
 MRV2 `prepare_attn()` 先用 `idx_mapping` gather block tables（v0.33.0 起同时传入
 `num_computed_tokens`，让滑窗 group 的窗口外表项变成 null block，见 6.6.4），再以
-`query_start_loc` 和 `positions` 计算所有 cache group 的 slot mappings。MRV1 则在 input
-preparation 中让 `input_batch.block_table.compute_slot_mapping()` 更新对应 buffer。
+`query_start_loc` 和 `positions` 计算所有 cache group 的 slot mappings（`vllm/v1/worker/gpu/model_runner.py:1665`）。
 
 随后 Model Runner 创建 `CommonAttentionMetadata`，核心赋值关系是：
 
@@ -921,26 +923,25 @@ max_seq_len       <- batch context upper bound
 
 每个 KV cache group 可能拥有不同 block table、slot mapping 或 attention group。Model Runner
 按 group 组织 common metadata，经 `AttentionGroup.build_metadata()` 转换读表后再调用
-builder。MRV1 中，若多个 group 的 spec 与 builder 类型相同，且 builder 支持
-`update_block_table()`，可以复用已构造 metadata，但仍要先映射新的 kernel block table。
-MRV2 的 `build_attn_metadata()` 复用分支则明确限于 `MambaSpec`，不能把 MRV1 的条件
-机械套到两个 Runner。
-
-[源码] `vllm/v1/worker/gpu_model_runner.py` - `_build_attn_group_metadata`
+builder。多个 group 的 spec 与 builder 类型相同、builder 支持 `update_block_table()`（`vllm/v1/attention/backend.py:708`）
+时可以复用已构造的 metadata；MRV2 的 `build_attn_metadata()` 把这个复用分支明确限定在 `MambaSpec`
+（`attn_utils.py:603-608`：`supports_update_block_table and isinstance(kv_cache_spec, MambaSpec)`），其他 spec 每个 attention group
+独立构造。MRV1 里曾有更宽的复用条件，随 #63373 删除，不需要再对照。
 
 [源码] `vllm/v1/worker/gpu/attn_utils.py` - `build_attn_metadata`
 
 ```mermaid
 flowchart TD
-    C["common metadata base, MRV1"] --> G0["copy for KV group 0"]
-    C --> G1["copy for KV group 1"]
-    G0 --> BUILD["builder builds metadata"]
-    G1 --> SAME{"same spec and builder?"}
-    SAME -->|"yes and update supported"| UPDATE["map kernel table, then update metadata"]
-    SAME -->|"no"| BUILD2["build independently"]
+    C["CommonAttentionMetadata per KV group"] --> K{"Mamba spec and builder supports update_block_table?"}
+    K -->|"no"| B["AttentionGroup.build_metadata (at capture: build_metadata_for_cudagraph_capture): map kernel table, call builder"]
+    K -->|"yes, first group with this key"| B
+    K -->|"yes, key already in cached_metadata"| U["builder.update_block_table on cached metadata"]
+    B --> CACHE["store in cached_metadata[reuse_key] if Mamba"]
+    CACHE --> L["share metadata across layer names"]
+    U --> L
 ```
 
-> **读图方法：** 阅读“Model Runner 构造 metadata 的真实顺序”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
+> **读图方法：** 这张图只画 MRV2 `build_attn_metadata()` 的循环体，每个 KV cache group 走一遍。先看菱形：只有 Mamba spec 且 builder 支持 `update_block_table` 才可能复用；第一次遇到某个 `(spec, builder 类型)` 组合时走“正常 build”并把结果存进 `cached_metadata`，之后同组合的 group 直接在缓存的 metadata 上只替换 block table 与 slot mapping。其余 spec 永远走正常 build。
 
 **设计含义：** metadata build 位于每轮热路径。任何隐式 CPU-GPU 同步、临时 tensor 分配或过多
 Python 分支都可能影响 decode 延迟。因此源码中的持久 buffer、device-side 长度和 update 快速
@@ -1054,11 +1055,11 @@ implementation 的 `do_kv_cache_update()`，并传入当前 layer、K、V、KV t
 mapping。
 
 **第三种情形：模型自己的融合 op 已经写好 KV。** v0.33.0 新增一对标志：
-`AttentionBackend.supports_kv_cache_update_bypass`（默认 `False`，`vllm/v1/attention/backend.py:73`）
+`AttentionBackend.supports_kv_cache_update_bypass`（默认 `False`，`vllm/v1/attention/backend.py:72`）
 声明 backend 的 forward 能否在 key/value 省略时运行；`Attention.kv_cache_update_bypass`
-（默认 `False`，`vllm/model_executor/layers/attention/attention.py:456`）由模型设置，表示“我已在调用 attention 之前把 KV
+（默认 `False`，`vllm/model_executor/layers/attention/attention.py:478`）由模型设置，表示“我已在调用 attention 之前把 KV
 写进 cache，随后以 `key=None` 调用”。v0.33.0 里声明为 `True` 的 backend 有：`FlashAttentionBackend`
-（`vllm/v1/attention/backends/flash_attn.py:287`）、`FlashInferBackend`（`vllm/v1/attention/backends/flashinfer.py:555`）；ROCm AITER FlashAttention 仅在未启用 shuffle KV 布局时为 `True`，
+（`vllm/v1/attention/backends/flash_attn.py:281`）、`FlashInferBackend`（`vllm/v1/attention/backends/flashinfer.py:557`）；ROCm AITER FlashAttention 仅在未启用 shuffle KV 布局时为 `True`，
 因为外部写入者产出的是 packed 布局。这两个标志只对 `forward_includes_kv_cache_update=False` 的 backend 有意义，
 并且要看使用方怎样判定：Muse Spark 的融合 QK-norm+RoPE+KV 插入路径
 （`vllm/models/muse_spark/common/ops/fused_qk_norm_rope_kv.py`）只在 `decode_context_parallel_size<=1`、
@@ -1088,7 +1089,7 @@ backend `forward_includes_kv_cache_update=False` 且 `supports_kv_cache_update_b
 - sliding window、non-causal、sink、MLA、sparse、PCP/DCP 等能力；
 - cache spec/layout 偏好与组合校验。
 
-> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；以下为 vLLM main 2026-10-29～10-30（36d4ef654..2eae56c4b）的变化，**不包含在** v0.33.0 中，下一次升级基线时复核。详见 meta/main-tracking-2026-10-30.md。
+> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-29～10-30（36d4ef654..2eae56c4b）。详见 meta/main-tracking-2026-10-30.md。
 > - [a6c3635e3](https://github.com/vllm-project/vllm/commit/a6c3635e3660f6343c14e2158c7ab44c62be88b9)（[#64064](https://github.com/vllm-project/vllm/pull/64064)）：新增 `AttentionBackend.supports_head_size_v`，默认要求 V=K（`vllm/v1/attention/backend.py` L109–L112）；`RocmAiterUnifiedAttentionBackend` 允许 `head_size_v <= head_size`（`rocm_aiter_unified_attn.py` L90–L94），从而 MiMo-V2.6 可用 ROCm AITER unified attention。`csrc/cache_kernels.cu` 新增 `reshape_and_cache_flash_kernel_asym`（L428），仅当 `v_head_size != head_size` 时由 `reshape_and_cache_flash` 使用（dispatch L993–L1014）；K/V 须共享 head stride / page stride / block geometry，对称 kernel 路径不变。
 
 ### 6.14.2 `AttentionMetadataBuilder`
@@ -1224,7 +1225,7 @@ verification、DCP、R-SWA 组合以及 backend 自定义组合条件。
 `KV_CACHE_DTYPES` 现在是可变列表，平台通过 `register_kv_cache_dtype(name)` 注册一个
 `KVCacheDTypeHandler`（给出存储 torch dtype 与 `KVQuantMode`）后，新名字会被追加进去并同时通过
 CLI/配置校验，`is_known_kv_cache_dtype()` 就是对这张列表做成员判断。随之，`is_quantized_kv_cache`
-从 `vllm/utils/torch_utils.py` 移到 `vllm/v1/kv_cache_interface.py:152`（`flash_attn.py` 与
+从 `vllm/utils/torch_utils.py` 移到 `vllm/v1/kv_cache_interface.py:145`（`flash_attn.py` 与
 `cuda.py` 的导入已同步改动）。这只扩展“有哪些 dtype 名字合法”，不改变上面逐 backend 的 KV dtype 校验：
 backend 的 `supported_kv_cache_dtypes` 不含该名字时仍会被拒绝。上游提交是
 [9499c949b](https://github.com/vllm-project/vllm/commit/9499c949b)
@@ -1266,7 +1267,7 @@ flowchart LR
 - 支持 sliding window、non-causal 和多种 attention type；
 - mm-prefix 能力要求可用 FA4；仍需通过具体组合校验，不能把类级能力表当作所有配置的保证；
 - 声明 `forward_includes_kv_cache_update=False`，并在 v0.33.0 起声明
-  `supports_kv_cache_update_bypass=True`（`flash_attn.py:287`，含义见 6.13；该取值由
+  `supports_kv_cache_update_bypass=True`（`flash_attn.py:281`，含义见 6.13；该取值由
   [0f6b26191](https://github.com/vllm-project/vllm/commit/0f6b26191)、
   [#61879](https://github.com/vllm-project/vllm/pull/61879) 加入，基类属性与框架分支来自 #62622）。
 
@@ -1295,7 +1296,7 @@ block_table_tensor, slot_mapping, causal
 [#60908](https://github.com/vllm-project/vllm/pull/60908)）和 XPU 平台
 （`current_platform.is_xpu()`，[35d01660f](https://github.com/vllm-project/vllm/commit/35d01660f)，
 [#62244](https://github.com/vllm-project/vllm/pull/62244)）也列为 `ALWAYS`，FA2 仍为 `UNIFORM_BATCH`
-（`FlashAttentionMetadataBuilder._cudagraph_support`，`flash_attn.py:619`）。v0.32.0 还要求 per-request `causal` tensor 预先是
+（`FlashAttentionMetadataBuilder._cudagraph_support`，`flash_attn.py:582`）。v0.32.0 还要求 per-request `causal` tensor 预先是
 `int32`：builder 遇到其他 dtype 直接报错，不在热路径临时转换并分配新 tensor，
 以免破坏 FULL CUDA Graph 对持久地址的依赖。
 
@@ -1370,8 +1371,8 @@ attention 算法/实现；block table 描述 K/V 的地址组织。当前 API �
 ### 6.16.6 Cascade 已删除，DCP 仍是独立分支
 
 v0.32.0 已删除 `cascade_attention()`、`use_cascade_attention()` 及 FlashAttention
-metadata 中的公共前缀/后缀字段。`SchedulerOutput.num_common_prefix_blocks` 保留空列表
-默认值，builder 的 `common_prefix_len` 兼容参数始终传 0；它们是树外实现兼容边界，
+metadata 中的公共前缀/后缀字段。`SchedulerOutput.num_common_prefix_blocks` 字段在 `05caae03` 里也已删除（第 04 章 4.17.2）；builder 的 `common_prefix_len` 兼容参数仍在，
+源码注释写明“Deprecated and always 0”，调用处传 0（`vllm/v1/attention/backend.py:698`、`:730`）。它只是树外实现的兼容边界，
 不是内置 cascade 仍在执行的证据。Prefix cache 的 block 共享仍存在，不能把“移除
 cascade 计算优化”误解为“移除前缀缓存”。
 
@@ -1392,8 +1393,6 @@ flowchart TD
 [源码] `vllm/v1/attention/backends/flash_attn.py` - `FlashAttentionImpl.forward`、`_forward_with_dcp`
 
 [源码] `vllm/v1/attention/backend.py` - `AttentionMetadataBuilder.build` 的兼容参数说明
-
-[源码] `vllm/v1/core/sched/output.py` - `SchedulerOutput.num_common_prefix_blocks`
 
 本章先建立单 rank 基本路径；第 09 章讨论跨 rank softmax 状态为什么不能直接平均。
 
@@ -1738,8 +1737,8 @@ positions 为 `[30,31,32,33]`。先按 manager 表计算四个写 slot；再在�
 
 ### 练习 3：追踪 metadata 的共享
 
-从 `CommonAttentionMetadata(...)` 开始，进入 `_build_attn_group_metadata()`，找出 metadata cache
-key、`supports_update_block_table` 快速路径和 layer name 映射。
+从 `build_attn_metadata()`（`vllm/v1/worker/gpu/attn_utils.py:503`）里的 `CommonAttentionMetadata(...)` 开始，
+找出 `cached_metadata` 的 key、`supports_update_block_table` 快速路径和 layer name 映射。
 
 ### 练习 4：从模型层追到 FlashAttention kernel API
 
@@ -1853,12 +1852,8 @@ flowchart TD
 
 > **本节先看：** 下面先给出“Block table 与 slot mapping”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
 
-- `vllm/v1/worker/block_table.py`
-  - `get_block_table_width`
-  - `BlockTable`
-  - `BlockTable.append_row`
-  - `ComputeSlotMappingKernel`
-  - `MultiGroupBlockTable`
+- `vllm/v1/kv_cache_interface.py`
+  - `get_block_table_width`（#63373 把它从已删除的 MRV1 `block_table.py` 搬到这里）
 - `vllm/v1/worker/gpu/block_table.py`
   - `BlockTables.append_block_ids`
   - `BlockTables.apply_staged_writes`
@@ -1893,9 +1888,6 @@ flowchart TD
 
 > **本节先看：** 下面先给出“Model Runner metadata”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
 
-- `vllm/v1/worker/gpu_model_runner.py`
-  - MRV1 input preparation、slot mapping 与 `CommonAttentionMetadata`
-  - `_build_attn_group_metadata`
 - `vllm/v1/worker/gpu/model_runner.py`
   - MRV2 `prepare_attn`
   - MRV2 block table gather 与 slot mappings
