@@ -49,3 +49,10 @@
 取消/长度边界，收紧 pause、prefix lookup、UVA 与计时解释。第 05–10 章增加初读自检，
 全局术语表补齐进阶缩写；定义引用按 AST 核对完整名称。封面与作者信息、公式排版及
 Markdown/EPUB 全文一致性检查随本轮一起交付，章节保持 draft。
+
+## 2026-11-10 公式与图的全书改写（F/D 轮）
+
+在全书公式符号统一、每个公式补“怎么算出来”的讲解、复杂处补 mermaid 图。F0 先定约定：
+[符号与记法约定](../glossary/notation.md)（符号表、局部字母、改名对照、讲解模板、配图规则）与
+[符号普查记录](notation-census-2026-11-10.md)；随后 B1–B8 按章改写，B9 收尾核对，追踪 issue 为 cluster1900/bot-hub#128。
+这一轮不改章节状态，各章仍是 draft、`runtime_verified: false`。

@@ -97,6 +97,7 @@ EPUB 已嵌入排版完成的 SVG 公式，不依赖 MathML 或在线脚本。
 - [源码版本记录](meta/source-revisions.md)：所有研究基线。
 - [章节源码映射](meta/chapter-source-map.md)：十章与当前实现的关键符号对应关系。
 - [术语表](glossary/terms.md)：跨章节统一使用的术语定义。
+- [符号与记法约定](glossary/notation.md)：全书公式符号表、改名对照与公式讲解模板。
 
 ## 结构校验
 

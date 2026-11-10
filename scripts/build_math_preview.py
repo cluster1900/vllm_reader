@@ -16,7 +16,7 @@ except ImportError:
 
 
 def build() -> Path:
-    paths = sorted((ROOT / 'book').glob('*/README.md')) + [ROOT / 'glossary/terms.md']
+    paths = sorted((ROOT / 'book').glob('*/README.md')) + [ROOT / 'glossary/terms.md', ROOT / 'glossary/notation.md']
     formulas = [(path.relative_to(ROOT), f) for path in paths for f in markdown_formulas(path.read_text())]
     document = read_document(paths)
     nodes = list(math_nodes(document))
