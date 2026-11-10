@@ -11,7 +11,7 @@ content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
 pedagogy_reviewed_at: 2026-10-08
-scope: "V1 Engine 的异步调度与 batch queue、vLLM compile、piecewise/full CUDA Graph、MRV1/MRV2 dispatch、capture、replay 和 fallback"
+scope: "V1 Engine 的异步调度与 batch queue、vLLM compile、piecewise/full CUDA Graph、MRV2 `CudaGraphManager` 的 dispatch、capture、replay 和 fallback"
 prerequisites:
   - 第04章
   - 第06章
@@ -77,7 +77,7 @@ flowchart LR
 6. 解释 piecewise graph 为什么常以 attention 等不易捕获操作为边界。
 7. 说明 CUDA Graph 对 shape、地址、控制流和 workspace 生命周期的要求。
 8. 解释配置模式与运行时模式的区别。
-9. 从 batch shape 追踪到 MRV1 `CudagraphDispatcher` 或 MRV2 `CudaGraphManager` 的选择结果。
+9. 从 batch shape 追踪到 MRV2 `CudaGraphManager` 的选择结果。
 10. 解释 warmup、capture 顺序、显存预留与 fallback。
 11. 设计同时报告冷启动、稳定态、graph hit、padding 和显存的实验。
 
@@ -92,7 +92,7 @@ vLLM 如何把它们组合起来。
 无法 replay，shape 不匹配则需要 padding、换图或回退 eager。
 
 第一次阅读只比较 eager、compile、CUDA Graph 三条路径；第二次研究 async scheduler
-的 placeholder 和确认边界；第三次再进入 MRV1/MRV2 dispatcher。性能图必须同时看
+的 placeholder 和确认边界；第三次再进入 MRV2 的 `CudaGraphManager`。性能图必须同时看
 冷启动、稳定态、显存和正确性，不能只比较一个平均延迟数字。
 
 **先翻译编译器名词。** 计算图是运算与数据依赖的关系图；Dynamo 从 Python 执行中
@@ -100,8 +100,8 @@ vLLM 如何把它们组合起来。
 复用图之前的条件检查；eager 是直接执行模型运算。CUDA Graph 另外记录 GPU 工作的
 提交关系，与“用编译器改写运算”是两件事。
 
-**第一遍走法：** 读 8.1–8.2、8.6、8.9–8.10、8.11.3 和 8.20，再补 8.3–8.5 的异步
-账本；dispatcher 内部第二遍追。**停下来算：** 实际 3 token 使用 4-token graph，
+**第一遍走法：** 读 8.1–8.2、8.6、8.9–8.10、8.11 和 8.20，再补 8.3–8.5 的异步
+账本；`CudaGraphManager` 内部第二遍追。**停下来算：** 实际 3 token 使用 4-token graph，
 多算 1 个 padding 位置，地址仍要稳定；graph 命中不等于没有额外计算。
 
 ## 8.1 先建立正确的时间成本模型
@@ -171,7 +171,7 @@ GPU 工作，而是启动已经准备好的可执行图。它记录的是操作�
 与功能组合变化时，vLLM 会选择相应 descriptor 或回退。FULL forward、分段 PIECEWISE、
 图外输入准备与采样不能合起来称为“整个 step 只有一次启动”。
 
-[源码] `vllm/v1/cudagraph_dispatcher.py` - `CudagraphDispatcher.dispatch`
+[源码] `vllm/v1/worker/gpu/cudagraph_utils.py` - `CudaGraphManager.dispatch`
 
 [源码] `vllm/compilation/cuda_graph.py` - `CUDAGraphWrapper.__call__`
 
@@ -260,32 +260,31 @@ flowchart TD
 
 ### 8.2.3 `max_concurrent_batches` 从哪里来
 
-当前实现中：
+当前实现（`vllm/config/vllm.py:559`）只有两步：
 
-- Pipeline Parallelism 需要 `pp_size` 个并发 batch 填充 pipeline。
-- async scheduling 需要额外的并发窗口。
-- MRV2 的 async scheduling 返回 `pp_size + 1`。
-- MRV1 仅在 `pp_size <= 1` 时把 async 窗口设为 2；配置校验已拒绝 MRV1 + async + PP>1，
-  不能把 property 中的 fallback 分支当作该组合受支持的证据。
+- Pipeline Parallelism 需要 `pp_size` 个并发 batch 填充 pipeline，基础值就是 `pp_size`。
+- 只要 `scheduler_config.async_scheduling` 为真，再加 1，得到 `pp_size + 1`，让 CPU 调度与 GPU 执行重叠。
+
+没有别的分支。第一代 Runner（MRV1）曾让 async 窗口在 `pp_size <= 1` 时固定为 2，并在配置层拒绝 MRV1 + async + PP>1；
+MRV1 随 #63373 删除后，这些条件、以及只在 MRV1 下才计算的 `v1_async_sched_incompat`（#62521 曾用它把“投机解码方法不被支持”和
+`disable_padded_drafter_batch=True` 两条限制挡在 MRV1 之外）都不存在了。因此这两条旧限制已无处可查，MRV2 下它们本来就不生效。
 
 [源码] `vllm/config/vllm.py` - `VllmConfig.max_concurrent_batches`（@ `05caae03`）
 
-**v0.33.0 对 async scheduling 资格的改动。** `f1dbfef79`（#62521）把“投机解码方法不被支持”和
-“`disable_padded_drafter_batch=True`”这两条 async scheduling 限制收进一个只在 MRV1 下才计算的变量
-`v1_async_sched_incompat`（`vllm/config/vllm.py` L1652 起；与 `pipeline parallelism` 并列，三者择一）：
-`use_v2_model_runner` 为真时它是 `None`，所以 MRV2 下这两条不再让 async scheduling 失败或被自动关闭；
-MRV1 下显式开启 async 会抛 `ValueError`，未显式开启则打 warning 并关闭，措辞都带上具体原因。
-上面“MRV1 + async + PP>1 已被拒绝”由两处代码共同拒绝：`_get_v1_model_runner_unsupported_features`（经 `_validate_v1_model_runner`）与 `v1_async_sched_incompat` 里的 `pipeline parallelism`，不是两套不同的规则。
+现在影响 async scheduling 能否开启的，是 `VllmConfig` 后处理里的另一段（`vllm/config/vllm.py:1587-1633`）：显式开启时，
+ROCm DeepEP high-throughput + DBO 或所选 executor 后端不支持 async scheduling 会直接抛 `ValueError`；未显式指定（`None`）时，
+pooling 模型、executor 不支持、ROCm DeepEP-HT+DBO 这三种情况自动关闭，其余自动开启。
 
 ```mermaid
 flowchart LR
     PP["pipeline_parallel_size = P"] --> Q["基础 queue size = P"]
-    AS["async scheduling"] --> V2{"MRV2?"}
-    V2 -- 是 --> Q2["queue size = P + 1"]
-    V2 -- 否且P<=1 --> Q3["queue size = 2"]
+    AS{"async scheduling 开启?"}
+    Q --> AS
+    AS -- 是 --> Q2["queue size = P + 1"]
+    AS -- 否 --> Q3["queue size = P"]
 ```
 
-> **读图方法：** 阅读“`max_concurrent_batches` 从哪里来”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
+> **读图方法：** 从左向右先读 `P` 如何形成基础队列长度，再看唯一的判断“async scheduling 是否开启”：开启就多 1，关闭保持 `P`。图里没有 Runner 版本的分支，这正是 MRV1 被删除后的结果。
 
 **纠正：** batch queue 不等于 `AsyncScheduler`。PP 即使不启用 async scheduler，也可能因为填充
 pipeline 而拥有并发 batch 队列；`AsyncScheduler` 进一步改变 request progress 的表示，使同一请求在
@@ -881,6 +880,9 @@ flowchart TB
 
 `compile_sizes` 用于为某些具体 shape 生成 specialization；`compile_ranges_endpoints` 定义可覆盖的
 动态范围。CUDA Graph 的 `cudagraph_capture_sizes` 则决定实际 capture 的 padded token 数。
+（`05caae03` 起，MRV2 的 capture 配置拆成 `prefill_cudagraph_capture_token_sizes`（非均匀 decode 的 batch，按 token 数）和
+`decode_cudagraph_capture_request_sizes`（均匀 decode，按请求数）；`cudagraph_capture_sizes` 在 MRV2 下被文档标为 deprecated，
+解析完成后保存的是每个已捕获 graph 的 token 数。`vllm/config/compilation.py:751-776`。）
 
 [源码] `vllm/config/compilation.py` - `CompilationConfig.compile_sizes`、
 `CompilationConfig.compile_ranges_endpoints`、`CompilationConfig.cudagraph_capture_sizes`
@@ -895,7 +897,9 @@ flowchart LR
 
 > **读图方法：** 这张图用于压缩“compile size 与 capture size 不是一回事”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
-MRV1 dispatcher 会验证具体 `compile_sizes` 不会被 CUDA Graph padding 改成另一个 size，否则抛错。
+第一代 Runner 的 dispatcher 曾验证具体 `compile_sizes` 不会被 CUDA Graph padding 改成另一个 size，否则抛错；
+这段检查随 MRV1 一起删除，`05caae03` 里 MRV2 的 `CudaGraphManager` 没有对应校验（`vllm/v1/worker/gpu/cudagraph_utils.py` 与
+`vllm/v1/worker/gpu/model_runner.py` 都不再引用 `compile_sizes`）。所以现在“把 compile size 选成 capture size 里的值”只是建议，不再有启动期保护。
 
 ### 8.8.4 `PiecewiseBackend` 在启动期编译全部范围
 
@@ -921,11 +925,12 @@ flowchart TD
 
 ### 8.8.5 编译缓存为什么必须包含源码因素
 
-`CompilationConfig.compute_hash()` 包含会影响 input-to-hidden graph 的配置和 nested config hash，忽略
-debug path、运行时统计等不改变图结构的字段。装饰器还收集 Dynamo trace 涉及的文件，用于在源码
-变化时使 cache 失效。
+`CompilationConfig.compile_factors()`（`vllm/config/compilation.py:950`）列出会影响 input-to-hidden graph 的配置字段，嵌套 config 用各自的
+`compile_factors()`，忽略 debug path、运行时统计等不改变图结构的字段；它返回的是 factor 字典（`get_compile_factors`，`vllm/config/utils.py:386`），
+再由 `hash_factors`（`vllm/config/utils.py:416`）做 SHA-256。#65652（`a7a5d0919`）用它取代了旧的各 config 的 `compute_hash()`。
+装饰器还收集 Dynamo trace 涉及的文件，用于在源码变化时使 cache 失效。
 
-[源码] `vllm/config/compilation.py` - `CompilationConfig.compute_hash`
+[源码] `vllm/config/compilation.py` - `CompilationConfig.compile_factors`
 
 [源码] `vllm/compilation/decorators.py` - `_support_torch_compile` 包装后的 `__call__`
 
@@ -1111,66 +1116,28 @@ piecewise 路径通常依赖 vLLM compile，当前还有 breakable CUDA Graph �
 > **main 上的变化（未发版）**：本书正文已升到 v0.33.0（`4ba787ec`）；以下提交**不在** v0.33.0 祖先链内，暂不写入正文，留待后续基线处理。详见 meta/main-tracking-2026-10-30.md。
 > - [d6fbd9478](https://github.com/vllm-project/vllm/commit/d6fbd947824959eabc6165751f8b9cd4aa83f546)（[#51012](https://github.com/vllm-project/vllm/pull/51012)）：CUDA 上 Qwen3.5 六个 architecture 并入 `default_breakable_cudagraph_architectures()`（`vllm/config/vllm.py` L76–L84、L140–L143）；非 CUDA 仍走旧 `torch.compile` 实现。不是删除 `torch.compile` 机制。
 
-## 8.11 MRV1 `CudagraphDispatcher`
+## 8.11 MRV1 `CudagraphDispatcher` 已删除：它的职责现在在哪里
 
-> **本节先看：** 本节要回答：**MRV1 `CudagraphDispatcher`**。下面的小节会逐层拆开概念、运行过程和源码落点；第一次阅读先抓对象之间的关系，第二次再记类名、字段和分支。
+> **本节先看：** 这一节原来讲第一代 Runner 的 `CudagraphDispatcher`（key 集合、`BatchDescriptor` 最小化、padding、dispatch 优先级、`num_reqs` 要求）。#63373（`aac1b2a4f3`）把 `v1/cudagraph_dispatcher.py` 和它的测试类 `TestCudagraphDispatcher` 一起删除，现在选 graph 的只有 MRV2 的 `CudaGraphManager`（8.14）。下表告诉你原来的每个概念今天对应什么；不再保留已删代码的细节。
 
-### 8.11.1 dispatcher 是合法 key 的真相源
+| 旧 `CudagraphDispatcher` 的概念 | 今天在哪里（`05caae03`） |
+|---|---|
+| `initialize_cudagraph_keys` 生成合法 key 集 | `CudaGraphManager._init_candidates`（`vllm/v1/worker/gpu/cudagraph_utils.py:289`），见 8.14.3 |
+| 最小的 `BatchDescriptor` 当 key | `BatchExecutionDescriptor`（`cudagraph_utils.py:75`），见 8.14.1。`BatchDescriptor`（`vllm/forward_context.py:30`）仍在，只用作 forward context 里的批描述，字段是 `num_tokens`、`num_reqs`、`uniform`、`num_active_loras`（不再有 `has_lora`） |
+| padding 到最小可容纳的 capture size | 同一 token 数下，`_candidates[(i, lora)]` 指向“token 数 ≥ i 的最小已捕获 descriptor”（`:411-426`），`CudaGraphManager.dispatch`（`:558`）取它；见 8.14.3 的图 |
+| FULL 优先于 PIECEWISE，超过最大 capture 就 NONE | 同一 token 数的候选里 FULL 排在 PIECEWISE 前（`:411` 循环顺序）；没有任何兼容候选就返回 `cg_mode=NONE` 的 descriptor（`:596-599`） |
+| `valid_modes` / `invalid_modes` 禁用 FULL | 不再存在；是否可用由 `_is_compatible`（`:115`）按 descriptor 字段判断，见 8.14.2 |
+| FULL 要精确的 padded `num_reqs`，PIECEWISE 把它放宽为 `None` | 保留：`BatchExecutionDescriptor.num_reqs` 的注释写明 `None` 表示 PIECEWISE 不需要 request padding（`:81`）；混合 FULL graph 的 `num_reqs = min(num_tokens, max_num_reqs)`（`:372`） |
+| `get_capture_descs()` | `CudaGraphManager.capture` 读 `_capture_descs`（`:456`），见 8.13.1 |
 
-MRV1 dispatcher 持有两套 key：`FULL` 和 `PIECEWISE`。attention backend 完成初始化并解析支持等级
-后，Runner 调用 `initialize_cudagraph_keys()`。
-
-[源码] `vllm/v1/cudagraph_dispatcher.py` - `CudagraphDispatcher`
-
-```mermaid
-flowchart LR
-    Config["resolved config mode"] --> Init["initialize_cudagraph_keys"]
-    Sizes["capture sizes"] --> Init
-    LoRA["LoRA capture cases"] --> Init
-    Decode["uniform decode query len"] --> Init
-    Init --> Full["FULL key set"]
-    Init --> PW["PIECEWISE key set"]
-```
-
-> **读图方法：** 这是“dispatcher 是合法 key 的真相源”的流程图。先从左向右只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
-
-### 8.11.2 `BatchDescriptor` 为什么要保持最小
-
-MRV1 key 包含：
-
-- `num_tokens`
-- `num_reqs`，piecewise 可为 `None`
-- `uniform`
-- `has_lora`
-- `num_active_loras`
+[源码] `vllm/v1/worker/gpu/cudagraph_utils.py` - `CudaGraphManager._init_candidates`、`CudaGraphManager.dispatch`
 
 [源码] `vllm/forward_context.py` - `BatchDescriptor`
 
-```mermaid
-classDiagram
-    class BatchDescriptor {
-      int num_tokens
-      int_or_none num_reqs
-      bool uniform
-      bool has_lora
-      int num_active_loras
-    }
-```
-
-> **读图方法：** 这是“`BatchDescriptor` 为什么要保持最小”的类型关系图。先分清接口、实现和持有关系，再结合正文确认运行时真正实例化的是哪个类；类图说明结构，不等同于调用先后。
-
-key 太少会把不兼容 batch 误配给同一图；key 太多会造成 graph 数量爆炸。这里是正确性、启动成本和
-命中率之间的显式折中。
-
-`set_forward_context` 在调用方没有传 `batch_descriptor` 但给了 `num_tokens` 时，会自己补一个只含
-`num_tokens` 的 `BatchDescriptor`。v0.32.0 只在 `cudagraph_runtime_mode != NONE` 时才补；v0.33.0 去掉了这个
-条件，`num_tokens` 非空就补（`forward_context.py` L328 @ `05caae03`，`a8be1500b`，#61388），源码注释的理由是“在模型级
-sequence parallelism 之前保留 batch 大小”；该提交标题是恢复 DP=1 下 TP 分片的 routed-expert 捕获。
-wrapper 仍只信任 dispatcher 给出的 runtime mode，这一点不受影响。
-
-### 8.11.3 padding 到最小可容纳 capture size
-
-若 capture sizes 为 `[1, 2, 4, 8]`：
+仍然有效的一个小细节：`set_forward_context` 在调用方没有传 `batch_descriptor` 但给了 `num_tokens` 时，会自己补一个只含
+`num_tokens` 的 `BatchDescriptor`（`vllm/forward_context.py:328`）。v0.32.0 只在 `cudagraph_runtime_mode != NONE` 时才补；
+v0.33.0 起去掉了这个条件（`a8be1500b`，#61388），源码注释的理由是“在模型级 sequence parallelism 之前保留 batch 大小”。
+wrapper 仍只信任 manager 给出的 runtime mode，这一点不受影响。
 
 ```mermaid
 flowchart LR
@@ -1181,50 +1148,7 @@ flowchart LR
     T9["9 tokens"] --> None["超过最大 capture -> NONE"]
 ```
 
-> **读图方法：** 这张图用于压缩“padding 到最小可容纳 capture size”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
-
-Padding 减少需要捕获的 shape 数量，但会执行额外 padded rows。更多 capture sizes 降低 padding，
-同时增加启动时间和 graph memory。
-
-### 8.11.4 dispatch 优先级
-
-运行时流程可概括为：
-
-```mermaid
-flowchart TD
-    A["runtime batch"] --> B{"keys initialized and size <= max?"}
-    B -- 否 --> N["NONE"]
-    B -- 是 --> P["pad descriptor"]
-    P --> F{"FULL key exists and allowed?"}
-    F -- 是 --> RF["FULL"]
-    F -- 否 --> W{"relaxed PIECEWISE key exists?"}
-    W -- 是 --> RW["PIECEWISE"]
-    W -- 否 --> N
-```
-
-> **读图方法：** 这是“dispatch 优先级”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
-
-FULL 比 PIECEWISE 优先；但 encoder output、用户 force eager、DP 协调等条件可通过
-`valid_modes` / `invalid_modes` 禁止 FULL 或只允许 NONE。
-
-[源码] `vllm/v1/cudagraph_dispatcher.py` - `CudagraphDispatcher.dispatch`
-
-[测试] `tests/v1/cudagraph/test_cudagraph_dispatch.py` - `TestCudagraphDispatcher.test_dispatcher`
-
-### 8.11.5 FULL 和 PIECEWISE 对 `num_reqs` 的要求不同
-
-Mixed FULL key 需要精确的 padded request count，因为某些 attention metadata 计算依赖它；PIECEWISE
-key 把 `num_reqs` 放宽为 `None`，同 token capacity 可服务不同请求数。
-
-```mermaid
-flowchart LR
-    F["FULL descriptor"] --> FR["num_tokens + padded num_reqs"]
-    P["PIECEWISE descriptor"] --> PR["num_tokens + num_reqs=None"]
-```
-
-> **读图方法：** 阅读“FULL 和 PIECEWISE 对 `num_reqs` 的要求不同”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从左向右建立顺序，第二遍再核对分支发生的条件。
-
-这就是为什么仅按“batch size”描述 graph key 不够准确。
+> **读图方法：** 假设 token-keyed graph 的 capture sizes 是 `[1, 2, 4, 8]`。每个实际 token 数沿箭头走到“最小的、不小于它的 graph”，这就是 padding；最右下角的 9 没有候选，只能回到 NONE（eager）。这是 `_init_candidates` 里 `current_range_start` 循环（`:420-426`）的效果。Padding 减少需要捕获的 shape 数量，但会执行额外的 padded rows；更多 capture sizes 降低 padding，同时增加启动时间和 graph memory。
 
 ## 8.12 `CUDAGraphWrapper`：捕获与 replay 的通用契约
 
@@ -1301,11 +1225,8 @@ FULL runtime 时内部 PIECEWISE wrapper 因 mode 不匹配而直通，外层捕
 
 ### 8.13.1 为什么 piecewise 先于 full
 
-MRV1 `get_capture_descs()` 和 MRV2 manager 都按 PIECEWISE 再 FULL、每类从大 size 到小 size 捕获。
-源码注释给出的原因是 piecewise activations 较大，先建立 graph pool 后，full activations 更可能复用
-已有 buffer。
-
-[源码] `vllm/v1/cudagraph_dispatcher.py` - `CudagraphDispatcher.get_capture_descs`
+MRV2 `CudaGraphManager.capture`（`vllm/v1/worker/gpu/cudagraph_utils.py:456`）按 PIECEWISE 再 FULL（`:482` 的循环）、每类从大 size 到小 size（`_capture_descs` 按 `num_tokens` 降序，`:391`）捕获。
+源码注释给出的原因是：不宽于最宽 PIECEWISE graph 的 FULL graph，能放进 graph pool 里已经分配好的 buffer（旧版本的注释写的是 piecewise activations 更大，二者说的是同一件事）。
 
 [源码] `vllm/v1/worker/gpu/cudagraph_utils.py` - `CudaGraphManager.capture`
 
@@ -1397,7 +1318,7 @@ classDiagram
 
 > **读图方法：** 这是“MRV2 descriptor 更细”的类型关系图。先分清接口、实现和持有关系，再结合正文确认运行时真正实例化的是哪个类；类图说明结构，不等同于调用先后。
 
-这比 MRV1 `BatchDescriptor` 显式表达了 dynamic speculative decode、varlen decode 与 Dual-Batch Overlap (DBO，双批次重叠微批次机制) 的
+相比 `forward_context.py` 里仍在的最小 `BatchDescriptor`（见 8.11），它显式表达了 dynamic speculative decode、varlen decode 与 Dual-Batch Overlap (DBO，双批次重叠微批次机制) 的
 兼容条件。
 
 ### 8.14.2 compatibility 不是简单相等
@@ -1435,6 +1356,11 @@ flowchart TD
 
 初始化时 manager 为 `(actual_num_tokens, effective_lora_case)` 预展开优先候选列表。运行时先 dict lookup，
 再依次验证 compatibility，而不是遍历所有 captured graphs。
+
+`05caae03` 比 v0.33.0 多了一层：均匀 decode batch（所有请求 query 长度相同，`uniform_token_count` 非空）会先查另一张按
+`(uniform_token_count, lora, num_ubatches)` 分组、以请求数 `n = cdiv(num_tokens, uniform_token_count)` 为下标的 decode 表
+（`_decode_descs`，`vllm/v1/worker/gpu/cudagraph_utils.py:396-409` 构建，`:579-584` 在 `dispatch` 里使用），把命中的 decode graph
+放到候选列表最前面，再走 `_is_compatible`。它与 token 表并存，所以 decode graph 的大小现在按“请求数”而不是“token 数”选。
 
 满足 uniform-query、token 数和 DBO 阈值时，`_maybe_ubatch_twin()` 还会为 FULL descriptor
 生成微批次版本；DBO capture 使用微批线程对应的 capture stream，失败时会清理挂起线程。
@@ -1592,11 +1518,11 @@ cascade attention 已移除，不能继续把它列成当前 FULL graph 禁用�
 sequence parallelism 被移除。模型内部的序列切分仍应单独看，例如
 `ParallelConfig.use_sequence_parallel_moe`，不再依赖这些编译 passes。
 
-MRV2 现可使用 stock torch.compile，但 `_disable_cudagraphs_for_v2_stock_torch_compile`
-会把 graph mode 改为 NONE、最大 capture size 设为 0，并清空 capture sizes。
+MRV2 可使用 stock torch.compile（Runner 加载模型后调用 `compile_model_with_stock_torch`），但 `_disable_cudagraphs_for_stock_torch_compile`
+（`vllm/config/vllm.py:3428`）会把 graph mode 改为 NONE、最大 capture size 设为 0，并清空 capture sizes。
 “支持 stock compile”不等于“stock compile 可与 MRV2 FULL graph 组合”。
 
-[源码] `vllm/config/vllm.py` - `_disable_cudagraphs_for_v2_stock_torch_compile`、`_get_v2_model_runner_unsupported_features`
+[源码] `vllm/config/vllm.py` - `_disable_cudagraphs_for_stock_torch_compile`、`_get_model_runner_unsupported_features`
 
 [源码] `vllm/config/compilation.py` - `CompilationConfig`
 
@@ -1611,10 +1537,6 @@ MRV2 现可使用 stock torch.compile，但 `_disable_cudagraphs_for_v2_stock_to
 - pooling model。
 - encoder-decoder 的 encoder input step。
 - 某些 KV connector 的 layerwise async 操作。
-- dynamic speculative decode 与 MRV1：MRV1 下若动态 SD 搭配 FULL graph，`cudagraph_mode` 会被覆盖为 `PIECEWISE`
-  （`_maybe_override_dynamic_sd_cudagraph_mode`，L1069）；MRV1 下 speculative 方法不在 `ngram`/`eagle`/`eagle3`/`mtp`/
-  `draft_model`/`dflash` 之内时，动态 SD 被关闭并回到静态 `num_speculative_tokens`（`_maybe_disable_dynamic_sd_for_v1`，
-  L1088 @ `05caae03`，`763e3f7c9`，#46399）；MRV2 不受这条限制。
 - DeepEP high-throughput 等特定组合。
 - splitting ops、graph partition 与模型提供的 piecewise capture 的兼容关系。
 - 加载后的模型是否真的提供 piecewise capture；请求配置不等于实际 provider。
@@ -1661,22 +1583,7 @@ Worker 的 `compile_or_warm_up_model()` 负责运行 warmup/compile，再调用 
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.compile_or_warm_up_model`
 
-### 8.16.2 稳定态 MRV1
-
-> **本节先看：** 这一小节先用图建立“稳定态 MRV1”的整体路径。先找输入、关键状态和输出，再阅读图后的源码解释，不必一开始记住全部节点。
-
-```mermaid
-flowchart LR
-    Batch["runtime batch facts"] --> Disp["CudagraphDispatcher.dispatch"]
-    Disp --> Mode["mode + BatchDescriptor"]
-    Mode --> FC["set_forward_context"]
-    FC --> Model["model call"]
-    Model --> Wrapper["matching wrapper capture/replay/pass-through"]
-```
-
-> **读图方法：** 这张图用于压缩“稳定态 MRV1”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
-
-### 8.16.3 稳定态 MRV2
+### 8.16.2 稳定态 MRV2
 
 > **本节先看：** 这一小节先用图建立“稳定态 MRV2”的整体路径。先找输入、关键状态和输出，再阅读图后的源码解释，不必一开始记住全部节点。
 
@@ -1782,12 +1689,10 @@ $$
 profile 得到的非 KV 占用，`graph reserve` 是实际应用的 graph 估算。该式描述自动预算路径，
 不覆盖显式 `kv_cache_memory_bytes` 的手动容量分支。固定 revision 默认启用
 `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1`；禁用该项只改变估算是否扣除，不代表 graph
-运行时不占显存。估算资格还检查 CUDA/ROCm 或 XPU 平台，并且 `cudagraph_mode` 非 `NONE`，或者（MRV2 且开启
-`cudagraph_mm_encoder` 且没有 `enforce_eager`）：后一个条件让只剩 encoder graph 的配置也会预留显存
-（`gpu_worker.py` L707 起 @ `05caae03`，`7128f568a`，#58243）。
-
-> **main 上的变化（未发版）**：本书正文已升到 v0.33.0（`4ba787ec`）；以下提交**不在** v0.33.0 祖先链内，暂不写入正文，留待后续基线处理。详见 meta/main-tracking-2026-10-28.md。
-> - [dc4d977d97](https://github.com/vllm-project/vllm/commit/dc4d977d97f9cfaa7c6dc2de7fd94a77204a6914)（[#63778](https://github.com/vllm-project/vllm/pull/63778)）：Worker 侧对 V2 runner 不再把“`cudagraph_mode != NONE`（或 encoder 特例）”作为调用 `profile_cudagraph_memory` 的前提；改为 `use_v2_model_runner or cudagraph_mode != NONE`（`gpu_worker.py` L716–L720 @ `0106c8abc`）。上文“估算资格还检查……非 NONE graph mode”在 V2 路径上需改为“由 runner 决定是否 profile（含 encoder graph）”。
+运行时不占显存。Worker 侧的估算资格只检查平台是 CUDA-like 或 XPU，并且该环境变量为真（`gpu_worker.py:756-760`）；
+是否真有 graph 要捕获由 Runner 自己判断：`profile_cudagraph_memory`（`vllm/v1/worker/gpu/cudagraph_utils.py:994`）只在
+`cudagraph_mode == NONE` 且 `needs_cudagraph_capture()` 也为假时返回 0，所以只剩 encoder graph（`cudagraph_mm_encoder` 且没有 `enforce_eager`）
+的配置也会预留显存（`7128f568a`，#58243；#63778 `dc4d977d97` 把原先 Worker 里的 `cudagraph_mode != NONE` 前提去掉，`use_v2_model_runner` 条件随 MRV1 删除一并消失）。
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`
 
@@ -1954,7 +1859,7 @@ python3 -m unittest tests.test_ch08_async_compile_graph -v
 1. `synchronous_timeline()` / `overlapped_timeline()`：展示两级流水的理论重叠。
 2. `AsyncRequestState`：展示 decode 的计数关系、preemption 清零和 stale 输出不重复扣减；
    不模拟完整 speculative rejection、prefill、KV 释放或 GPU 完成信号。
-3. `GraphMode` / `GraphDispatcher`：展示配置模式拆成 runtime mode、padding 和 fallback。
+3. `GraphMode` / `GraphDispatcher`：展示配置模式拆成 runtime mode、padding 和 fallback（思路取自已删除的 MRV1 dispatcher，不是 MRV2 `CudaGraphManager` 的逐行复刻）。
 4. `StaticBuffer` / `CapturedGraph`：展示数据可变但 storage 地址必须稳定。
 5. `compile_cache_key()`：展示配置与 traced source 都应参与 cache 失效。
 
@@ -2005,10 +1910,11 @@ async_scheduling = true
 
 同时记录 token 正确性、queue depth、in-flight tokens、preemption、stale outputs、TTFT、TPOT 和 throughput。
 
-### 实验 D：MRV1/MRV2
+### 实验 D：MRV2 的 descriptor 与降级
 
-在支持同一功能组合的前提下，分别记录 prepare、forward、sample、D2H 和 scheduler update。若某个组合
-在一侧被自动降级，必须报告最终 resolved mode，不能继续称为同条件比较。
+MRV1 已随 #63373 删除，不再有两个 Runner 的对照。在 MRV2 上改变功能组合（例如 DBO、LoRA、speculative decoding），
+分别记录 prepare、forward、sample、D2H 和 scheduler update，以及 `CudaGraphManager.dispatch` 返回的 descriptor。
+若某个组合被自动降级，必须报告最终 resolved mode，不能继续称为同条件比较。
 
 ## 8.22 源码追踪练习
 
@@ -2028,7 +1934,7 @@ microbatch count
 encoder / force eager conditions
 ```
 
-然后追到 dispatcher/manager 的 candidate 和最终 descriptor。
+然后追到 `CudaGraphManager` 的 candidate 和最终 descriptor。
 
 ### 练习 2：确认边界
 
@@ -2074,9 +1980,11 @@ encoder / force eager conditions
 12. **误解：没有 NVIDIA GPU 也能验证 CUDA Graph 性能。** CPU 教学测试只能验证状态和选择契约。
 
 图调度教学模型也需服从这些边界：`FULL_AND_PIECEWISE` 的 decode 若禁用 FULL，
-仍能命中更宽松的 PIECEWISE key；`FULL_DECODE_ONLY` 没有这种 key 才回退 NONE。
+仍能命中更宽松的 PIECEWISE key；`FULL_DECODE_ONLY` 没有这种 key 才回退 NONE。这条规则取自已删除的
+MRV1 dispatcher（它靠 `valid_modes` / `invalid_modes` 实现，MRV2 里没有这两个概念），教学模型保留它只是为了说明
+“FULL 优先、PIECEWISE 兜底、都没有才 NONE”的优先级思路；MRV2 的真实选择见 8.11 与 8.14。
 
-[源码] `vllm/v1/cudagraph_dispatcher.py` - `CudagraphDispatcher.dispatch`
+[源码] `vllm/v1/worker/gpu/cudagraph_utils.py` - `CudaGraphManager.dispatch`
 
 ## 8.24 本章小结
 
@@ -2152,10 +2060,8 @@ flowchart TB
 > **本节先看：** 下面先给出“CUDA Graph”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
 
 - [源码] `vllm/forward_context.py` - `BatchDescriptor`、`ForwardContext`
-- [源码] `vllm/v1/cudagraph_dispatcher.py` - MRV1 `CudagraphDispatcher`
 - [源码] `vllm/compilation/cuda_graph.py` - `CUDAGraphWrapper`
 - [源码] `vllm/v1/attention/backend.py` - `AttentionCGSupport`
-- [源码] `vllm/v1/worker/gpu_model_runner.py` - MRV1 dispatch/forward/capture
 - [源码] `vllm/v1/worker/gpu/cudagraph_utils.py` - MRV2 `CudaGraphManager`、
   `ModelCudaGraphManager`、memory profiling
 - [源码] `vllm/v1/worker/gpu/model_runner.py` - MRV2 runtime execution branches
@@ -2166,7 +2072,8 @@ flowchart TB
 
 - [测试] `tests/v1/core/test_async_scheduler.py` - async PP、preemption、stale output
 - [测试] `tests/v1/core/test_scheduler.py` - placeholder scheduling 与 confirmed boundary
-- [测试] `tests/v1/cudagraph/test_cudagraph_dispatch.py` - MRV1 key/dispatch/wrapper
+- [测试] `tests/v1/cudagraph/test_cudagraph_dispatch.py` - `CUDAGraphWrapper` 的 capture/replay/嵌套契约
+- [测试] `tests/v1/cudagraph/test_cudagraph_manager.py` - MRV2 `CudaGraphManager` 的 dispatch 与 descriptor 选择
 - [测试] `tests/compile/test_config.py` - graph mode、capture size 与 config resolution
 - [测试] `tests/compile/test_decorator.py` - compile decorator 与 runtime mode
 - [测试] `tests/v1/worker/test_gpu_model_runner_v2_cudagraph_profiling.py` - MRV2 graph memory profiling
@@ -2184,14 +2091,14 @@ flowchart TB
 | 提交（PR） | 主题 | 祖先链 | 本章位置 |
 |---|---|---|---|
 | `2fb320d83`（#61589） | 删除 `AsyncScheduler._update_request_with_output`，逻辑并入 `Scheduler`；`cache_blocks` 边界改为 `computed - in_flight` | 是 | 8.3.1、8.4.2、8.4.3 |
-| `f1dbfef79`（#62521） | async scheduling 的投机解码限制只对 MRV1 生效 | 是 | 8.2.3 |
+| `f1dbfef79`（#62521） | async scheduling 的投机解码限制只对 MRV1 生效 | 是 | 当时的 8.2.3（相关代码已随 #63373 删除） |
 | `c068db0e1`（#58918） | `support_torch_compile(use_aot_compile=...)` | 是 | 8.7.1、8.8.5 |
-| `a8be1500b`（#61388） | `set_forward_context` 在 `num_tokens` 非空时总是补 `BatchDescriptor` | 是 | 8.11.2 |
+| `a8be1500b`（#61388） | `set_forward_context` 在 `num_tokens` 非空时总是补 `BatchDescriptor` | 是 | 8.11 |
 | `2c19f6793`（#63372） | DBO 各微批的 routed-experts 偏移 | 是 | 8.14.3 |
 | `66bf93154`（#63476） | 报告最先失败的微批 | 是 | 8.14.3 |
 | `9b5c6707a`（#61496） | DCP FULL graph 带 KV 上下文捕获 | 是 | 8.14.5 |
 | `d12ea8e30`（#61016） | 后续 PP stage 保留原始 `input_ids` | 是 | 8.14.5 |
-| `763e3f7c9`（#46399） | MRV1 下对固定 K 的 proposer 关闭动态 SD | 是 | 8.15.3 |
+| `763e3f7c9`（#46399） | MRV1 下对固定 K 的 proposer 关闭动态 SD | 是 | 当时的 8.15.3（相关代码已随 #63373 删除，正文不再保留） |
 | `b54458740`（#53558） | `KVCacheConfigBuilder`，最小 KV 构造改走 builder | 是 | 8.17.1 |
 | `7128f568a`（#58243） | encoder graph 显存估算条件 | 是 | 8.17.1、8.17.2 |
 | `4135590ff`（#63431） | profiling pass 跳过 adaptive verification 计时 | 是 | 8.17.1 |

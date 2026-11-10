@@ -29,7 +29,7 @@ date:
 GPU / driver / CUDA / PyTorch / vLLM:
 model revision / dtype / quantization:
 TP / PP / DP / EP / DBO:
-runner: MRV1 or MRV2
+runner: MRV2 (the only GPU runner since #63373)
 optimization_level:
 final CompilationConfig:
 attention backend and AttentionCGSupport:
@@ -116,10 +116,10 @@ scheduler update
 
 检查 eager launch 序列与 graph replay、CPU 空洞、stream wait、意外 synchronize 和 graph fallback。
 
-## G. MRV1 与 MRV2
+## G. MRV2 功能组合对照
 
-只在两者都支持同一模型和功能组合时做性能对比。记录各自 descriptor、capture 数量和最终 runtime
-mode。若一侧自动降级、禁用 async 或不支持某功能，将其列为能力差异，不把结果当同条件性能对比。
+MRV1 已删除，不再有两个 Runner 的对比。只在 MRV2 的同一模型上改变功能组合（DBO、LoRA、speculative decoding 等）时做性能对比。
+记录各自 descriptor、capture 数量和最终 runtime mode。若某个组合自动降级、禁用 async 或不支持某功能，将其列为能力差异，不把结果当同条件性能对比。
 
 ## H. 结果模板
 
