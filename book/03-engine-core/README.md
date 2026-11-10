@@ -433,7 +433,7 @@ sequenceDiagram
 `ExternalElasticEPScaleCoordinator`，`prepare_elastic_ep` / `commit_elastic_ep` /
 `abort_external_elastic_ep` / `get_external_elastic_ep_status` 经它完成（#43202）；被缩容淘汰的
 rank 通过 `set_elastic_ep_rank_retired(True)` 标记，之后 `AsyncLLM.check_health()` 直接返回，
-`should_keep_api_server_alive` 为真，等待外部进程关闭它。Elastic EP 的完整流程不在本章展开。
+`should_keep_api_server_alive` 为真，等待外部进程关闭它。Elastic EP 的完整流程不在本章展开，见 9.8.6。
 
 [源码] `vllm/v1/engine/core_client.py` - `DPAsyncMPClient`、`DPLBAsyncMPClient`
 
