@@ -1348,15 +1348,15 @@ XPress 挂在 DFlash 族下：一次 query forward 覆盖「1 个已验证锚点
 
 #### FLy（有损的 entropy-gated 验证）
 
-把 `rejection_sample_method` 设为 `"fly"` 后，rejection 内核不再在「本步不会被 native 接受」处立刻截断。它先对 target 的 **processed logits** 算一个只覆盖 top-$k$ 的熵。实现是 `compute_fly_entropy`（`vllm/v1/worker/gpu/spec_decode/fly.py:12`）。`rejection_sample` 收到的是 `apply_sampling_params` 之后的 logits（已含惩罚和温度，`rejection_sampler.py:273-284`）；在 `fly_window_size>0` 时以 `from_logits=True` 调用 `compute_fly_entropy`（`rejection_sampler_utils.py:1213-1218`）：先取这些 logits 的 top-$k$，再用**全词表**的 $\operatorname{logsumexp}$ 做 softmax 得到这些位置的 $\log p_i$ 和 $p_i$，然后
+把 `rejection_sample_method` 设为 `"fly"` 后，rejection 内核不再在「本步不会被 native 接受」处立刻截断。它先对 target 的 **processed logits** 算一个只覆盖 top-$k$ 的熵。实现是 `compute_fly_entropy`（`vllm/v1/worker/gpu/spec_decode/fly.py:12`）。`rejection_sample` 收到的是 `apply_sampling_params` 之后的 logits（已含 logits processors、温度、min_p、top-k/top-p（若设置），`sampler.py:223-276`、`rejection_sampler.py:273-284`）；在 `fly_window_size>0` 时以 `from_logits=True` 调用 `compute_fly_entropy`（`rejection_sampler_utils.py:1213-1218`）：先取这些 logits 的 top-$k$，再用**全词表**的 $\operatorname{logsumexp}$ 做 softmax 得到这些位置的 $\log p_i$ 和 $p_i$，然后
 
 $$
 H(x)=-\sum_{i\in\operatorname{TopK}(p(x))} p_i(x)\,\log p_i(x).
 $$
 
-**白话：** 这不是把 top-$k$ 重新归一化后再算熵，而是只把概率最大的 $k$ 个词对香农熵的贡献加起来。softmax 是对处理后的 logits（经过惩罚和温度）在**全词表**上归一化，所以 $H$ 大并不表示整个词表更“不确定”。词表很大且分布接近均匀时，头部 $k$ 项各自的概率都很小，它们的贡献加起来反而接近 0。例如默认 $k=3$、词表 $10^5$ 且完全均匀时，$H\approx 0.0003$；若头部三个候选的概率是 $0.5$、$0.3$、$0.2$，则 $H\approx 1.03$。因此 $H$ 大，表示 top-$k$ 里有若干个候选各自占了可观的概率。$k$ 由 `fly_entropy_top_k` 给出（默认 3），并与词表大小取较小值；某个 $p_i=0$ 的项不计入。
+**白话：** 这不是把 top-$k$ 重新归一化后再算熵，而是只把概率最大的 $k$ 个词对香农熵的贡献加起来。softmax 是对处理后的 logits（经过 logits processors、温度、min_p、top-k/top-p（若设置））在**全词表**上归一化，所以 $H$ 大并不表示整个词表更“不确定”。词表很大且分布接近均匀时，头部 $k$ 项各自的概率都很小，它们的贡献加起来反而接近 0。例如默认 $k=3$、词表 $10^5$ 且完全均匀时，$H\approx 0.0003$；若头部三个候选的概率是 $0.5$、$0.3$、$0.2$，则 $H\approx 1.03$。因此 $H$ 大，表示 top-$k$ 里有若干个候选各自占了可观的概率。$k$ 由 `fly_entropy_top_k` 给出（默认 3），并与词表大小取较小值；某个 $p_i=0$ 的项不计入。
 
-**符号说明：** $p(x)$ 是 target 在该 draft 位置上、对处理后的 logits（经过惩罚和温度）做全词表 softmax 得到的分布；$i$ 遍历其中概率最大的 $k$ 个词；$p_i(x)$ 是这些词在全词表分布里的真实概率（不是截断后再归一化的值）；$H(x)$ 无量纲，单位与 $\log$ 的底一致（实现用自然对数）。
+**符号说明：** $p(x)$ 是 target 在该 draft 位置上、对处理后的 logits（经过 logits processors、温度、min_p、top-k/top-p（若设置））做全词表 softmax 得到的分布；$i$ 遍历其中概率最大的 $k$ 个词；$p_i(x)$ 是这些词在全词表分布里的真实概率（不是截断后再归一化的值）；$H(x)$ 无量纲，单位与 $\log$ 的底一致（实现用自然对数）。
 
 若当前步按 native 规则本该拒绝，且 $H$ 不低于 `fly_entropy_threshold`（默认 0.3），并且后面还留得下一个完整窗口，内核就记下 `pending_rejection`、**推迟**这次截断（`_rejection_kernel` 中 `FLY_WINDOW_SIZE>0` 分支，约 `:726-744`）。窗口内后续每一步都必须被 native 接受；走到 `i - pending_rejection == FLY_WINDOW_SIZE` 时，把这一段（含当初被推迟的那一步）算成接受。中途有一步不被 native 接受，验证就此停下，推迟作废。官方文档写明：这是**有意有损**的策略，**不保持** target 分布，可能改变输出。换来的是在 draft 大体正确、只在 top-$k$ 内几个候选都占了可观概率因而差点被掐断的位置，少做一次昂贵的重启。
 

@@ -58,5 +58,5 @@ ch07 §7.4.3 的启动点行号（Engine `core.py:1757`、Worker `multiproc_exec
 - Acceptance estimator 本身不展开，只记 #65175 的交接。
 - 未与 DFlash / DSpark 做对照表。
 - Watchdog 超时公式的白话框维持原样，不新开章节。
-- ch03 §3.4.4 原写「Elastic EP 的完整流程不在本章展开」，已改为「不在本章展开，见 9.8.6」。§9.8.6 由并行 PR #17 新增，本批只加交叉引用；该引用取决于 #17 先合入。
-- ch07 §7.9 写 `enable_extensible_kv_cache` 时 `profile_cudagraph_memory` 返回 0，已加「见 5.6.5」。§5.6.5 由并行 PR #18 新增；§7.10 未提及 extensible KV，没有加引用。该引用取决于 #18 先合入。
+- ch03 §3.4.4 原写「Elastic EP 的完整流程不在本章展开」，已改为「不在本章展开，见 9.8.6」。§9.8.6 由并行 PR #17 新增，本批只加交叉引用；#17 现已合入。
+- ch07 §7.9 写 `enable_extensible_kv_cache` 时 `profile_cudagraph_memory` 返回 0，已加「见 5.6.5」。§5.6.5 由并行 PR #18 新增；§7.10 未提及 extensible KV，没有加引用。#18 现已合入。

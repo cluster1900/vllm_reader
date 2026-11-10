@@ -48,7 +48,7 @@
 - MRV2 里没有对应 compile_sizes padding 校验，正文只写“已删除”，没有断言替代行为。
 - 7.32、8.26 的发布祖先表仍保留 v0.33.0 时代口径，不是遗漏。“main 上的变化”注记已在 r2 按第五节第 6 项改写，不再使用“未发版”标签。
 - 上游 `docs/` 里仍有 V1 历史叙述（含 `docs/design/model_runner_v2.md` 的 MRV1 对照），本批未据此改动；按规则不对外提交，仅记在 bot-hub。
-- B7（block_size=64、可扩展 KV）与 B8（XPress/FLy、Elastic EP、`/v1/decisions`、watchdog）在本批未写。其后：XPress/FLy 短节与 watchdog 行号重钉已写入（7.22.1、ch03 §3.10.4 / ch07 §7.4.3）；block_size=64 / Extensible KV、Elastic EP、`/v1/decisions` 由并行后续 PR 补写（#18、#17），合入前不要把「见 5.6.5 / 9.8.6」当成已在 main 上的小节。
+- B7（block_size=64、可扩展 KV）与 B8（XPress/FLy、Elastic EP、`/v1/decisions`、watchdog）在本批未写。其后：XPress/FLy 短节与 watchdog 行号重钉已写入（7.22.1、ch03 §3.10.4 / ch07 §7.4.3）；block_size=64 / Extensible KV 已由 #18 合入（含 §5.6.5），Elastic EP 与 `/v1/decisions` 已由 #17 合入（含 §9.8.6）。
 
 ## 五、r2（评审后修订）
 

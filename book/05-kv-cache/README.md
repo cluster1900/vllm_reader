@@ -207,14 +207,15 @@ flowchart LR
 `CacheConfig.DEFAULT_BLOCK_SIZE` 现为 **64**（`732e49d44`，[#63231](https://github.com/vllm-project/vllm/pull/63231)）；
 在此之前同一常量是 16。这只是配置默认：启动时平台、backend 和混合模型对齐可能改成别的值
 （`Platform.update_block_size_for_backend`，`vllm/platforms/interface.py:760` @ `05caae03`）。
-多 backend 时取各 backend 都支持的块大小的最小公倍数（`_preferred_block_size_for_backends`，
-`interface.py:710`），FlashAttention 有自己的偏好（`get_preferred_block_size`，
-`backend.py:159`、`flash_attn.py:334`）；混合模型还会把 attention 块对齐到 mamba page
-（`_align_hybrid_block_size`，`interface.py:950`，写入 `:1140`）。CPU 路径的偏好起点是
-128，CPU MLA 会改成 16，DeepSeek-V4 CPU 会改成 256（`cpu.py:561`、`:297`、`:308`）。
+多 backend 时，`_preferred_block_size_for_backends`（`interface.py:710`）先检查配置默认是否被所有
+backend 支持，是则沿用默认；否则把各 backend 各取一个支持大小做成最小公倍数候选，再从中取所有
+backend 都接受的最小者。单 backend 则走该 backend 的 `get_preferred_block_size`。FlashAttention
+有自己的偏好（`get_preferred_block_size`，`backend.py:159`、`flash_attn.py:334`）；混合模型还会把
+attention 块对齐到 mamba page（`_align_hybrid_block_size`，`interface.py:950`，写入 `:1140`）。CPU
+路径的偏好起点是 128，CPU MLA 会改成 16，DeepSeek-V4 CPU 会改成 256（`cpu.py:561`、`:297`、`:308`）。
 显式传入 16 会把 `user_specified_block_size` 置真，从而跳过「按 backend 偏好改写配置默认」
-这一步，但混合模型对齐和部分平台（例如 CPU MLA）仍可能覆盖用户指定的值
-（`interface.py:793-804`）。下面的算例使用配置默认 64，只用于数量级直觉，不代表启动后的最终
+这一步，但混合模型对齐（`interface.py:793-804`）和部分平台（例如 CPU MLA，`cpu.py:291-297`）仍可能
+覆盖用户指定的值。下面的算例使用配置默认 64，只用于数量级直觉，不代表启动后的最终
 `block_size`。
 
 | 参数 | 值 |

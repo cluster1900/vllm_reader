@@ -114,7 +114,10 @@
       {"path": "tests/v1/attention/test_cuda_backend_probe_errors.py", "symbols": ["def test_get_valid_backends_records_environment_failure", "def test_selected_backend_probe_failure_raises_value_error_with_cause"]},
       {"path": "vllm/v1/worker/utils.py", "symbols": ["class AttentionGroup", "def map_to_kernel_block_table", "def map_kv_cache_to_kernel_blocks", "def prepare_kernel_block_sizes"]},
       {"path": "vllm/v1/worker/gpu/attn_utils.py", "symbols": ["def build_attn_metadata"]},
-      {"path": "vllm/v1/kv_cache_interface.py", "symbols": ["def get_block_table_width"]}
+      {"path": "vllm/v1/kv_cache_interface.py", "symbols": ["def get_block_table_width"]},
+      {"path": "vllm/v1/attention/backends/utils.py", "symbols": ["def compute_mm_prefix_ranges"]},
+      {"path": "vllm/v1/worker/gpu/model_states/default.py", "symbols": ["class DefaultModelState", "def prepare_attn"]},
+      {"path": "vllm/v1/worker/cpu/model_states/default.py", "symbols": ["class DefaultModelState", "def prepare_attn"]}
     ],
     "07-model-execution": [
       {"path": "vllm/envs.py", "symbols": ["VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS"]},
