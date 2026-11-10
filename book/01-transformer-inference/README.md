@@ -649,41 +649,50 @@ presence/frequency 的计数范围是输出；repetition 还会考虑 prompt。�
 
 ```mermaid
 flowchart TD
-    Raw[raw logits] --> Rules[allowed IDs, bad words, bias]
-    Rules --> Penalty[repetition, frequency, presence penalties]
-    Penalty --> Thinking[thinking budget mask if enabled]
-    Thinking --> Mode{greedy 或随机采样}
-    Mode -->|greedy| Greedy[argmax，不除以温度]
-    Greedy --> Token
-    Mode -->|随机采样| Temp[temperature 大于 0]
-    Temp --> MinP[min-p if enabled]
-    MinP --> TopK[top-k]
-    TopK --> TopP[top-p]
-    TopP --> Choose[random choice]
-    Choose --> Token[next token ID]
+    Raw[logits] --> Gram[grammar bitmask: structured output]
+    Gram --> Bias[logit bias, allowed IDs, min_tokens]
+    Bias --> Penalty[repetition, frequency, presence penalties]
+    Penalty --> Bad[bad words]
+    Bad --> Custom[custom processors]
+    Custom --> Thinking[thinking budget mask if enabled]
+    Thinking --> Temp[temperature]
+    Temp --> MinP[min-p]
+    MinP --> TopKP[top-k and top-p]
+    TopKP --> Gumbel[gumbel_sample]
+    Gumbel --> Greedy{temperature == 0?}
+    Greedy -->|是| Arg[plain argmax]
+    Greedy -->|否| Noise[加 Gumbel 噪声再 argmax]
+    Arg --> Token[next token ID]
+    Noise --> Token
 ```
 
-> **读图方法：** 这是“Penalty、Bias 与约束”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
+> **读图方法：** 这是“Penalty、Bias 与约束”的流程图，按 MRV2 的 `Sampler` 调用顺序画。先从上向下只追一条主路径：前一步产出的 logits 交给下一步，每个方框只改写 logits，最后一步才选出 token；第二遍再看末尾的菱形，它说明 greedy 和随机采样共用同一个 `gumbel_sample` 入口，只差“要不要加噪声”。grammar bitmask 不在 `Sampler` 里，而是在调用 `Sampler` 之前由 Model Runner 就地写入 logits（见第 07 章）。图中省略 logprobs、spec decode 的 rejection sampler 以及 FlashInfer/XPU 的 fused 分支。
 
-这张图主要展示第一代 Model Runner（Model Runner V1，简称 MRV1，位于 `vllm/v1/worker/gpu_model_runner.py`）的基础采样依赖，省略 logprobs 和批内混合 greedy/random 请求的合并操作。greedy 在影响 argmax 的约束、penalty 和可选 thinking budget 掩码之后取最大值，绕过温度缩放与随机过滤；不要把图当作 MRV2 的逐函数顺序。固定 revision 下：
+从 v0.33.0 之后的 main 起，第一代 Model Runner（Model Runner V1，简称 MRV1）已被 `aac1b2a4f3`（#63373，`[Core] Remove Model Runner V1`）整体删除，`v1/sample/sampler.py` 里的旧 `Sampler` 和 `apply_logits_processors` 都不再存在；这个 revision（`05caae03`）里只剩 MRV2 一套采样实现。上面的图就是它的顺序，对应源码如下：
 
-- MRV1 `vllm/v1/sample/sampler.py::Sampler.forward`、`sample` 和
-  `apply_logits_processors` 实际执行上述分支，类注释可辅助阅读。
 - 第二代 Model Runner（Model Runner V2，简称 MRV2，位于 `vllm/v1/worker/gpu/model_runner.py`）把 sampling state、penalty、bad words、logprob 等拆到
-  `vllm/v1/worker/gpu/sample/`，并大量使用 Triton 实现。其 `Sampler.apply_sampling_params`
-  在本章 revision 中先构造有序 `logits_processors`：bias → penalties → bad words →
-  用户配置的 custom processors。`apply_sampling_params` 逐个调用 `processor.apply(logits, ctx)`，
-  然后应用 thinking budget（思考预算掩码）、temperature、min-p；默认在此继续应用
-  top-k/top-p；但正常 `sample()` 调用始终传入 `skip_top_k_top_p=True`，先延后过滤，
-  再由 `_sample_random` 的 fused kernel 或非 fused `apply_top_k_top_p` 分支执行。bias 与 penalty 不可随意交换：先加分再按倍率惩罚，通常不等于反过来。
-  thinking budget 放在自定义 processor 后，避免它强制的结束标记被后续自定义逻辑覆盖。
+  `vllm/v1/worker/gpu/sample/`，并大量使用 Triton 实现。`Sampler.__init__`（`vllm/v1/worker/gpu/sample/sampler.py:43`）
+  按固定顺序构造 `logits_processors` 列表：bias（含 allowed token IDs 与 `min_tokens` 对应的 stop token 屏蔽，
+  `logit_bias.py` 的 `LogitBiasState`）→ penalties → bad words → 用户配置的 custom processors；源码注释写明
+  “bias 加分、penalty 按倍率缩放，二者不可交换”。`Sampler.apply_sampling_params`（`:223`）逐个调用
+  `processor.apply(logits, ctx)`，然后应用 thinking budget（思考预算掩码）、temperature、min-p；默认在此继续应用
+  top-k/top-p；但正常 `sample()`（`:275`）调用始终传入 `skip_top_k_top_p=True`，先延后过滤，
+  再由 `_sample_random`（`:325`）的 fused kernel 或非 fused `apply_top_k_top_p` 分支执行。
+  先加分再按倍率惩罚，通常不等于反过来。thinking budget 放在自定义 processor 后，避免它强制的结束标记被后续自定义逻辑覆盖。
+- `Sampler.__call__`（`:131`）是入口：先（可选）统计 NaN，再调用 `sample()`，最后组装 logprobs、`num_sampled` 与 `SamplerOutput`。
+  没有任何请求需要 logits 处理时，`apply_sampling_params` 在 `:235` 直接返回原 logits，不做 FP32 拷贝。
 - MRV2 可以使用 Gumbel sampling 等方法避免简单地“先物化完整 softmax 再抽样”。
   `_sample_random` 还可走 FlashInfer 或 XPU fused sampler，但需同时满足能力门控与
   batch 条件：例如有 greedy 请求、显式 seed 或需要 processed logprobs 时，不走该
   fused 分支。不能把“支持某 backend”理解为每个 batch 都选择它。
+- greedy 与随机采样在 MRV2 里不是两条独立路径：temperature 为 0（或 1）的请求，temperature kernel 提前返回
+  不改 logits（`vllm/v1/worker/gpu/sample/gumbel.py:34`），`gumbel_noised_argmax`（`:172`）在 `temp == 0` 时不加噪声，
+  退化为普通 argmax；温度大于 0 才加 Gumbel 噪声。
 
-[源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.__init__`、
+[源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.__init__`、`Sampler.__call__`、
 `apply_sampling_params`、`sample`、`_sample_random`
+
+[源码] `vllm/v1/worker/gpu/sample/gumbel.py` - `_temperature_kernel`、`gumbel_noised_argmax`、`gumbel_sample`
 
 custom processor 收到的 `LogitsContext` 按 logits 行描述 batch，不保证一行就是一个
 独立请求；speculative decoding 下同一请求可占多行。持久状态按 request slot 保存，
@@ -1157,8 +1166,7 @@ attention output: [1.2309, 0.9047]
 | LM head/logits | `vllm/model_executor/models/llama.py::LlamaForCausalLM.compute_logits` | hidden states 投影到 vocabulary |
 | Logits processor | `vllm/model_executor/layers/logits_processor.py::LogitsProcessor` | 并行 LM head 与 logits 处理 |
 | 用户采样参数 | `vllm/sampling_params.py::SamplingParams` | temperature、top-k、top-p、penalties 等 |
-| MRV1 sampling | `vllm/v1/sample/sampler.py::Sampler` | MRV1 logits processing 与采样 |
-| MRV2 sampling | `vllm/v1/worker/gpu/sample/sampler.py::Sampler` | MRV2 stateful、Triton-oriented sampling |
+| 采样（MRV2） | `vllm/v1/worker/gpu/sample/sampler.py::Sampler` | stateful、Triton-oriented 的 logits 处理与采样；MRV1 的 `v1/sample/sampler.py` 已在 #63373 删除 |
 
 ### 模型内部调用链
 
@@ -1178,14 +1186,14 @@ flowchart TD
     LM --> Hidden[final hidden states]
     Hidden --> CL[LlamaForCausalLM.compute_logits]
     CL --> Logits[logits]
-    Logits --> Sampler[MRV1 or MRV2 Sampler]
+    Logits --> Sampler[MRV2 Sampler]
     Sampler --> IDs[sampled token IDs]
 ```
 
 > **读图方法：** 这张图用于压缩“模型内部调用链”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
-图中 `GPUModelRunner`、attention backend 与 sampler 都存在 MRV1/MRV2 或配置分支。
-本章只确认概念接口，不在这里展开 runner 选择和 kernel dispatch。
+图中的 attention backend 与 sampler 内部仍有配置分支（例如 FlashInfer fused sampler 的门控）。
+本章只确认概念接口，不在这里展开 kernel dispatch；`GPUModelRunner` 如今只有 MRV2 一个实现（`vllm/v1/worker/gpu/model_runner.py`），见第 07 章。
 
 ### 关键源码事实
 
@@ -1204,8 +1212,8 @@ flowchart TD
    执行 attention 和返回输出；具体 backend 由配置和能力选择。
 6. `Attention.forward` 接收扁平 token tensor，并 reshape 为
    `[num_tokens,num_heads,head_size]` 后进入实现层。
-7. MRV1 `Sampler` 在 `vllm/v1/sample/sampler.py`，MRV2 `Sampler` 在
-   `vllm/v1/worker/gpu/sample/sampler.py`。二者不能因为同名而混为一个类。
+7. 当前的 `Sampler` 在 `vllm/v1/worker/gpu/sample/sampler.py`（MRV2）。`vllm/v1/sample/ops/topk_topp_sampler.py`
+   里是被它复用的 top-k/top-p 算子，不是另一个 `Sampler`；旧的 MRV1 `Sampler`（`v1/sample/sampler.py`）已不存在。
 
 ### 第一步：模型对象怎样组装
 
@@ -1334,10 +1342,11 @@ sampling。这是模型数学与分布式所有权结合的一个具体例子。
 - stop strings 需要 detokenization；空 stop string 会被拒绝。
 
 这些是基础参数契约，不等于所有校验都由 `SamplingParams` 独立完成。
-`InputProcessor._validate_params` 先调用 `params.verify`，再调用按 MRV1/MRV2 选择的
-custom logits processor 参数校验器；因此仅构造 `SamplingParams` 成功，不能证明请求
-能通过当前 Runner 的准入校验。`prompt_logprob_token_ids` 也在此检查 MRV2 要求及与
-`kv_sharing_fast_prefill` 的不兼容。Sampler 内部仍有防御性处理，但不能把所有
+`InputProcessor._validate_params`（`vllm/v1/engine/input_processor.py:130`）先调用 `params.verify`，再调用
+custom logits processor 的参数校验器（`:165`；校验器由 `_build_logits_processors_params_validator`，`:92`，
+从 `vllm/v1/worker/gpu/sample/logits_processor` 的 loader 构造）；因此仅构造 `SamplingParams` 成功，不能证明请求
+能通过当前 Runner 的准入校验。`prompt_logprob_token_ids` 也在此检查与
+`kv_sharing_fast_prefill` 的不兼容（`:156`）。Sampler 内部仍有防御性处理，但不能把所有
 非法参数都留给 GPU kernel 才发现。
 
 v0.32.0 的 `prompt_logprob_token_ids` 是逐 causal prompt row 的二维整数数组或嵌套列表，
@@ -1362,7 +1371,7 @@ v0.32.0 的 `prompt_logprob_token_ids` 是逐 causal prompt row 的二维整数�
 |---|---|---|
 | RoPE 修改 Query/Key | `vllm/model_executor/models/llama.py::LlamaAttention.forward`、`rotary_embedding/` | `tests/kernels/core/test_rotary_embedding.py` |
 | SamplingParams 校验 greedy、top-k/top-p | `vllm/sampling_params.py` | `tests/test_sampling_params.py`、`tests/benchmarks/test_sampling_params.py` |
-| MRV1 penalty 行为 | `vllm/v1/sample/sampler.py` | `tests/v1/sample/test_sampler.py` |
+| MRV2 penalty / bad words / allowed IDs | `vllm/v1/worker/gpu/sample/penalties.py`、`bad_words.py`、`logit_bias.py` | `tests/v1/sample/test_sampling_params_e2e.py::test_penalties`（只验证带这些参数能跑通，不比对数值）、`test_bad_words`、`test_allowed_token_ids`；MRV1 的 `test_sampler.py` 已随 #63373 删除 |
 | top-k/top-p 参考实现与 kernel 等价 | `vllm/v1/sample/ops/topk_topp_sampler.py` | `tests/v1/sample/test_topk_topp_sampler.py` |
 | Attention backend 由条件选择 | `vllm/v1/attention/selector.py` | `tests/v1/attention/test_attention_backends_selection.py` |
 
@@ -1412,8 +1421,9 @@ Transformer 层本身：
 - 空 prompt 通常需要 BOS 或其他输入策略，不能假设模型可以对零 token 直接采样。
 - `temperature < 0`、非法 `top_p`、越界 token ID 应在进入 kernel 前被拒绝。
 - `temperature=0` 走 greedy 语义，不能直接执行除以 0。
-- FP16/BF16 logits 常转为 FP32 再处理，以降低采样数值问题；当前 MRV1 sampler 明确
-  执行该转换。
+- FP16/BF16 logits 常转为 FP32 再处理，以降低采样数值问题；MRV2 里这一步发生在两处：
+  `Sampler.apply_sampling_params` 在需要 logits 处理时先拷成 FP32 tensor（`sampler.py:238`），temperature、
+  Gumbel 与 logprob kernel 内部也用 `logits.to(tl.float32)`（`gumbel.py:43`、`:333`，`logprob.py:43`）。
 - EOS、stop token、stop string 和最大生成长度是不同停止条件，部分发生在 token
   侧，部分需要 detokenize 后判断。
 - KV Cache 中的 position、token 前缀或模型身份不匹配会破坏正确性，缓存不是任意
@@ -1448,7 +1458,8 @@ VLLM_LOGGING_LEVEL=DEBUG python3 examples/basic/offline_inference/basic.py
 运行时至少记录：
 
 1. 模型和 tokenizer 名称、revision、dtype。
-2. `VLLM_USE_V2_MODEL_RUNNER` 是否显式设置，最终选择 MRV1 还是 MRV2。
+2. `VLLM_USE_V2_MODEL_RUNNER` 是否被设置：它已不再是开关，值为 `1` 只打 warning，其他值会在
+   `Platform.validate_environ`（`vllm/platforms/interface.py:1514-1524`）里直接 `ValueError`；这里应记录“未设置”。
 3. 实际 attention backend。
 4. prompt token IDs、prompt length、输出 token IDs。
 5. 首次 prefill 与后续 decode 的 scheduled token 数。
@@ -1514,7 +1525,8 @@ vLLM 的核心任务，是在多个不同长度请求之间高效安排这些 to
 1. 从 `LlamaForCausalLM.forward` 追踪到一次 `Attention.forward`，记录每一跳输入输出。
 2. 在 `LlamaAttention.forward` 中标注 Q/K/V split 后的本 rank 维度来源。
 3. 找到 `Attention` 选择 backend 的位置，列出影响选择的至少四个条件。
-4. 对比 MRV1 与 MRV2 sampler 中 temperature、penalty、top-k/top-p 的代码组织方式。
+4. 对比 MRV2 `Sampler.apply_sampling_params` 中 bias、penalty、bad words 与 temperature、min-p、top-k/top-p 的先后顺序，
+   说明为什么 top-k/top-p 要延后到 `_sample_random` 里执行。
 5. 从 MRV2 `GPUModelRunner.sample_tokens` 追踪到 `model.compute_logits` 和 sampler，
    说明为什么模型类没有 `sample()` 主入口。
 
@@ -1566,7 +1578,7 @@ sequence lengths、request ordering，以及用于 KV 寻址的 block tables 和
 - 不同长度请求如何组成一个没有大量 padding 的 step？见第 04 章。
 - KV Cache 怎样分页、共享、释放和淘汰？见第 05 章。
 - `[T,D]` token 怎样通过 block table 找到非连续 KV？见第 06 章。
-- MRV1/MRV2 如何准备 tensor、执行 forward 和 sampling？见第 07 章。
+- MRV2 如何准备 tensor、执行 forward 和 sampling？见第 07 章。
 - CUDA Graph 为什么要求稳定地址和 shape？见第 08 章。
 
 ## 源码与资料索引
@@ -1583,11 +1595,10 @@ sequence lengths、request ordering，以及用于 KV 寻址的 block tables 和
 - `vllm/model_executor/layers/rotary_embedding/`
 - `vllm/model_executor/layers/logits_processor.py::LogitsProcessor`
 - `vllm/sampling_params.py::SamplingParams`
-- `vllm/v1/sample/sampler.py::Sampler`
 - `vllm/v1/worker/gpu/sample/sampler.py::Sampler`
 - `docs/design/model_runner_v2.md`
 - `tests/test_sampling_params.py`
-- `tests/v1/sample/test_sampler.py`
+- `tests/v1/sample/test_sampling_params_e2e.py`
 - `tests/v1/sample/test_topk_topp_sampler.py`
 - `tests/kernels/core/test_rotary_embedding.py`
 - `examples/basic/offline_inference/basic.py`
@@ -1601,7 +1612,7 @@ sequence lengths、request ordering，以及用于 KV 寻址的 block tables 和
 - [x] 核心概念从 token 讲到自回归循环。
 - [x] Attention、RoPE、sampling、prefill/decode、KV Cache 有公式与图解。
 - [x] 提供可运行的最小模型、数值推导和 6 个单元测试。
-- [x] 映射到固定 commit 的 Llama、Attention、LogitsProcessor 和 MRV1/MRV2 Sampler。
+- [x] 映射到固定 commit 的 Llama、Attention、LogitsProcessor 和 MRV2 Sampler。
 - [x] 包含异常路径、设计取舍、自检题、答案和源码追踪题。
 - [ ] 在真实 NVIDIA GPU 上执行预训练模型与 vLLM runtime trace。
 - [ ] 由独立审阅者复核后将状态从 `draft` 改为 `verified`。
