@@ -23,8 +23,8 @@ python3 -m unittest tests.test_ch07_execution_pipeline -v
 ## B. 静态确认 Executor 与 Runner
 
 记录 `distributed_executor_backend`、Executor/Worker class、环境变量是否显式设置、
-`use_v2_model_runner` 和实际 Runner class。没有环境变量状态，就无法判断默认选择、自动 fallback 或
-用户强制。
+实际 Runner class（现在只可能是 MRV2 的 `GPUModelRunner`）。同时记录 `VLLM_USE_V2_MODEL_RUNNER`
+是否被设置：设为 `1` 只会警告，设为其他值会在 `Platform.validate_environ` 抛 `ValueError`。
 
 ## C. 启动与显存会计
 
@@ -44,23 +44,23 @@ actual graph pool memory after capture
 验证 `available KV = requested - non-KV - applied graph estimate`。若显式使用
 `kv_cache_memory_bytes`，标记为手工容量，不与自动预算直接比较。
 
-## D. MRV1/MRV2 differential run
+## D. MRV2 golden-output run
 
-用相同模型、prompt、seed 和其余参数分别运行：
+MRV1 已随 #63373 删除，不能再在同一份源码里做 MRV1/MRV2 对照（需要对照时必须分别检出 v0.33.0 与
+`05caae03` 两份 vLLM，那是跨版本对照，不是同一 revision 内的实验）。本节只在 `05caae03` 上固定输出：
 
 ```bash
-# MODEL 指向两种 Runner 都支持的同一模型；两组均完成相同预热。
+# MODEL 指向一个 MRV2 支持的模型；先完成预热，再保存结果。
 MODEL=/path/to/model
-VLLM_USE_V2_MODEL_RUNNER=0 vllm bench latency --model "$MODEL" --input-len 128 --output-len 32 --batch-size 1
-VLLM_USE_V2_MODEL_RUNNER=1 vllm bench latency --model "$MODEL" --input-len 128 --output-len 32 --batch-size 1
+vllm bench latency --model "$MODEL" --input-len 128 --output-len 32 --batch-size 1
 ```
 
-以上是待在 GPU 上运行的延迟对照命令。`bench latency` 不会替你导出逐 token 的
-正确性对照；下面的 token/logprobs 检查需要另行保存生成结果。
+以上是待在 GPU 上运行的延迟基线命令。`bench latency` 不会替你导出逐 token 的
+正确性数据；下面的 token/logprobs 检查需要另行保存生成结果。
 
-先用 greedy 比 token/logprobs，再增加 temperature/top-k/top-p。分开记录 prepare、forward、sample、
-D2H、峰值显存与 block 数。若强制 MRV2 因不支持组合报错，应记录能力边界，不能删参数后宣称原组合
-已验证。
+先用 greedy 保存 token/logprobs 作为 golden output，再增加 temperature/top-k/top-p（固定 seed）。分开记录
+prepare、forward、sample、D2H、峰值显存与 block 数。若某个组合在配置阶段被 `_validate_model_runner` 拒绝，
+应记录这条能力边界，不能删参数后宣称原组合已验证。
 
 ## E. Multiprocessing 与 PP
 

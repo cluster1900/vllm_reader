@@ -92,6 +92,8 @@ class IntermediateTensors:
 @dataclass(frozen=True)
 class ModelRunnerOutput:
     req_ids: list[str]
+    # Teaching-only index kept for the tests; upstream ModelRunnerOutput dropped
+    # `req_id_to_index` in #63373 (05caae03) and callers enumerate `req_ids`.
     req_id_to_index: dict[str, int]
     sampled_token_ids: list[list[int]]
 

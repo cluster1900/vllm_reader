@@ -70,7 +70,7 @@ flowchart TD
 6. 写出可用于 KV Cache 的显存预算公式，并指出它的假设。
 7. 将 request-local token 切片还原成 flat `input_ids`、`positions` 与 ragged boundaries。
 8. 追踪模型 forward、PP intermediate tensors、logits 与 sampling。
-9. 区分 V1 Engine、Model Runner V1（MRV1）和 Model Runner V2（MRV2）。
+9. 区分 V1 Engine 与 Model Runner V2（MRV2），并知道 Model Runner V1（MRV1）已被 #63373 移除。
 10. 理解 `execute_model()` 与 `sample_tokens()` 为什么通过临时状态分成两步。
 
 ## 如何阅读本章
@@ -84,7 +84,7 @@ Model Runner 把调度结果装配成 tensor，模型执行数值计算，Sample
 Runner 的 batch 构造混在一起。
 
 第一次阅读追单 GPU、普通文本生成的完整 step；第二次加入 TP/PP 广播和返回值规则；
-第三次再看 MRV1/MRV2、warmup、CUDA Graph 与异步输出。模型内部算子已经在第 01 和
+第三次再看 MRV2 的 persistent batch、warmup、CUDA Graph 与异步输出。模型内部算子已经在第 01 和
 第 06 章建立基础，本章重点是它们怎样被系统正确地调用。
 
 **先分清数据搬运。** H2D 是 CPU 主机内存到 GPU 设备内存，D2H 是反向拷贝；
@@ -166,29 +166,41 @@ Logits 是分数，不是概率分布；单卡也不必然对应 uni executor，
 
 [源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.__call__`
 
-## 7.2 两个“V1”不是同一个版本维度
+## 7.2 两个“V1”：V1 Engine 与已被移除的 MRV1
 
-当前主线叫 **vLLM V1 Engine**，其内部同时存在两套 GPU Model Runner：
+“V1”曾经指两个互不相干的东西。**vLLM V1 Engine** 是引擎代际，对应 `vllm/v1/engine/`、`vllm/v1/core/`，至今仍是主线。
+**Model Runner V1（MRV1）** 是 GPU Worker 里的第一代 Runner（`v1/worker/gpu_model_runner.py` 加上配套的持久 batch、
+采样器、投机解码 proposer 和 CUDA Graph dispatcher）。后者已被 `aac1b2a4f3`（[#63373](https://github.com/vllm-project/vllm/pull/63373)，
+`[Core] Remove Model Runner V1`，2026-11-07）整体删除：这个提交删掉 66 个文件、改动 435 个文件，MRV1 不在 v0.33.0 中，
+但在本书固定的 `05caae03` 里已经不存在。所以在这个 revision 上，“V1 Engine 用哪套 Runner”只有一个答案。
 
 | 维度 | 名称 | 当前源码位置 |
 |---|---|---|
 | Engine 代际 | V1 Engine | `vllm/v1/engine/`、`vllm/v1/core/` |
-| Runner 实现 | MRV1 | `vllm/v1/worker/gpu_model_runner.py` |
-| Runner 实现 | MRV2 | `vllm/v1/worker/gpu/model_runner.py` |
+| GPU Runner | MRV2（类名仍叫 `GPUModelRunner`） | `vllm/v1/worker/gpu/model_runner.py:203` |
+| encoder-only Runner | `MMEncoderModelRunner` | `vllm/v1/worker/mm_encoder_model_runner.py` |
+| CPU Worker 的 Runner | `CPUModelRunner`（MRV2 `GPUModelRunner` 的子类）；平台无 Triton 时改用 `StandaloneCPUModelRunner` | `vllm/v1/worker/cpu/model_runner.py:10`、`vllm/v1/worker/cpu/standalone_model_runner.py:115`（选择见 `cpu_worker.py:149-158`） |
 
 ```mermaid
 flowchart TD
     V1["vLLM V1 Engine"] --> C["EngineCore + Scheduler"]
     V1 --> W["GPU Worker"]
-    W --> R1["Model Runner V1 / MRV1"]
-    W --> R2["Model Runner V2 / MRV2"]
+    W --> M{"is_mm_encoder_only?"}
+    M -->|no| R2["GPUModelRunner = MRV2"]
+    M -->|yes| E["MMEncoderModelRunner"]
 ```
 
-> **读图方法：** 先看顶层的 V1 Engine，再看 Worker 下方的两种 Runner。分叉表示配置选择：一次 Worker 实例使用其中一种 Runner，不是先后执行两代 Runner。
+> **读图方法：** 先看顶层的 V1 Engine，再看 Worker 下方唯一的分叉。这个分叉不是“选哪一代 Runner”，而是“这个实例是否只跑多模态 encoder”：一次 Worker 实例只构造其中一种 Runner。以前这里还有一支指向 MRV1，现在已经删除。
 
-所以“用了 V1 Engine，因此一定使用 `vllm/v1/worker/gpu_model_runner.py`”是错误的。GPU Worker 根据
-`VllmConfig.use_v2_model_runner` 选择 MRV1 或 MRV2。两者实现同一上层协议，但内部状态布局、
-输入准备、采样和 CUDA Graph 管理不同。
+“用了 V1 Engine，因此一定使用 `v1/worker/gpu_model_runner.py`”这句话在 v0.33.0 及以前是错误的，现在更是不可能：
+该文件已不存在。GPU Worker 在 `_make_model_runner`（`vllm/v1/worker/gpu_worker.py:584`）里直接构造 MRV2 的 `GPUModelRunner`
+（`:590-592`），encoder-only 配置构造 `MMEncoderModelRunner`（`:586-589`）；不再有 `VllmConfig.use_v2_model_runner` 之类的开关。
+MRV2 的设计目标和它为何取代 MRV1，仍可读 `docs/design/model_runner_v2.md`；该文档沿用“V1 对比 MRV2”的历史口吻，
+V1 的描述是历史对照，不是当前代码。
+
+[源码] `vllm/v1/worker/gpu_worker.py` - `Worker._make_model_runner`
+
+[设计] `docs/design/model_runner_v2.md` - “Introduction”
 
 ## 7.3 Executor 如何选择
 
@@ -265,8 +277,10 @@ sequenceDiagram
 可能属于外部启动器，所以不在释放范围内。
 
 这解释了 `rpc_rank` 与 global `rank` 为何不能永远视为同一值。还要区分 Runner 能力边界：
-external launcher 的纯 TP 路径可以使用 MRV2；只有与 `PP>1` 组合时，当前自动选择才把它列为
-MRV2 unsupported feature 并回退到 MRV1。
+external launcher 的纯 TP 路径可以使用 MRV2；只有与 `PP>1` 组合时，`VllmConfig._get_model_runner_unsupported_features`
+（`vllm/config/vllm.py:3119`）才把 “pipeline parallelism with external_launcher” 列为不支持项。
+[#63373](https://github.com/vllm-project/vllm/pull/63373) 之前这里是“回退到 MRV1”；MRV1 删除后，`_validate_model_runner`（`:3446`）
+对任何不支持项直接抛 `ValueError`（“The GPU model runner does not support: …”），不再回退。
 
 ## 7.4 MultiprocExecutor：广播命令，只收需要的回复
 
@@ -474,7 +488,7 @@ sequenceDiagram
     W->>W: query loader external weight memory
     W->>G: memory snapshot and engine budget
     W->>G: initialize workspace manager
-    W->>R: construct MRV1 or MRV2
+    W->>R: construct GPUModelRunner (MRV2)
     E->>W: load_model()
     W->>R: load_model()
 ```
@@ -505,31 +519,37 @@ flowchart LR
 
 > **读图方法：** 这是“NCCL 为什么早于显存快照”的流程图。先从左向右只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
-### 7.6.2 Runner 在什么时候选择
+### 7.6.2 Runner 在什么时候构造
 
-Worker 缓存 `vllm_config.use_v2_model_runner`。`init_device()` 调用
-`_init_workspace_and_model_runner()` 初始化 workspace，再由 `_make_model_runner()`
-选择实现。普通 GPU 路径中，true 导入
-`vllm/v1/worker/gpu/model_runner.py`，false 导入 `vllm/v1/worker/gpu_model_runner.py`。Runner 构造只建立配置和缓冲区结构，随后
+`init_device()`（`vllm/v1/worker/gpu_worker.py:453`）末尾调用 `_init_workspace_and_model_runner()`（`:567`）：先初始化
+workspace manager，再在 `_maybe_get_memory_pool_context(tag="runtime")` 里调用 `_make_model_runner()`（`:584`）构造 Runner。
+`_make_model_runner` 只有一个二分支：`is_mm_encoder_only` 为真构造 `MMEncoderModelRunner`，否则构造 MRV2 的
+`vllm/v1/worker/gpu/model_runner.py::GPUModelRunner`。（MRV1 存在时，这里还要读 `vllm_config.use_v2_model_runner` 决定导入哪个文件；
+该字段和对应分支随 #63373 一起删除。）Runner 构造只建立配置和缓冲区结构，随后
 `Worker.load_model()` 才在权重 allocator context 中调用 Runner 的 `load_model()`。
-V2 的 encoder-only 配置另选 `MMEncoderModelRunner`，不能把上图当作所有 Worker 类型的枚举。
+子类 Worker（例如 CPU Worker，见 7.2 的表）可以覆盖这个构造点，所以不能把上图当作所有 Worker 类型的枚举。
 Triton（用 Python 写 GPU kernel 的编译器和语言）的硬性检查位置在 v0.33.0 也变了：`432b1003f`（#62576）把原来在配置校验 `_validate_v2_model_runner` 里的
-`ValueError("Model Runner V2 requires Triton.")` 删掉，改到 `Worker.__init__` 一开头（`gpu_worker.py` L208 @ `05caae03`），
-也就是 Worker 真正启动时才报；配置侧的自动选择只保留“没有 Triton 就退回 MRV1”（见 7.22）。
+`ValueError("Model Runner V2 requires Triton.")` 删掉，改到 `Worker.__init__` 一开头；#63373 之后这是唯一的 Triton 检查
+（`gpu_worker.py:225-226`）：没有 Triton 且平台没有独立 CPU Runner（`current_platform.uses_standalone_cpu_model_runner()`）时
+抛 `ValueError("vLLM's model runner requires Triton.")`，也就是 Worker 真正启动时才报。配置侧已不再有“没有 Triton 就退回 MRV1”的分支（见 7.22）。
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker._init_workspace_and_model_runner`、
 `Worker._make_model_runner`
 
 ```mermaid
 flowchart TD
-    CFG["use_v2_model_runner"] --> Q{"true?"}
-    Q -->|yes| V2["gpu/model_runner.py"]
-    Q -->|no| V1["gpu_model_runner.py"]
-    V2 --> OWN["Worker.model_runner"]
-    V1 --> OWN
+    INIT["Worker.init_device"] --> WS["init_workspace_manager"]
+    WS --> CTX["memory pool context tag=runtime"]
+    CTX --> MK["_make_model_runner"]
+    MK --> Q{"is_mm_encoder_only?"}
+    Q -->|yes| ENC["MMEncoderModelRunner"]
+    Q -->|no| V2["gpu/model_runner.py GPUModelRunner"]
+    ENC --> OWN["Worker.model_runner"]
+    V2 --> OWN
+    OWN --> LOAD["later: Worker.load_model"]
 ```
 
-> **读图方法：** 阅读“Runner 在什么时候选择”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
+> **读图方法：** 从上到下读一次就够：`init_device` 先准备 workspace，再进入 `_make_model_runner`，唯一的菱形只区分 encoder-only 与普通 GPU 路径，两条支路都落到同一个 `Worker.model_runner` 字段；`load_model` 发生在更后面，不在这张图里构造 Runner。
 
 ## 7.7 从 architecture 到模型实例
 
@@ -660,12 +680,11 @@ flowchart TD
 
 先加载模型并收集 KV specs，才能确定 layout；先 profile，才能确定最终池容量。某些
 profiling 路径已经会创建最小临时 KV 并估算 graph，不能把图理解成 profile 时绝无
-KV 或 capture。v0.33.0 起这个最小 KV 的配置由 `KVCacheConfigBuilder` 生成（`b54458740`，#53558；MRV1 在
-`gpu_model_runner.py` L6153，MRV2 的做法见第 08 章 8.17.1）。最终缓存初始化后，服务前的 warmup/capture 再使用正式布局。
+KV 或 capture。v0.33.0 起这个最小 KV 的配置由 `KVCacheConfigBuilder` 生成（`b54458740`，#53558；MRV2 的做法见第 08 章 8.17.1）。最终缓存初始化后，服务前的 warmup/capture 再使用正式布局。
 `initialize_from_config()` 先记录 block 数/layout 和由 EngineCore 解析的
 `hash_block_size`、`cache_hit_alignment_tokens`，再初始化 KV
-connector，然后调用 Runner `initialize_kv_cache()`。warmup 覆盖 compile sizes、kernel warmup、MRV2
-额外 warmup 和非 eager 下的 graph capture。
+connector，然后调用 Runner `initialize_kv_cache()`。warmup 覆盖 compile sizes、kernel warmup、Runner 的
+JIT 预热（`warmup_kernels`，由 `kernel_config.enable_jit_warmup` 控制）和非 eager 下的 graph capture。
 
 **v0.33.0 的 profiling 前置步骤。** `EngineCore._initialize_kv_caches`（L277）在 profiling 之前依次做三件事：
 `resolve_kv_cache_layout`（L318）、`VllmConfig.adjust_dcp_kv_cache_interleave_size`（L325）、
@@ -723,26 +742,20 @@ flowchart TB
 
 > **读图方法：** 阅读“SchedulerOutput 到长期请求状态”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
-## 7.12 MRV1 与 MRV2 的 persistent batch
+## 7.12 MRV2 的 persistent batch（MRV1 的旧设计已成历史）
 
-MRV1 为减少 CPU 开销采用 persistent batch，但持久 state tensor 与执行输入布局耦合较重；请求加入、
-结束、重排和 async scheduling 需要复杂 bookkeeping。
+persistent batch 的出发点是：相邻两个 step 的请求集合几乎一样，每步只有少数请求加入或结束，所以与其每步从头
+拼 block table、temperature 等大 tensor，不如保留持久 state、只做增量修改。第一代 Runner（MRV1）直接把这些持久
+state tensor 当作模型和采样器的输入，因此要求它们的布局与本步执行顺序一致，请求加入、结束、重排时要整块搬动，
+还要维护一份冗余的 `CachedRequestState` 备份，async scheduling 下 bookkeeping 更复杂（来源：`docs/design/model_runner_v2.md`
+“1. Persistent Batch”的 “Problems with V1's Approach”）。MRV1 与 `CachedRequestState` 都已随 #63373 删除，
+本节只讲现在还存在的 MRV2 设计；这份设计文档对 V1 的描述保留着历史口吻，读它时请把 V1 部分当作背景。
 
-[源码] `vllm/v1/worker/gpu_model_runner.py` - `GPUModelRunner`
-
-```mermaid
-flowchart LR
-    STATE["persistent state tensors"] --> DIRECT["direct step inputs"]
-    JOIN["join / finish / reorder"] --> MOVE["layout maintenance"]
-    MOVE --> STATE
-    ASYNC["next-step CPU prep"] --> BARRIER["protect shared buffers"]
-    BARRIER --> DIRECT
-```
-
-> **读图方法：** 这张图用于压缩“MRV1 与 MRV2 的 persistent batch”的整体关系。先从左向右找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
-
-MRV2 给每个 active request 一个固定 row，直到完成或抢占；每 step 按执行顺序 gather。抢占按完成处理，
-恢复时重新 add。
+MRV2 给每个 active request 一个固定 row（`RequestState`，`vllm/v1/worker/gpu/states.py:9`，空闲行放在 `free_indices`，
+`req_id_to_index` 记录请求到行号的映射），直到完成或抢占；每 step 按执行顺序 gather 成 `InputBatch`
+（`vllm/v1/worker/gpu/input_batch.py:43`，其中 `idx_mapping` 就是“batch 行 → 持久状态行”）。抢占按完成处理，
+恢复时重新 add：被抢占后恢复的请求，现在由 Scheduler 作为 `NewRequestData` 重新发送（旧的 `CachedRequestData.resumed_req_ids` 已随 #63373 删除，
+见第 04 章）。
 
 [源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner`
 
@@ -763,7 +776,7 @@ flowchart TB
     G --> INPUT["contiguous step inputs"]
 ```
 
-> **读图方法：** 这是“MRV1 与 MRV2 的 persistent batch”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
+> **读图方法：** 左边四行是持久的 permanent rows（C、A、B 各占一行，row 1 空闲）；本步的执行顺序是 B、A，于是 `idx_mapping` 记下“第 0 个是状态行 3、第 1 个是状态行 2”，GPU 据此把这两行 gather 成连续输入。先看 `idx_mapping` 一条线，再看 gather 的两路输入；状态行本身不搬动，变的只是索引表。
 
 ### 7.12.1 StagedWriteTensor 与 async-first
 
@@ -962,8 +975,9 @@ sequenceDiagram
 
 ## 7.16 为什么 execute 与 sample 分成两个方法
 
-`WorkerBase` 规定：若 `execute_model()` 返回 `None`，应立即调用 `sample_tokens()`。MRV1/MRV2 都用
-`execute_model_state` 保存两次调用间的临时结果。
+`WorkerBase` 规定：若 `execute_model()` 返回 `None`，应立即调用 `sample_tokens()`。MRV2 用
+`execute_model_state`（字段声明 `vllm/v1/worker/gpu/model_runner.py:369`，在 `execute_model` 末尾赋值 `:2196`，类型是 `ExecuteModelState`，`:2553`）
+保存两次调用间的临时结果。
 
 ```mermaid
 stateDiagram-v2
@@ -975,10 +989,11 @@ stateDiagram-v2
 
 > **读图方法：** 这是“为什么 execute 与 sample 分成两个方法”的状态图。先找初始状态，再沿箭头观察触发条件和状态变化；重点不是背状态名，而是弄清谁触发转换、转换后哪些资源需要更新。
 
-图中的 `ProtocolViolation` 表示违反两阶段调用契约，不是两种 Runner 都有同名异常状态。
-MRV1 在再次 execute 时显式抛出 `RuntimeError`；MRV2 的这条入口不能据图推断有相同检查。
+图中的 `ProtocolViolation` 表示违反两阶段调用契约，不是源码里真有同名异常状态。MRV2 的 `execute_model`
+（`:1826`）在重复调用时没有显式检查，不能据图推断会抛错（`vllm/v1/worker/gpu/model_runner.py` 里没有 `RuntimeError`）；
+相反的方向有保护：`sample_tokens`（`:2222`）发现 `execute_model_state is None` 就直接返回 `None`，注释说明“前一次 `execute_model` 必然失败了”。
 
-[源码] `vllm/v1/worker/gpu_model_runner.py` - `GPUModelRunner.execute_model`
+[源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.execute_model`、`sample_tokens`
 
 [源码] `vllm/v1/worker/worker_base.py` - `WorkerBase.execute_model`
 
@@ -987,8 +1002,7 @@ MRV1 在再次 execute 时显式抛出 `RuntimeError`；MRV2 的这条入口不�
 
 MRV2 保存 input batch、attention metadata、slot mappings、hidden states、DP sync、finished IDs、connector
 output、aux hidden states、graph stats 和本轮 `num_spec_tokens_to_schedule`；
-DP 协调字段现名为 `dp_sync_state`。MRV1 保存 scheduler output、logits、spec metadata、hidden/aux
-states、connector output 与 slot mappings。`sample_tokens()` 取出后立即清空临时 state。MRV2 proposal 使用保存的本轮 draft 数，
+DP 协调字段现名为 `dp_sync_state`。`sample_tokens()` 取出后立即清空临时 state（`:2239`）。MRV2 proposal 使用保存的本轮 draft 数，
 把超出的 draft slots 设为 `-1`，并只向后续处理传递有效前缀，不能仅凭配置最大值
 假设每步产生同样多 draft。
 
@@ -1023,67 +1037,55 @@ request count、scheduled token count、logits position count 与 generated toke
 
 ## 7.18 Sampling 的准确处理顺序
 
-MRV1 先按配置保存 raw logits 或 raw logprobs，再将待处理 logits 转为 float32，应用
-允许 token 集合、禁用词序列、影响 argmax 的处理器和惩罚项。随后得到 greedy 候选；需要
-随机采样的路径再做温度缩放、不改变 argmax 的处理、top-k/top-p 过滤和随机抽样。
+第一代 Runner 的 `Sampler`（`v1/sample/sampler.py`，含“先算 greedy 候选再合并”“全 greedy 提前返回”“gfx1250 融合早退”等分支）
+已随 #63373 删除，当前只有 MRV2 的 `Sampler`（`vllm/v1/worker/gpu/sample/sampler.py:42`）。它由 `GPUModelRunner.sample`
+（`vllm/v1/worker/gpu/model_runner.py:1703`）调用，调用顺序是：先（可选）经 batch sharding 得到本 rank 负责的 logits，
+再把 grammar bitmask 就地写进 logits（`:1734-1741`，见 7.19），然后进入 `Sampler.__call__`（`:131`）。没有 draft token、
+或没有 rejection sampler 时直接调用 `self.sampler(logits, input_batch)`；有 draft 时改走 `rejection_sampler`（第 08 章不展开）。
 
-混合 batch 按每个请求的 temperature 选择 greedy 或 random 结果，**没有比较两个候选再
-“择优”的步骤**。全 greedy 的 batch 会提前返回；logprobs 是否返回、表示原始还是处理后的
-分布，由对应配置决定，不能统一叫作“输出概率”。
+`Sampler.__call__` 本身只做编排：统计 NaN（可选）→ `sample()` → 组装 logprobs → 计算 `num_sampled` / `num_rejected` →
+打包 `SamplerOutput`。真正“改 logits”的步骤在 `apply_sampling_params`（`:223`）：若本批没有任何请求需要 logits 处理
+（`needs_logits_processing`），在 `:235` 直接返回原 logits；否则先把 logits 拷成 FP32 新 tensor（`:238`），按固定顺序逐个应用
+`logits_processors`——logit bias（含 allowed token IDs 与 `min_tokens`）、penalties、bad words、custom processors——
+然后 thinking budget、temperature、min-p，最后（如果调用方没要求延后）top-k/top-p。bias 是加法、penalty 是倍率缩放，
+二者不可交换，所以列表顺序就是流水线顺序（源码注释原文）。
 
-[源码] `vllm/v1/sample/sampler.py` - `Sampler.forward`
+混合 batch 里 greedy 与 random 请求**没有分成两条路径**：`sample()`（`:275`）把 `skip_top_k_top_p=True` 传给
+`apply_sampling_params`，拿到 `processed_logits` 后调用 `_sample_random`（`:325`）；最终落到 `gumbel_sample`
+（`vllm/v1/worker/gpu/sample/gumbel.py:393`），kernel 按每个请求的 temperature 决定：`temp == 0` 时不加噪声，
+等价于普通 argmax；`temp > 0` 才加 Gumbel 噪声再取 argmax（`gumbel_noised_argmax`，`:172`）。因此**没有比较两个候选再
+“择优”的步骤**；也没有“全 greedy 就提前返回”的整批快速路径（只有上面“无需处理就跳过 logits 处理”这一处提前返回）。
+logprobs 是否返回、表示原始还是处理后的分布，由 `logprobs_mode` 决定，不能统一叫作“输出概率”。
 
-[源码] `vllm/v1/sample/sampler.py` - `Sampler.sample`
-
-上面描述的是通用路径。v0.33.0 在 `Sampler.forward` 最前面多了一个很窄的早退分支（`sampler.py` L136 @ `05caae03`，
-`e71172335`，#58800）：`mixed_sample_eligible`（L23）要求 ROCm aiter 已启用且设备是 gfx1250、不预测 bonus token、
-全部请求都是随机采样、没有 top-k/top-p、没有 logprobs、没有惩罚/允许 token 掩码/禁用词/logits processor、
-也没有被跟踪的 thinking budget。全部满足时直接用融合的 aiter kernel 从未缩放的 raw logits 采样并返回，
-不再经过后面的处理链。CUDA 以及其他 ROCm 设备不会走到这里。
-
-```mermaid
-flowchart TD
-    L["raw logits"] --> MASK["constraints and bias"]
-    MASK --> PEN["penalties"]
-    PEN --> GREEDY["greedy candidate"]
-    PEN --> TEMP["temperature"]
-    TEMP --> MINP["min-p / invariant processors"]
-    MINP --> KP["top-k / top-p"]
-    KP --> RAND["random candidate"]
-    GREEDY --> MIX["per-request choose"]
-    RAND --> MIX
-```
-
-> **读图方法：** 从 logits 追到两条候选路径，再看底部按请求参数合并的节点。它表示按
-> temperature 选择，不是按分数择优；第二遍检查全 greedy 提前返回与混合 batch 的区别。
-
-MRV2 在构造时把 logit bias、penalties、bad words 与 custom logits processors 按顺序组成
-处理链。之后应用 thinking budget（思考预算的结束标记约束）、temperature 和 min-p。
-`sample()` 将 top-k/top-p 留给最终采样分支：满足条件时融合到 FlashInfer 或 XPU sampler，
-否则显式过滤后走 Triton Gumbel。含 greedy、显式 seed 或要求 processed logprobs 的请求
-会影响 fused sampler 的资格，不能只按平台判断。
-
-[源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.__init__`、
+[源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.__init__`、`Sampler.__call__`、
 `apply_sampling_params`、`sample` / `_sample_random`
 
-[源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.apply_sampling_params`
+[源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.sample`
 
-[源码] `vllm/v1/worker/gpu/sample/sampler.py` - `Sampler.sample`
+`sample()` 把 top-k/top-p 留给最终采样分支：满足条件时融合到 FlashInfer 或 XPU sampler，
+否则显式过滤（`apply_top_k_top_p`）后走 Triton Gumbel。含 greedy、显式 seed 或要求 processed logprobs 的请求
+会影响 fused sampler 的资格（`:304-309` 的 `fused_sampler_eligible`），不能只按平台判断。
 
 ```mermaid
 flowchart TD
-    L2["logits"] --> BI["logit bias"]
+    L2["logits (after grammar bitmask)"] --> NEED{"any request needs logits processing?"}
+    NEED -->|no| SK["keep raw logits"]
+    NEED -->|yes| F32["copy to FP32"]
+    F32 --> BI["logit bias / allowed IDs / min_tokens"]
     BI --> PE["penalties"]
     PE --> BW["bad words"]
     BW --> CUSTOM["custom logits processors"]
     CUSTOM --> TB["thinking budget"]
     TB --> TE["temperature"]
     TE --> MP["min-p"]
-    MP --> TK["top-k / top-p"]
-    TK --> GS["eligible fused FlashInfer/XPU or explicit-filter Gumbel"]
+    SK --> ELIG
+    MP --> ELIG{"fused sampler eligible?"}
+    ELIG -->|"yes: FlashInfer or XPU"| FUS["fused top-k/top-p sample"]
+    ELIG -->|"no"| TK["apply_top_k_top_p"]
+    TK --> GS["gumbel_sample: temp 0 argmax, temp greater than 0 add noise"]
 ```
 
-> **读图方法：** 阅读“Sampling 的准确处理顺序”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
+> **读图方法：** 先走左侧主干：只有“需要处理”这一问决定要不要做 FP32 拷贝和后面一长串 logits 变换，这些变换的先后顺序就是源码列表顺序。串联到 min-p 之后汇入第二个菱形（图里 `SK` 与 `MP` 两条线都汇入 `ELIG`）：能走融合 sampler 就一步完成 top-k/top-p 和抽样，否则先显式过滤再进 `gumbel_sample`。greedy 请求不会单独分叉，它们在 `gumbel_sample` 里由 temperature 为 0 自然退化为 argmax。
 
 随机路径常把 logits 除以温度：
 
@@ -1092,15 +1094,17 @@ p_i=\frac{\exp(z_i/T)}{\sum_j\exp(z_j/T)}
 $$
 
 本式只适用于 `T>0`，`z`、`p` 的 shape 都是 `[vocab_size]`，概率无单位；`T=0`
-走 greedy 语义，不做除零。MRV1 全 greedy 时提前返回，混合 batch 才按行合并结果。
+走 greedy 语义，不做除零（temperature kernel 对 `T=0` 与 `T=1` 都直接返回，不改 logits，`gumbel.py:34`）。
 
 Top-k 按分数边界筛选，边界并列处理依实现；top-p 按累计概率阈值筛选。即使 temperature 为零，
 grammar、allowed tokens、bad words、bias 和 penalties 也可能先改变 argmax。
 
 ## 7.19 Grammar mask 的汇合点
 
-MRV1 在 `sample_tokens()` 内采样前应用 grammar bitmask；MRV2 的 sample path 同样接收
-`grammar_output`。这允许 grammar 计算与模型 forward 并行，并在选 token 前汇合。
+MRV2 的 `sample_tokens(grammar_output)`（`vllm/v1/worker/gpu/model_runner.py:2222`）接收 `grammar_output`，传给
+`GPUModelRunner.sample`（`:1703`），后者在进入 `Sampler` 之前用 `structured_outputs_worker.apply_grammar_bitmask`
+就地改写 logits（`:1734-1741`）。这允许 grammar 计算与模型 forward 并行，并在选 token 前汇合。（MRV1 里同样的汇合点
+在旧 `sample_tokens()` 内，已随 #63373 删除。）
 
 ```mermaid
 sequenceDiagram
@@ -1156,7 +1160,7 @@ flowchart TD
   （`output.py` L311）。Runner 在 `execute_model` 里取 `skip_drafts`（有 DP 同步状态时取
   `dp_sync_state.skip_drafts`，即所有 DP rank 都跳过才跳过；否则取调度输出里的值，L2191），为真时
   `num_spec_tokens_to_schedule` 记为 0，也就不提 draft，同时 PP 的 `broadcast_drafts` 与 `recv_drafts` 随之关闭。
-  Scheduler 侧：`self.can_skip_drafts = num_lookahead_tokens > 0 and use_v2_model_runner`（`scheduler.py` L319）；
+  Scheduler 侧：`self.can_skip_drafts = self.num_lookahead_tokens > 0`（`scheduler.py` L321；#63373 之前这里还要再 `and use_v2_model_runner`）；
   每个被调度请求用 `_drafts_unused`（L489）判断本步之后的 draft 是否用不上（非末尾 prefill chunk，或本步采样后
   必然达到 `max_tokens`），只要有一个请求用得上，`drafts_needed` 就保持为真，整批都用不上才在 L1725
   置 `skip_drafts=True` @ `05caae03`。
@@ -1180,7 +1184,7 @@ NumPy-backed structures。
 
 | 字段 | 含义 |
 |---|---|
-| `req_ids` / `req_id_to_index` | 输出请求顺序及索引 |
+| `req_ids` | 输出请求顺序（`vllm/v1/outputs.py:269`）。旧的 `req_id_to_index` 字段随 #63373 删除，`Scheduler.update_from_output` 现用 `enumerate(model_runner_output.req_ids)` 自己建索引（`scheduler.py:2279`） |
 | `sampled_token_ids` | 每请求本 step 生成 token，数量可变 |
 | `logprobs` / `prompt_logprobs_dict` | 可选对数概率或配置指定的 logits 信息，不是归一化概率 |
 | `kv_connector_output` / `ec_connector_output` | connector 状态 |
@@ -1227,96 +1231,90 @@ sequenceDiagram
 
 [源码] `vllm/v1/executor/multiproc_executor.py` - `WorkerProc.async_output_busy_loop`
 
-## 7.22 MRV1/MRV2 当前选择规则
+## 7.22 “选 MRV1 还是 MRV2”的规则已不存在
 
-> **本节先看：** 这一小节先用图建立“MRV1/MRV2 当前选择规则”的整体路径。先找输入、关键状态和输出，再阅读图后的源码解释，不必一开始记住全部节点。
+> **本节先看：** 在 v0.33.0 及以前，这里是一张很长的决策图：HiSparse、watermark、环境变量、Triton、unsupported features 一路判定 MRV1 还是 MRV2。#63373（`aac1b2a4f3`）删除 MRV1 后，这个决策本身没有了对象。本节改讲现在还剩下的三道关口：环境变量检查、`VllmConfig` 校验、Worker 的 Triton 检查。
+
+先说被删掉的东西，免得读旧文章时误用：`VllmConfig.use_v2_model_runner`（property）、`_validate_v1_model_runner`、
+`_get_v1_model_runner_unsupported_features`、HiSparse/watermark 对 Runner 的“强制选 V2”规则、ROCm 的 MRV1 默认例外、
+“没有 Triton 就退回 MRV1”的自动选择，在 `05caae03` 的 `vllm/config/vllm.py` 里都已不存在；旧的“不支持项自动 fallback
+到 MRV1”因此变成了“不支持项直接报错”。
 
 ```mermaid
 flowchart TD
-    HS{"HiSparse configured?"} -->|yes| HSC{"explicit V2=0?"}
-    HSC -->|yes| ERR["ValueError"]
-    HSC -->|no| T["MRV2"]
-    HS -->|no| WM{"watermark configured?"}
-    WM -->|yes, overrides V2=0| T
-    WM -->|no| ENV{"VLLM_USE_V2_MODEL_RUNNER set?"}
-    ENV -->|yes| RET["return explicit boolean"]
-    ENV -->|no| TRI{"Triton available, or platform unspecified?"}
-    TRI -->|no| F2["MRV1"]
-    TRI -->|yes| UNS{"unsupported V2 features?"}
-    UNS -->|yes| F3["MRV1 with warning"]
-    UNS -->|no| T["MRV2"]
+    ENV{"环境变量 VLLM_USE_V2_MODEL_RUNNER"} -->|"未设置"| CFG["VllmConfig 后处理"]
+    ENV -->|"值为 1"| WARN["warning: redundant"]
+    WARN --> CFG
+    ENV -->|"其他值"| ERR0["ValueError: no longer supported"]
+    CFG --> SC["_disable_cudagraphs_for_stock_torch_compile"]
+    SC --> VAL["_validate_model_runner"]
+    VAL --> UNS{"_get_model_runner_unsupported_features 非空?"}
+    UNS -->|yes| ERR1["ValueError: GPU model runner does not support ..."]
+    UNS -->|no| CPUQ{"平台用 standalone CPU runner?"}
+    CPUQ -->|yes| CPUU{"standalone CPU 不支持项非空?"}
+    CPUU -->|yes| ERR2["ValueError: CPU model runner without Triton does not yet support ..."]
+    CPUU -->|no| WK["Worker.__init__ Triton 检查"]
+    CPUQ -->|no| WK
+    WK --> MK["_make_model_runner"]
 ```
 
-> **读图方法：** 这是“MRV1/MRV2 当前选择规则”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
+> **读图方法：** 从顶端的环境变量一路向下，每个菱形只有“继续”或“报错”两种出口，没有任何一支再通向另一代 Runner。左右两条报错支（`ValueError`）都发生在构造 Runner 之前；`Worker.__init__` 的 Triton 检查在 Worker 真正启动时才执行（见 7.6.2）。先读主干，再核对各报错条件。
 
-[源码] `vllm/config/vllm.py` - `VllmConfig.use_v2_model_runner`
+1. **环境变量：** `Platform.validate_environ`（`vllm/platforms/interface.py:1509`，由 `EngineArgs` 在 `vllm/engine/arg_utils.py:2294` 调用）
+   遇到 `VLLM_USE_V2_MODEL_RUNNER`：值为 `1` 只打 warning（“redundant and can be unset”），其他任何值（包括旧文档里用来回退的 `0`）
+   直接 `ValueError`，提示 Model Runner V1 已移除（`:1514-1524`）。`vllm/envs.py` 的 `environment_variables` 里该变量也已删除。
+2. **配置校验：** `VllmConfig` 后处理依次调用 `_disable_cudagraphs_for_stock_torch_compile`（`vllm/config/vllm.py:3428`）和
+   `_validate_model_runner`（`:3446`，调用点 `:2000-2001`）。`_get_model_runner_unsupported_features`（`:3119`）只剩两类：
+   external launcher + `PP>1`（`pipeline parallelism with external_launcher`），以及启用 u-batching/DBO 时由
+   `_get_dbo_unsupported_features`（`:3367`）给出的组合限制：LoRA、`PP>1`、`prefill_context_parallel_size > 1`、多模态/encoder-decoder、
+   hybrid 模型、PIECEWISE CUDA graph、encoder-only。v0.33.0 的 “DBO 与 speculative decoding 不能同开”和 decode CP 限制已不在
+   这份清单里（#61464，见 `meta/main-tracking-2026-10-29.md`），只有 prefill CP 仍被禁止。任何不支持项都会让
+   `_validate_model_runner` 抛出 `ValueError("The GPU model runner does not support: …")`。
+3. **standalone CPU runner：** 平台的 `uses_standalone_cpu_model_runner()`（无 Triton 的 CPU 路径）为真时，还要过
+   `_get_standalone_cpu_model_runner_unsupported_features`（`:3135`）：多模态 encoder-only、投机解码、prompt embeddings、diffusion、
+   custom logits processors、DCP/PCP、batch-sharded sampling、微批、EPLB、routed-expert 辅助输出、多模态 tower/connector LoRA 都会被拒绝。
+4. **Triton：** `Worker.__init__`（`vllm/v1/worker/gpu_worker.py:225-226`）在没有 Triton 且平台没有独立 CPU Runner 时抛
+   `ValueError("vLLM's model runner requires Triton.")`。
 
-v0.33.0 的自动 fallback 清单（`_get_v2_model_runner_unsupported_features`，L3053 @ `05caae03`）包括：
+[源码] `vllm/config/vllm.py` - `_get_model_runner_unsupported_features`、`_validate_model_runner`、
+`_get_standalone_cpu_model_runner_unsupported_features`、`_get_dbo_unsupported_features`
 
-- external launcher + `PP>1`；
-- `suffix`、`custom_class` speculation。`medusa` 与 `mlp_speculator` 两项已经从清单中消失，原因不是“V2
-  在 v0.33.0 中支持它们”，而是 `8530aed2b`（#61701，“Remove Medusa and MLP speculator support”）把这两种投机方法
-  本身从 vLLM 删除了，所以本书不再单独讨论它们；
-- 除 DFlash/DSpark 外的 parallel drafting；
-- heterogeneous-vocabulary draft models（target/draft 词表不同，V2 尚无对应 token mapping）；
-- u-batching/DBO 的限制。未显式选择 Runner 时，DBO 仍进入 fallback；显式 V2 还要
-  通过 LoRA、speculation、PP、CP、多模态、hybrid 和 graph mode 等组合校验。
+[源码] `vllm/platforms/interface.py` - `Platform.validate_environ`
+
+[测试] `tests/test_config.py` - `test_model_runner_supports_speculative_method`、`test_model_runner_supports_custom_logits_processors`、
+`test_rocm_keeps_compiled_deepseek_defaults`
+（静态阅读，未运行上游测试）
+
+旧的 fallback 测试 `test_v2_model_runner_heterogeneous_vocab_draft_falls_back_to_v1`、
+`test_watermarking_forces_model_runner_v2` 在 `05caae03` 的 `tests/test_config.py` 里已不存在。
 
 > **main 上的变化（未发版）**：本书正文已升到 v0.33.0（`4ba787ec`）；以下提交**不在** v0.33.0 祖先链内，暂不写入正文，留待后续基线处理。详见 meta/main-tracking-2026-10-29.md。
-> - [cdd2750cd5](https://github.com/vllm-project/vllm/commit/cdd2750cd5e7d90849282a16bc46c21bbc58bcbd)（[#61464](https://github.com/vllm-project/vllm/pull/61464)）：`_get_dbo_unsupported_features` **移除** “dual batch overlap with speculative decoding”，且 decode CP 不再列入；仅保留 prefill CP（`vllm/config/vllm.py` L3247–L3270 @ `36d4ef654`）。启用 DBO+spec 时调用 `_raise_dbo_thresholds_for_spec_decode`（L3225–L3245）把 `dbo_*_token_threshold` 抬到至少 `num_ubatches * uniform_decode_query_len`。上文“显式 V2 还要通过……speculation……CP……组合校验”中 speculation / DCP 两项在 main 上已不再作为 DBO 硬禁令；升级时须改写正文。
 > - [d7f68d4c7d](https://github.com/vllm-project/vllm/commit/d7f68d4c7d31004e257b7b2ff142b4edd83e0d8c)（[#62748](https://github.com/vllm-project/vllm/pull/62748)）：`sampler.apply_staged_writes()` 仅在本步有 `scheduled_new_reqs` 时调用（`model_runner.py` L1298–L1302 @ `36d4ef654`）。
 > - [06e172b5cf](https://github.com/vllm-project/vllm/commit/06e172b5cf8845c80c40a6eaaecbcbde3e38e8df)（[#59341](https://github.com/vllm-project/vllm/pull/59341)）：MRV2 lm_head LoRA 的 `prompt_lora_mapping` 按 `num_logits`（每请求 1+drafts 行）展开（`lora_utils.py` L99–L104；调用处 L1913）。
 > - [65faf4efa0](https://github.com/vllm-project/vllm/commit/65faf4efa0281fc2e04096a28cd35fb8dc7d3218)（[#63237](https://github.com/vllm-project/vllm/pull/63237)）：routed experts capturer 在 `profile_run` 中、KV cache profiling 之前初始化。
 
-关于 Triton：自动选择路径里，没有 Triton 且平台已确定时会告警并选 MRV1（`use_v2_model_runner`，L752）；
-平台为 unspecified（例如只做配置、没有设备）时不做这个回退（`432b1003f`，#62576）。显式选择 V2 而没有
-Triton 的报错发生在 Worker 构造时（见 7.6.2）。
+stock `torch.compile` 与 MRV2：Runner 加载模型后调用共享的 `compile_model_with_stock_torch`（`vllm/v1/worker/gpu/model_runner.py:577`），
+但配置会把 CUDA Graph 改为 NONE 并清空 capture sizes（`_disable_cudagraphs_for_stock_torch_compile`，细节见 8.15）。
 
-MRV1 一侧也有一份“只有 V2 支持”的清单（`_get_v1_model_runner_unsupported_features`，L3089 @ `05caae03`），
-当前包括：prefill context parallel、`PP>1` 且 async scheduling、DSpark 与 xpress 投机解码、adaptive draft
-verification、draft lm_head 量化、Parse 3.5 MTP、混合 sliding/full 的 DFlash draft、DFlash candidate-head draft、
-diffusion 模型、batch-sharded sampling 和 Step5。只要用了 MRV1（包括显式选择 V1），`VllmConfig` 校验时就会运行 `_validate_v1_model_runner`（L2096），命中任何一项即抛 `ValueError`。
-
-stock `torch.compile`、`ngram`/`ngram_gpu` 和 Elastic EP 已从这份清单移除。
-stock compile 在 MRV2 加载模型后调用共享的 `compile_model_with_stock_torch`，
-但配置会把 CUDA Graph 改为 NONE 并清空 capture sizes。旧 compile SP passes 已删除，
-Mamba `all` cache mode 本身也已删除，二者都不是“仍可配置但 fallback 到 MRV1”。
-
-[源码] `vllm/config/vllm.py` - `_get_v2_model_runner_unsupported_features`
-
-选择先处理 HiSparse 和 watermark：HiSparse 遇到显式 `VLLM_USE_V2_MODEL_RUNNER=0`
-会报错；watermark 则覆盖该值并选择 MRV2。其他配置才直接采用显式环境变量。
-ROCm 的模型特定 MRV1 默认例外已移除；未显式选择时走相同的 Triton 与功能检查。
-选择后还会运行 `_validate_v2_model_runner` 或 `_validate_v1_model_runner`，显式强制
-不支持组合会报错，默认 fallback 后若 MRV1 也不支持同样会报错。
-因此“环境变量总优先”与“不支持总会成功回退”都不成立。
-
-[源码] `vllm/config/vllm.py` - `VllmConfig.use_v2_model_runner`、
-`_get_v2_model_runner_unsupported_features`、
-`_get_v1_model_runner_unsupported_features`
-
-[测试] `tests/test_config.py` - `test_v2_model_runner_supports_speculative_method`、
-`test_v2_model_runner_heterogeneous_vocab_draft_falls_back_to_v1`、
-`test_rocm_keeps_compiled_deepseek_defaults`、`test_watermarking_forces_model_runner_v2`
-（静态阅读，未运行上游测试）
-
-[源码] `vllm/v1/worker/gpu/spec_decode/__init__.py` - `init_speculator`：
-`use_ngram()` 选择 `NgramGPUSpeculator` 并传入持久 `RequestState`；除 n-gram 外，`method == "dflash"` 时还按 draft 架构分到
-`XPressSpeculator`、`LiLiCorrSpeculator`、`DFlash2Speculator`，都不匹配才用 `DFlashSpeculator`（@ `05caae03`）。
+投机解码的 speculator 现在由 `init_speculator`（`vllm/v1/worker/gpu/spec_decode/__init__.py:18`）按
+`speculative_config.speculator_config.speculator_class`（一个类的限定名，由每种 method 的 `SpeculatorConfig` 子类声明，
+基类见 `vllm/v1/worker/gpu/spec_decode/speculator_config.py:25`）解析并构造；构造参数是 `(vllm_config, device)`，
+构造函数声明了 `req_states` 时才额外传入持久 `RequestState`（`:47`）；类没有声明 `speculator_class` 的 method 抛
+`NotImplementedError("… is not supported yet.")`（`:35`）。这一路径不再按 `use_ngram()` / `method == "dflash"` 做分支。
 PCP+PP 和 Elastic EP 的迁移边界在第 09 章展开；不应把“Runner 支持”解释成所有组合支持。
 
-MRV2 目标是 permanent rows、async-first、GPU-native input metadata、Triton sampler、模块化和显式
-graph manager；MRV1 仍覆盖部分 V2 尚不支持组合。共存是能力迁移边界。
+MRV2 的设计目标是 permanent rows、async-first、GPU-native input metadata、Triton sampler、模块化和显式
+graph manager。下表是 `docs/design/model_runner_v2.md` 保留的“V1 → MRV2”设计差异，**仅作历史对照**：
+MRV1 已被删除，二者不再共存，也不再有“MRV1 仍覆盖部分 V2 尚不支持的组合”这种能力边界。
 
-| 维度 | MRV1 | MRV2 |
+| 维度 | 旧 MRV1（已删除） | MRV2 |
 |---|---|---|
-| 文件组织 | 大型 `vllm/v1/worker/gpu_model_runner.py` | `gpu/` 下模块化 |
+| 文件组织 | 单个大文件 `gpu_model_runner.py` | `gpu/` 下模块化 |
 | persistent batch | state 与输入布局耦合 | permanent row + per-step gather |
 | async | 后续适配 | async-first |
 | metadata | 持久输入与 CPU bookkeeping 较多 | 更多 GPU-native preparation |
 | sampler | PyTorch-oriented | Triton-oriented modular sampler |
 | graph 管理 | 相对隐式 | explicit graph manager |
-| 功能覆盖 | 某些组合仍必须使用 | 支持条件满足时默认 |
 
 ## 7.23 一次完整 step
 
@@ -1414,7 +1412,7 @@ flowchart LR
 flowchart LR
     CPU["CPU contract tests"] --> CFG["config probes"]
     CFG --> SG["single-GPU trace"]
-    SG --> CMP["MRV1/V2 differential"]
+    SG --> CMP["MRV2 golden-output regression"]
     CMP --> DIST["distributed trace"]
     DIST --> PROF["performance attribution"]
 ```
@@ -1444,9 +1442,9 @@ flowchart LR
 14. **execute 返回 None 是失败。** 正常两阶段路径就是如此。
 15. **Sampling 只是 argmax。** 约束、惩罚、过滤和随机数都会改变结果。
 16. **Async output 表示尚未 forward。** 常见是主机可见结果仍在 D2H。
-17. **V1 Engine 必然 MRV1。** 两者是不同版本维度。
-18. **V2 不支持总会自动回退。** 显式强制可能后续报错；HiSparse/watermark 还有更高优先级规则。
-19. **MRV2 已完全替代 MRV1。** 当前仍有明确能力边界。
+17. **V1 Engine 对应两套 Runner。** V1 Engine 与 Runner 世代是不同维度；MRV1 已随 #63373 删除，现在只有 MRV2。
+18. **不支持的组合会自动回退到别的 Runner。** 没有可回退的对象了：`_validate_model_runner` 对不支持项直接 `ValueError`（7.22）。
+19. **MRV2 没有能力边界。** MRV2 取代 MRV1 之后，原先靠 MRV1 兜底的组合变成了显式报错，边界仍在，只是不再有第二个 Runner 接住。
 20. **空 output 一定错误。** Zero-work、connector-only、非末 PP 都可合法为空。
 
 ## 7.27 源码追踪练习
@@ -1459,8 +1457,8 @@ flowchart LR
 4. 假设 requested=70 GiB、non-KV=18 GiB、graph=3 GiB，计算 KV budget，并说明为何不等于 token 数。
 5. 对 3 个请求调度 4、1、2 个 token，写 flat inputs、positions、`query_start_loc`。
 6. 追踪 PP 的上一轮 send wait、receive、forward、send 和 last-rank sample。
-7. 比较 MRV1/MRV2 temperature 前处理顺序，定位 grammar 汇合点。
-8. 从 unsupported-feature 列表构造两个默认 fallback，再解释显式强制的差异。
+7. 对照 `docs/design/model_runner_v2.md` 的 V1 描述与 MRV2 `apply_sampling_params` 的顺序（temperature 在 penalties 之后、min-p 之前），定位 grammar 汇合点（`GPUModelRunner.sample`）。
+8. 从 `_get_model_runner_unsupported_features` 构造两个会被拒绝的配置，解释报错发生在配置阶段而不是 Worker 启动之后。
 
 ## 7.28 设计题
 
@@ -1473,7 +1471,7 @@ flowchart LR
 5. Grammar mask 全 GPU 化能否消除两阶段 API？还依赖哪些 CPU 状态？
 6. D2H 与下一 step 共用 pinned buffer 时，应选双缓冲、版本号还是 event？
 7. 自定义 loader 的“全部权重加载”校验如何处理量化生成参数和 tied weights？
-8. 如何设计 MRV1/MRV2 differential test，避免随机采样差异造成误判？
+8. MRV1 删除后没有对照实现，怎样为 MRV2 的 sampler 设计 golden-output 回归测试（固定 seed 与已知 logits），避免随机采样差异造成误判？
 
 ## 7.29 调试清单
 
@@ -1542,17 +1540,15 @@ flowchart TD
 
 > **本节先看：** 下面先给出“Runner、Sampling 与输出”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
 
-- `vllm/v1/worker/gpu_model_runner.py`：MRV1 execute/sample。
 - `vllm/v1/worker/gpu/model_runner.py`：MRV2 execute/sample 与 `ExecuteModelState`。
 - `vllm/v1/worker/gpu/input_batch.py`、`vllm/v1/worker/gpu/states.py`：MRV2 inputs/state。
 - `vllm/v1/worker/gpu/pp_utils.py`：`PPHandler` 的 sampled token 与 draft 广播（7.15）。
 - `vllm/v1/worker/gpu/mm/encoder_cache.py`：`EncoderCache.update_encoder_inputs`（7.13）。
-- `vllm/v1/worker/gpu/spec_decode/__init__.py`：`init_speculator`，包括 GPU n-gram。
-- `vllm/v1/sample/sampler.py`：MRV1 Sampler。
+- `vllm/v1/worker/gpu/spec_decode/__init__.py`：`init_speculator`（按 `speculator_class` 构造）。
 - `vllm/v1/worker/gpu/sample/sampler.py`：MRV2 Sampler。
 - `vllm/v1/outputs.py`：`ModelRunnerOutput`、`AsyncModelRunnerOutput`。
 - `vllm/sequence.py`：`IntermediateTensors`。
-- `vllm/config/vllm.py`：MRV2 选择与 unsupported features。
+- `vllm/config/vllm.py`：`_validate_model_runner` 与 unsupported features。
 - `docs/design/model_runner_v2.md`：MRV2 设计意图与边界。
 
 ## 7.31 与前后章节的接口
@@ -1578,7 +1574,7 @@ D2H 分开测量。
 
 ## 7.32 v0.32.0 → v0.33.0 变更核验表
 
-下表列出本章正文为 v0.33.0 改写时依据的全部上游提交，目的是让读者能自己复核“这条改动确实在 v0.33.0 里”。
+下表列出本章正文为 v0.33.0 改写时依据的全部上游提交（`05caae03` 重新绑定新增的依据是 #63373 `aac1b2a4f3`，清单见 `meta/upgrade-main-05caae03-2026-11-10/`），目的是让读者能自己复核“这条改动确实在 v0.33.0 里”。
 核验方法是：在上游仓库里对每个提交运行 `git merge-base --is-ancestor <提交> 4ba787ec9959e566d3b587a796dff07673324da5`，
 下表“祖先链”一列全部为“是”（2026-11-10 运行）。v0.32.0（`5df63a72`）位于 release 分支，所以不能拿它的
 祖先关系判断；各提交对旧正文的影响，是对照 `git diff 5df63a72 4ba787ec` 与旧正文得到的结论。
@@ -1586,7 +1582,7 @@ D2H 分开测量。
 
 | 提交（PR） | 主题 | 祖先链 | 本章位置 |
 |---|---|---|---|
-| `8530aed2b`（#61701） | 删除 Medusa 与 MLP speculator | 是 | 7.22 fallback 清单 |
+| `8530aed2b`（#61701） | 删除 Medusa 与 MLP speculator | 是 | 当时的 7.22 fallback 清单（该清单已随 #63373 删除） |
 | `e57bb4ace`（#61712） | 删除旧 Ray compiled-graph executor | 是 | 7.3 表格、流程图与说明、`examples/ch07_execution_pipeline.py` |
 | `52e88e25e`（#62228） | 删除 `VLLM_USE_RAY_V2_EXECUTOR_BACKEND` | 是 | 7.3 |
 | `c07c59f82`（#62241） | external launcher 关闭时释放通信组 | 是 | 7.3.2 |
@@ -1602,7 +1598,7 @@ D2H 分开测量。
 | `30aded62d`（#52921） | 对齐 CPU offload 池大小 | 是 | 7.10 |
 | `b54458740`（#53558） | 最小 KV 配置改由 `KVCacheConfigBuilder` 生成 | 是 | 7.10 |
 | `fc2b6ab45`（#62698） | staged write 二维 grid | 是 | 7.12.1 |
-| `e71172335`（#58800） | MRV1 `Sampler` 的 gfx1250 融合采样早退 | 是 | 7.18 |
+| `e71172335`（#58800） | MRV1 `Sampler` 的 gfx1250 融合采样早退 | 是 | 当时的 7.18（代码已随 #63373 删除，正文不再保留） |
 | `373614f66`（#57368） | `encoder_input_updates` | 是 | 7.13 |
 | `2b4332115`（#64458） | PP draft/sampled-token 广播 | 是 | 7.15 |
 | `0c5dd18e7`（#62041） | KV 传输结果先于 drafter 收集 | 是 | 7.20 |
@@ -1621,7 +1617,7 @@ D2H 分开测量。
 4. Registry 选 model class，loader 选 checkpoint 路径，模型 loader 填本地参数；
 5. KV 显存是 requested budget 扣除非 KV 峰值和 graph 预留后的余量；
 6. Runner 维护长期请求状态，并 gather 成本轮 flat GPU inputs；
-7. MRV1/MRV2 是 V1 Engine 内的两套 Runner；MRV2 使用 permanent row + per-step gather；
+7. MRV2 是 V1 Engine 内唯一的 GPU Runner（MRV1 已随 #63373 删除）；它使用 permanent row + per-step gather；
 8. Forward context 把 runtime metadata 送入模型层；
 9. 非末 PP rank 传 intermediates，末 rank 形成 logits 和 tokens；
 10. execute/sample 通过临时 state 交接；
@@ -1630,7 +1626,7 @@ D2H 分开测量。
 
 本章正文、30 余幅流程/状态图、教学模型、实验方案和 14 个 CPU 测试已经完成，
 `content_complete=true`。当前机器没有可用的 vLLM NVIDIA GPU runtime，未执行真实模型加载、
-NCCL/PP、CUDA memory profiling、MRV1/MRV2 differential inference 和异步 D2H trace，因此
+NCCL/PP、CUDA memory profiling、MRV2 golden-output 回归和异步 D2H trace，因此
 `runtime_verified=false`，状态保持 `draft`。
 
 ## 第一遍自检
