@@ -96,17 +96,20 @@ class ModelRunnerOutput:
     sampled_token_ids: list[list[int]]
 
 
-def select_executor_backend(
-    backend: str, *, use_ray_v2: bool = False
-) -> str:
-    """Mirror the important branches in Executor.get_class."""
+def select_executor_backend(backend: str) -> str:
+    """Mirror the important branches in Executor.get_class.
+
+    In vLLM v0.33.0 (4ba787ec) the "ray" branch always returns RayExecutorV2:
+    the legacy RayDistributedExecutor and the VLLM_USE_RAY_V2_EXECUTOR_BACKEND
+    switch were removed (#61712, #62228), so there is no second Ray choice.
+    """
 
     if backend == "uni":
         return "UniProcExecutor"
     if backend == "mp":
         return "MultiprocExecutor"
     if backend == "ray":
-        return "RayExecutorV2" if use_ray_v2 else "RayDistributedExecutor"
+        return "RayExecutorV2"
     if backend == "external_launcher":
         return "ExecutorWithExternalLauncher"
     if "." in backend:
