@@ -34,7 +34,7 @@ prerequisites:
 寻址与执行契约。FlashAttention、FlashInfer、Triton 和平台专用实现都可能消费分页 KV；
 仓库中的 `vllm/v1/attention/ops/paged_attn.py` 也不是所有当前 GPU 路径的统一入口。
 
-本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，B6 已把源码引用与行号重新核对到此 revision，详见 `meta/upgrade-main-05caae03-2026-11-10/`），继续使用三种证据标签：
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，2026-11-10 重新钉扎到此 revision：源码引用与行号已逐条核对，Model Runner V1 删除已重新绑定；其余行为未在 05caae03 上全面重核，清单见 `meta/upgrade-main-05caae03-2026-11-10/`），继续使用三种证据标签：
 
 - **源码事实**：能在固定 revision 的实现或测试中直接定位。
 - **设计含义**：由多个源码事实共同推出的系统解释。
@@ -442,7 +442,7 @@ UVA 不是所有数据都免拷贝的保证；须同时检查平台能力和 ten
 
 [源码] `vllm/v1/worker/gpu/buffer_utils.py` - `StagedWriteTensor.apply_write`、`FusedStagedWriter.apply`
 
-> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，**不包含在** v0.33.0 中，下一次升级基线时复核。详见 meta/main-tracking-2026-10-27.md。
+> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）。详见 meta/main-tracking-2026-10-27.md。
 > - [78e2f7960](https://github.com/vllm-project/vllm/commit/78e2f796019384b07c9f9b6d8a371e3ea958b33a)（[#63633](https://github.com/vllm-project/vllm/pull/63633)）：main 删除了写入内容的 `async_tensor_h2d` 分支。`StagedWriteTensor.apply_write` 与 `FusedStagedWriter.apply` 都用 `UvaBufferPool.copy_chunks_to_uva` 把暂存内容拼入轮转 UVA 缓冲，kernel 经 UVA 读取；上文“写入内容通过 H2D 复制到设备”“内容不总是单独 H2D”在 main 上应改为“内容与元数据都经 UVA 缓冲（无 UVA 时由 `NonUvaBuffer` 拷贝）”。
 
 [源码] `vllm/v1/worker/gpu/block_table.py` - `BlockTables.apply_staged_writes`、`gather_block_tables`
@@ -839,8 +839,8 @@ flowchart TD
 `CommonAttentionMetadata` 声明旁仍保留重命名 TODO（`vllm/v1/attention/backend.py:417`，“可能含 padding，名字有误导性”）。
 唯一的主构造点是 MRV2 的 `build_attn_metadata()`（`attn_utils.py:578`），它把调用方传入的 `num_tokens` 原样写入
 `num_actual_tokens`、`num_reqs` 原样写入 `num_reqs`；而调用方 `DefaultModelState.prepare_attn`
-（`vllm/v1/worker/gpu/model_states/default.py:166`）按 CUDA Graph 模式选值：FULL graph 时取 padded 的
-`num_reqs_after_padding` / `num_tokens_after_padding`（`:178-180`），piecewise 与 eager 取未 padding 的 `num_reqs` / `num_tokens`（`:185`）。
+（`vllm/v1/worker/gpu/model_states/default.py:166`）按 CUDA Graph 模式选值：FULL graph 时（`:178`）取 padded 的
+`num_reqs_after_padding` / `num_tokens_after_padding`（`:180-181`），piecewise 与 eager 取未 padding 的 `num_reqs` / `num_tokens`（`:184-185`）。
 因而这个字段描述的是当前 metadata 覆盖的执行规模（FULL graph 下含 padding），不能用它代替 Scheduler 的
 `total_num_scheduled_tokens` 统计有效工作。
 
@@ -1089,7 +1089,7 @@ backend `forward_includes_kv_cache_update=False` 且 `supports_kv_cache_update_b
 - sliding window、non-causal、sink、MLA、sparse、PCP/DCP 等能力；
 - cache spec/layout 偏好与组合校验。
 
-> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；以下为 vLLM main 2026-10-29～10-30（36d4ef654..2eae56c4b）的变化，**不包含在** v0.33.0 中，下一次升级基线时复核。详见 meta/main-tracking-2026-10-30.md。
+> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-29～10-30（36d4ef654..2eae56c4b）。详见 meta/main-tracking-2026-10-30.md。
 > - [a6c3635e3](https://github.com/vllm-project/vllm/commit/a6c3635e3660f6343c14e2158c7ab44c62be88b9)（[#64064](https://github.com/vllm-project/vllm/pull/64064)）：新增 `AttentionBackend.supports_head_size_v`，默认要求 V=K（`vllm/v1/attention/backend.py` L109–L112）；`RocmAiterUnifiedAttentionBackend` 允许 `head_size_v <= head_size`（`rocm_aiter_unified_attn.py` L90–L94），从而 MiMo-V2.6 可用 ROCm AITER unified attention。`csrc/cache_kernels.cu` 新增 `reshape_and_cache_flash_kernel_asym`（L428），仅当 `v_head_size != head_size` 时由 `reshape_and_cache_flash` 使用（dispatch L993–L1014）；K/V 须共享 head stride / page stride / block geometry，对称 kernel 路径不变。
 
 ### 6.14.2 `AttentionMetadataBuilder`

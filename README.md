@@ -17,7 +17,7 @@
 - Commit：`05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交时间 2026-11-09 16:54:29 -0800，即 2026-11-10 08:54 SGT；标题 “[CI] Fix B200 nightly gsm8k evals: ReplaySSM and DeepEP LL (#66207)”）
 - 基线钉扎日期：2026-11-10
 - 文档状态：第 01 至 10 章已有正文、图解、11 个教学程序和实验模板，均保持 `draft`
-- 最近基线钉扎：[阅读基线 005 / main 05caae03](meta/source-revisions.md)（B6：Model Runner V1 已被 #63373 删除，正文改绑 MRV2；见 bot-hub #127 与 `meta/upgrade-main-05caae03-2026-11-10/`）；上一基线 004 / v0.33.0；未运行真实 GPU/多机实验，章节仍为 draft。
+- 最近基线钉扎：[阅读基线 005 / main 05caae03](meta/source-revisions.md)（2026-11-10 重新钉扎：Model Runner V1 已被 #63373 删除，正文改绑 MRV2；引用与行号已复核，其余行为未全面重核，见 `meta/upgrade-main-05caae03-2026-11-10/`）；上一基线 004 / v0.33.0；未运行真实 GPU/多机实验，章节仍为 draft。
 - 旧基线历史复核：2026-10-08；修正抢占、采样、显存估算、UVA、并行回复与 Pareto 解释，
   同步检查实验记录、网页说明与 EPUB。见[本轮问题与验证记录](meta/full-document-review-2026-10-08.md)。
 - [首次逐章检查记录](meta/full-book-review-2026-09-08.md)与[再次复核记录](meta/final-source-review-2026-09-08.md)：问题、证据、验证结果及未运行范围。

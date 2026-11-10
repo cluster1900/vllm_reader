@@ -342,7 +342,7 @@ flowchart LR
 
 [源码] `vllm/v1/engine/async_llm.py` - `AsyncLLM.generate`
 
-> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；以下为 vLLM main 2026-10-28～10-29（0106c8abc..36d4ef654）的变化，**不包含在** v0.33.0 中，下一次升级基线时复核。详见 meta/main-tracking-2026-10-29.md。
+> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-28～10-29（0106c8abc..36d4ef654）及随后的 10-29～10-30 条目。详见 meta/main-tracking-2026-10-29.md。
 > - [9fc019a749](https://github.com/vllm-project/vllm/commit/9fc019a749cbf3235cc06aa5357b17fd37cb648a)（[#64097](https://github.com/vllm-project/vllm/pull/64097)）：`run_batch` 支持 `/v1/completions`（`entrypoints/launchers/run_batch.py` L182–L197、L828–L829 @ `36d4ef654`），不再仅限 chat completions。
 > - [f60edccd00](https://github.com/vllm-project/vllm/commit/f60edccd0079428503f9e9f66e3b651aa4da73db)（[#64177](https://github.com/vllm-project/vllm/pull/64177)）：chat completions 序列化省略 null 的 `annotations` 与 `usage.prompt_tokens_details`（`exclude_none`）。
 > - main 2026-10-29～10-30：[5c1939140](https://github.com/vllm-project/vllm/commit/5c19391400c58ae10feca2483f55c547df211715)（[#63896](https://github.com/vllm-project/vllm/pull/63896)）：`ResponsesRequest.thinking_token_budget` 写入 `SamplingParams`（`vllm/entrypoints/openai/responses/protocol.py` L452、L650 @ `2eae56c4b`），与 chat completions 对齐。Rust frontend 仍不服务 `/v1/responses`。

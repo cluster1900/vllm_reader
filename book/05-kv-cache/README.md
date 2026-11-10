@@ -36,7 +36,7 @@ KV Cache 不是一个 Python 字典，也不只是一块 GPU tensor。阅读当�
 3. EngineCore 中代表物理页所有权的 `KVCacheBlock` 元数据；
 4. 每个请求按逻辑 token 顺序维护的 block table。
 
-本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，B6 已把源码引用与行号重新核对到此 revision，详见 `meta/upgrade-main-05caae03-2026-11-10/`）。文中继续使用三种
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，2026-11-10 重新钉扎到此 revision：源码引用与行号已逐条核对，Model Runner V1 删除已重新绑定；其余行为未在 05caae03 上全面重核，清单见 `meta/upgrade-main-05caae03-2026-11-10/`）。文中继续使用三种
 证据标签：
 
 - **源码事实**：能在固定 revision 的实现或测试中直接定位。
@@ -575,9 +575,10 @@ flowchart TB
 
 1. 等外部 loader 持有的权重就绪，再记录初始显存快照与本进程预算；
 2. 运行 dummy forward，profile 权重之外的非 KV 和瞬时峰值；
-3. 如果启用并支持 CUDA Graph，估算 graph 占用（v0.33.0 起，MRV2 在开启
-   `cudagraph_mm_encoder` 且非 `enforce_eager` 时，即使 decoder 的 `cudagraph_mode`
-   为 `NONE`，也会估算 encoder graph 的占用，#58243）；
+3. 如果平台是 CUDA-alike/XPU 且 `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` 为真，Worker 就请
+   `GPUModelRunner.profile_cudagraph_memory()` 估算 graph 占用（`gpu_worker.py` L755–L760 @ `05caae03`）；
+   `cudagraph_mode` 与 `cudagraph_mm_encoder` 的判断由 runner 自己负责（#63778，见 7.9），
+   所以只剩 encoder graph 时仍会估算（#58243）；开启 `enable_extensible_kv_cache` 时该函数返回 0；
 4. 用请求显存减去非 KV 占用和应用的 graph 估算；
 5. 返回可用于 KV allocation 的字节数。
 
@@ -685,7 +686,7 @@ Worker 只负责接收并赋值。
 
 [源码] `vllm/config/vllm.py` - `VllmConfig.adjust_dcp_kv_cache_interleave_size`
 
-> **main 上的变化（未发版，不在 v0.33.0 中）**：本书正文以 v0.33.0 为准；以下为 vLLM main 2026-10-28～10-29（0106c8abc..36d4ef654）的变化。已用 `git merge-base --is-ancestor` 核对 [edad8b03c5](https://github.com/vllm-project/vllm/commit/edad8b03c5285a1c12e7e4f83c1af709b319a01b) 与 [317081fb6d](https://github.com/vllm-project/vllm/commit/317081fb6dc8b125a3134711a7750707bfd55371) 都不在 `4ba787ec9959` 的祖先链中，留待第二波。详见 meta/main-tracking-2026-10-29.md。
+> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-28～10-29（0106c8abc..36d4ef654）。详见 meta/main-tracking-2026-10-29.md。
 > - [edad8b03c5](https://github.com/vllm-project/vllm/commit/edad8b03c5285a1c12e7e4f83c1af709b319a01b)（[#61294](https://github.com/vllm-project/vllm/pull/61294)）：`resolve_kv_cache_layout` / `_merge_supported_layouts` 跨 PP stage 取各 worker 支持布局的**交集**，再按“多数 worker 把该布局排第一”排序（`vllm/v1/attention/backends/utils.py` L243–L337 @ `36d4ef654`），不再要求各 stage 列表完全一致。
 > - [317081fb6d](https://github.com/vllm-project/vllm/commit/317081fb6dc8b125a3134711a7750707bfd55371)（[#62860](https://github.com/vllm-project/vllm/pull/62860)）：DSA decode indexer logits 计入 memory profile workspace（`sparse_attn_indexer.py` L496–L541）。
 
@@ -1126,7 +1127,7 @@ flowchart TB
 当 A 完成时，P0/P1 的 `ref_cnt` 从 2 降到 1，仍由 B 使用；只有最后一个 owner 释放后才
 进入 free queue。
 
-### 5.12.4 EAGLE 的 lookahead 哈希（v0.33.0）
+### 5.12.4 EAGLE 的 lookahead 哈希
 
 投机解码里的 EAGLE / MTP draft 层在算某个 block 最后一个位置的 KV 时，要读**后面紧跟的
 几个 token**。v0.32.0 的做法是保守地丢掉最后一个命中的 block（EAGLE 末块回退），让这
@@ -1173,13 +1174,16 @@ flowchart TD
     ON --> S4[BlockStored 事件带 lookahead_token_ids]
 ```
 
-> **读图方法：** 这是“EAGLE 的 lookahead 哈希（v0.33.0）”的判定流程图。从上往下看四个条件如何依次把 `L` 归零，只有全部通过才得到 `L>0`；`L>0` 之后的 Scheduler、coordinator、Mamba checkpoint、`BlockStored` 事件四个节点是各组件的连带变化，用来核对“为什么 EAGLE 末块回退在这条路径上被关掉”。
+> **读图方法：** 这是“EAGLE 的 lookahead 哈希”的判定流程图。从上往下看四个条件如何依次把 `L` 归零，只有全部通过才得到 `L>0`；`L>0` 之后的 Scheduler、coordinator、Mamba checkpoint、`BlockStored` 事件四个节点是各组件的连带变化，用来核对“为什么 EAGLE 末块回退在这条路径上被关掉”。
 
 启用条件在 `VllmConfig._resolve_num_hash_lookahead_tokens`（`vllm/config/vllm.py:632-653`，结果存进 `num_hash_lookahead_tokens` 字段，`:413`）里：
 必须启用了 EAGLE 末块回退（`use_eagle_block_drop()`）、没有设置 `disable_lookahead_block_hashes`；然后看 KV connector：配置了 connector 时，
 只有该 connector 类的 `supports_lookahead_block_hashes()` 返回真才启用（基类默认返回 `False`，`kv_connector/v1/base.py:198`；
-`OffloadingConnector`、`SimpleCPUOffloadConnector` 与 `NixlBaseConnector` 的实现返回 `True`），没有配置 connector 时才要求开启了 prefix caching。
-（v0.33.0 是“只要配置了 KV connector 就不启用”，之后 connector 可以自己声明支持。）启用后：
+`OffloadingConnector`（`offloading_connector.py:77`）、`SimpleCPUOffloadConnector`（`simple_cpu_offload_connector.py:86`）、
+`NixlBaseConnector`（`nixl/connector.py:84`）、`MooncakeConnector`（`mooncake/mooncake_connector.py:776`）和
+`MooncakeStoreConnector`（`mooncake/store/connector.py:133`）的实现直接返回 `True`；`MultiConnector`（`multi_connector.py:220`）
+逐个询问 `connectors` 里的子 connector，全部返回真才为真，`connectors` 为空则为假），没有配置 connector 时才要求开启了 prefix caching。
+（v0.33.0 是“只要配置了 KV connector 就不启用”；#64096，`75be138428`，起 connector 可以自己声明支持。）启用后：
 
 - Scheduler 把 `use_eagle_block_drop` 置为假；`KVCacheCoordinator` 新增的
   `drop_eagle_group_ids` 在此时为空集合，group 仍保留 `is_eagle_group` 标记，但不再丢末块；
@@ -1405,7 +1409,7 @@ v0.33.0 另外带入了一批 KV offload / P2P 的修复，本书只讲到 offlo
 P2P 失败处理 [#63708](https://github.com/vllm-project/vllm/pull/63708)（send 不阻塞）、
 [#63628](https://github.com/vllm-project/vllm/pull/63628)、[#63664](https://github.com/vllm-project/vllm/pull/63664)、[#63498](https://github.com/vllm-project/vllm/pull/63498)。
 
-> **main 上的变化（未发版，不在 v0.33.0 中）**：本书正文以 v0.33.0 为准；以下各项已用 `git merge-base --is-ancestor` 核对不在 `4ba787ec9959` 的祖先链中，留待第二波。详见 meta/main-tracking-2026-10-27.md ～ 10-30.md。
+> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。详见 meta/main-tracking-2026-10-27.md ～ 10-30.md。
 > - main 2026-10-25～10-27：[c13d4a5a4](https://github.com/vllm-project/vllm/commit/c13d4a5a46c2c663b728aa21af7eb00ece6bd698)（[#57646](https://github.com/vllm-project/vllm/pull/57646)） finalize 时暴露已处理前缀；P2P [963399729](https://github.com/vllm-project/vllm/commit/9633997299f29d54f1da38fb4a37e7d1a6535005)（[#63781](https://github.com/vllm-project/vllm/pull/63781)）分模式超时 10s/30s。
 > - main 2026-10-27～10-28：[e3883b7a7e](https://github.com/vllm-project/vllm/commit/e3883b7a7ec41f3117dfb7ca764746ec80a24d87)（[#60469](https://github.com/vllm-project/vllm/pull/60469)） KVCR 按请求聚合 completed_prefixes 并保序，由 scheduler finalize recency；[36f5ff3172](https://github.com/vllm-project/vllm/commit/36f5ff3172eb75433e54e496d64c473e951f8ecc)（[#63889](https://github.com/vllm-project/vllm/pull/63889)） 降低 KVCR adapter 开销；[70cb50dab2](https://github.com/vllm-project/vllm/commit/70cb50dab240a03f7db9ab87a613b5b52f1339fe)（[#62592](https://github.com/vllm-project/vllm/pull/62592)） 新增 `HiSparseBackend` 平台后端（pin/unpin、cache ops、IPC event）。
 > - main 2026-10-28～10-29：[0beab6c251](https://github.com/vllm-project/vllm/commit/0beab6c251e8046c0c6cf2fef114cd23b58cda74)（[#63779](https://github.com/vllm-project/vllm/pull/63779)） tier promotion 可失败并 `defer_write_release`（`tiering/manager.py` L170–L214、L556–L638 @ `36d4ef654`）；[77f58e5304](https://github.com/vllm-project/vllm/commit/77f58e530450416d217e4816727a35910bf3d9bf)（[#64229](https://github.com/vllm-project/vllm/pull/64229)） bounded-replay SWA 计入 lazy walk；P2P [f4fd1ab68e](https://github.com/vllm-project/vllm/commit/f4fd1ab68e2ba3a76bf6b903662eb6a8ee8202ab)（[#63207](https://github.com/vllm-project/vllm/pull/63207)）、[a1cfd2c1b5](https://github.com/vllm-project/vllm/commit/a1cfd2c1b584c4ac197db9cc9ac84a6d973d39df)（[#64250](https://github.com/vllm-project/vllm/pull/64250)）；NIXL `transfer_mode` push（[#64230](https://github.com/vllm-project/vllm/pull/64230)）、Mooncake 跳过 padding（[#63513](https://github.com/vllm-project/vllm/pull/63513)）、MORI embedded（[#61793](https://github.com/vllm-project/vllm/pull/61793)）仅清单。
@@ -1451,9 +1455,11 @@ checkpoint 位置也有一处容易多退一个边界的细节。`get_mamba_pref
 返回 `(130-2)//32*32 = 128`，多保留了一个对齐单位的可复用前缀。此为纯函数的源码算例，
 不是 GPU 运行结果。
 
-#61589 之前，EAGLE 类方法只有末块回退这一条路；v0.33.0 在没有 KV connector、没有设置
-`disable_lookahead_block_hashes` 时改用 5.12.4 的 lookahead 哈希，因此上面第二个分支成了
-EAGLE 的默认路径，第一个分支只在配置了 KV connector 或显式关闭 lookahead 哈希时使用。
+#61589 之前，EAGLE 类方法只有末块回退这一条路。现在是否改用 5.12.4 的 lookahead 哈希，由
+`VllmConfig._resolve_num_hash_lookahead_tokens`（`vllm/config/vllm.py:632-653`）决定：没有设置 `disable_lookahead_block_hashes`，
+并且（配置了 KV connector 时）该 connector 的 `supports_lookahead_block_hashes()` 返回真，或（没有 connector 时）开启了
+prefix caching，就走 lookahead 哈希，因此上面第二个分支是这些配置下 EAGLE 的默认路径；第一个分支只在 connector 不声明支持
+或显式关闭 lookahead 哈希时使用。v0.33.0 的条件更窄（有 connector 就不启用），#64096 才放宽到 connector 自行声明。
 `replay_boundaries` 也随之使用 `drop_eagle_group_ids`（lookahead 哈希下为空）来决定是否
 按 EAGLE 计算可达边界。
 

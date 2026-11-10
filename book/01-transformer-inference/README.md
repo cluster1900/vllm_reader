@@ -54,7 +54,7 @@ prerequisites:
 > **本节先看：** 这一部分先划定结论成立的源码版本和讨论边界。超出范围的实现不能直接套用本章结论，需要重新核对源码。
 
 - 源码仓库：`vllm-project/vllm`
-- 源码 commit：`05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，B6 已把源码引用与行号重新核对到此 revision，详见 `meta/upgrade-main-05caae03-2026-11-10/`）
+- 源码 commit：`05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，2026-11-10 重新钉扎到此 revision：源码引用与行号已逐条核对，Model Runner V1 删除已重新绑定；其余行为未在 05caae03 上全面重核，清单见 `meta/upgrade-main-05caae03-2026-11-10/`）
 - 阅读主线：decoder-only 文本生成、vLLM V1 Engine、Llama 类模型。
 - 本章使用单层、单 attention head 的教学模型建立直觉；真实模型通常有多层、
   多个 query heads，并可能使用 GQA、量化、TP 和不同 attention backend。
@@ -1422,7 +1422,7 @@ Transformer 层本身：
 - `temperature < 0`、非法 `top_p`、越界 token ID 应在进入 kernel 前被拒绝。
 - `temperature=0` 走 greedy 语义，不能直接执行除以 0。
 - FP16/BF16 logits 常转为 FP32 再处理，以降低采样数值问题；MRV2 里这一步发生在两处：
-  `Sampler.apply_sampling_params` 在需要 logits 处理时先拷成 FP32 tensor（`sampler.py:238`），temperature、
+  `Sampler.apply_sampling_params` 在需要 logits 处理时先拷成 FP32 tensor（`sampler.py:239`），temperature、
   Gumbel 与 logprob kernel 内部也用 `logits.to(tl.float32)`（`gumbel.py:43`、`:333`，`logprob.py:43`）。
 - EOS、stop token、stop string 和最大生成长度是不同停止条件，部分发生在 token
   侧，部分需要 detokenize 后判断。

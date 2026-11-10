@@ -673,7 +673,7 @@ size 已经就绪。第 8 章说明 compile range 与 CUDA Graph descriptor 都�
 - container image 或依赖 lock；
 - power/clock policy 与同机干扰任务。
 
-> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）更新；下面这条**不包含在** v0.33.0 中，下一次升级基线时复核。[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：记录环境时须写明 `ParallelConfig.numa_bind`（`parallel.py` L329–L344 @ `0106c8abc`）。默认 `None` 为 best-effort 自动绑定（多 NUMA、`numactl`、spawn、mp/uni 等条件满足时软 memory preference）；显式 `True` 严格绑定（失败即启动错误），`False` 关闭。仅写“NUMA 拓扑”而不写该开关的取值，无法复现 Worker 子进程是否被绑核。详见 meta/main-tracking-2026-10-28.md。
+> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：记录环境时须写明 `ParallelConfig.numa_bind`（`parallel.py` L329–L344 @ `0106c8abc`）。默认 `None` 为 best-effort 自动绑定（多 NUMA、`numactl`、spawn、mp/uni 等条件满足时软 memory preference）；显式 `True` 严格绑定（失败即启动错误），`False` 关闭。仅写“NUMA 拓扑”而不写该开关的取值，无法复现 Worker 子进程是否被绑核。详见 meta/main-tracking-2026-10-28.md。
 
 ### 10.10.2 固定 workload
 
@@ -1782,8 +1782,9 @@ throughput、goodput、p99 TTFT/TPOT、client queue、server queue。
     `benchmarks/attention_benchmarks/`：组件与 kernel 层实例。
 16. `tests/benchmarks/`：CLI、dataset adapter、sweep 和参数稳定性测试。
 
-本章正文已按 v0.33.0 静态复核（复核日期 2026-11-10），指标教学代码的 CPU 测试通过；源码基线为 commit
-`4ba787ec9959e566d3b587a796dff07673324da5`。当前机器没有可用的 NVIDIA GPU vLLM
+本章源码基线为 vLLM main commit `05caae03c20f69436ff7ec23ded339ea104f1a01`（2026-11-10 重新钉扎；前一基线 v0.33.0 为
+`4ba787ec9959e566d3b587a796dff07673324da5`），指标教学代码的 CPU 测试通过。这次重新钉扎核对了源码引用与行号，并重新绑定了
+Model Runner V1 删除带来的变化；其余行为没有在 `05caae03` 上逐一重新核实（清单见 `meta/upgrade-main-05caae03-2026-11-10/`）。当前机器没有可用的 NVIDIA GPU vLLM
 运行环境，因此 profiler、NCCL 与真实服务性能数据仍标记为 `runtime_verified: false`。
 本章给出的数值曲线均为教学示意，不能冒充实测结果。
 

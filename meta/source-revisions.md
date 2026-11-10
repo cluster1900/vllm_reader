@@ -96,11 +96,11 @@
   - ch05：`check_enough_kv_cache_memory` / `get_kv_cache_config_from_groups` / `get_kv_cache_groups` / `get_kv_cache_configs` → `vllm/v1/core/kv_cache_planning.py`（正文仍提旧路径 → **B1**）
   - ch08：`_update_request_with_output` → `vllm/v1/core/sched/scheduler.py`（**属 ch08，正文批 B2**，不是 B4/ch04）
   - ch09：删除 `ray_executor.py` / `RayDistributedExecutor` 条目（类已不存在；既有 `ray_executor_v2.py` / `RayExecutorV2` 覆盖 → 正文 **B3**）
-- 正文落注记按 bot-hub #127：波次 1 仅落 **v0.33.0 ancestry** 内变更；非 ancestry 注记推迟波次 2（B6–B9）。
+- 正文落注记按 bot-hub #127：波次 1 仅落 **v0.33.0 ancestry** 内变更；非 ancestry 注记推迟后续波次。
 - 章节继续 `draft` / `runtime_verified: false`。
 
 
-## 阅读基线 005：vLLM main `05caae03`（2026-11-10 B6 重新钉扎）
+## 阅读基线 005：vLLM main `05caae03`（2026-11-10 重新钉扎）
 
 - Repository: `vllm-project/vllm`
 - Branch: `main`（未打 tag 的 commit；最近的 tag 是 `v0.34.0rc0` = `34b780fe66bdf3df173358774eb4f29f684b8368`，2026-11-08，`05caae03` 在它之后 112 个提交，`git describe` 为 `v0.34.0rc0-112-g05caae03c`）
@@ -109,7 +109,7 @@
 - 这次重新钉扎的直接原因：`aac1b2a4f36e742c1f55bcb34ca9aaa5e6e02592`（#63373 “[Core] Remove Model Runner V1”，2026-11-07）。它是 `05caae03` 和 `v0.34.0rc0` 的祖先，**不在** v0.33.0 中；MRV1 的整套代码（`vllm/v1/worker/gpu_model_runner.py`、`v1/sample/sampler.py`、`v1/worker/block_table.py`、`v1/cudagraph_dispatcher.py` 等）在这个 revision 里都不存在。
 - Python 要求仍为 `>=3.11,<3.15`（`pyproject.toml` `requires-python`）。
 - 获取方式：同级 `../vllm` 检出上述 commit（detached HEAD）。
-- 正文改写：B6 把所有依赖 MRV1 的叙述改写为 MRV2 唯一路径（ch01 sampler、ch03、ch04、ch05、ch06、ch07、ch08、ch09），并顺带最小修正 check_book 报出的非 MRV1 漂移；行号引用已全部对 `05caae03` 手工核对。清单见 `meta/upgrade-main-05caae03-2026-11-10/b6-mrv1-rebind.md`。
-- 保留为历史的内容：各章的 “main 上的变化（未发版）” 注记与 v0.33.0 祖先链核验表（ch07 7.32、ch08 8.26）按原样保留，它们的逐条折叠属于 B7–B9。
-- B7（block_size=64、extensible KV）与 B8（XPress/FLy、Elastic EP、`/v1/decisions`、watchdog）的新内容不在本批，只在正确引用所必需时提到。
+- 正文改写：这次重新钉扎把所有依赖 MRV1 的叙述改写为 MRV2 唯一路径（ch01 sampler、ch03、ch04、ch05、ch06、ch07、ch08、ch09），并顺带最小修正 check_book 报出的非 MRV1 漂移；行号引用已全部对 `05caae03` 手工核对。清单见 `meta/upgrade-main-05caae03-2026-11-10/b6-mrv1-rebind.md`。
+- 保留为历史的内容：各章的 “main 上的变化（未发版）” 注记与 v0.33.0 祖先链核验表（ch07 7.32、ch08 8.26）保留，前言已改为“已包含在本书基线中，正文尚未展开（后续批次补写）”；逐条核对结果（17 条注记、48 个条目全部是 `05caae03` 的祖先）见 note。
+- block_size=64、extensible KV、XPress/FLy、Elastic EP、`/v1/decisions`、watchdog 等新内容不在本批，只在正确引用所必需时提到；未写入正文的上游漂移清单见 note。
 - 章节继续 `draft` / `runtime_verified: false`。

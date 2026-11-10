@@ -266,7 +266,7 @@ $$
 
 [源码] `vllm/config/parallel.py` - `ParallelConfig` 的 PCP/DCP 校验、`__post_init__`
 
-> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）核对；以下条目的提交**不在** v0.33.0 祖先链内（已逐条用 `git merge-base --is-ancestor` 核对，#61258 的 `4d95f222e6` 不在其中），属 main 未发版变化，留待第二波。区间为 vLLM main 2026-10-27～10-28（ed1a73079..0106c8abc），详见 meta/main-tracking-2026-10-28.md。
+> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-27～10-28（ed1a73079..0106c8abc），详见 meta/main-tracking-2026-10-28.md。
 > - [4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：`ParallelConfig.numa_bind` 默认由 `False` 改为 `None`（`parallel.py` L329–L344 @ `0106c8abc`）。`None` 时在多 NUMA、`numactl`、spawn、mp/uni 等条件满足时 best-effort 自动绑定（软 memory preference，`_numa_bind_auto`）；显式 `True` 为严格绑定（失败即启动错误），`False` 关闭。
 
 
@@ -755,7 +755,7 @@ sequenceDiagram
 
 #64458 在 v0.33.0 中以 cherry-pick `2b43321152` 存在；原提交 `d8fdf4f61` 不在 v0.33.0 祖先链内（`git merge-base --is-ancestor` 核对）。
 
-> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）核对；以下条目的提交（`26cbb47d4`、`820be160ce`、`cdd2750cd5`、`edad8b03c5`、`66875d312`）**不在** v0.33.0 祖先链内（已逐条用 `git merge-base --is-ancestor` 核对），属 main 未发版变化，留待第二波。已落入 v0.33.0 的 #58466 与 #64458 见上一小节正文。
+> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。已落入 v0.33.0 的 #58466 与 #64458 见上一小节正文。
 > - main 2026-10-25～10-27：[26cbb47d4](https://github.com/vllm-project/vllm/commit/26cbb47d48e6b1de8ab2b4bc1c839821ffcfd56b)（[#63554](https://github.com/vllm-project/vllm/pull/63554)） 让 probabilistic draft 的 draft logits 缓存也按 batch-shard 分片：开启 batch-sharded sampling、无 draft watermarker 且 speculator 支持时，每个 TP rank 只分配 `cdiv(max_num_reqs, TP)` 行，只存自己负责验证的请求（owner `req_state_idx % TP`，行 `req_state_idx // TP`）；custom rejection sampler 不能读分片 logits。（已被 #64356 取代，见下条）
 > - main 2026-10-27～10-28：[820be160ce](https://github.com/vllm-project/vllm/commit/820be160ce0dc9098deaa2a4c6b5fc534c43881d)（[#64151](https://github.com/vllm-project/vllm/pull/64151)） 在上述分片条件上增加 `prefill_context_parallel_size == 1`（`vllm/v1/worker/gpu/spec_decode/speculator.py` L282–L287 @ `0106c8abc`）。PCP 开启时关闭 batch-sharded draft logits，因为 `PCPManager.sync_drafts` 按 request state 整行索引 draft logits。详见 meta/main-tracking-2026-10-28.md。
 > - main 2026-10-28～10-29：[cdd2750cd5](https://github.com/vllm-project/vllm/commit/cdd2750cd5e7d90849282a16bc46c21bbc58bcbd)（[#61464](https://github.com/vllm-project/vllm/pull/61464)） DBO 可与 speculative decoding 及 decode CP 同开（prefill CP 仍禁；`vllm.py` L3247–L3270 @ `36d4ef654`）；[edad8b03c5](https://github.com/vllm-project/vllm/commit/edad8b03c5285a1c12e7e4f83c1af709b319a01b)（[#61294](https://github.com/vllm-project/vllm/pull/61294)） 跨 PP stage 合并 KV cache layout 支持集。详见 meta/main-tracking-2026-10-29.md。
@@ -1098,7 +1098,7 @@ fused MoE kernel 的情况下选择 wait，否则选择 keep；不能把支持 E
 独立启动的新 rank 没有外部 utility 调用方去参加“提交之后的 resume barrier”，所以 `DPEngineCoreProc.run_busy_loop`
 对 `worker_type == "new"` 且 external LB 的 engine 自己调用 `resume_scheduler`（`core.py:2775-2782`）。
 
-这里只记录归属与校验的变化；扩缩容的完整流程作为新主题，留给第二波 B8。
+这里只记录归属与校验的变化；扩缩容的完整流程作为新主题，留给后续批次补写。
 
 [源码] `vllm/distributed/elastic_ep/external_elastic_ep.py` - `ExternalElasticEPScaleCoordinator`（`external_elastic_ep.py:205` @ `05caae03`）
 
@@ -1190,7 +1190,7 @@ prefill 在后，再按 request 与原片段起点排序。切片和正确重排
 
 [源码] `vllm/config/parallel.py` - `ParallelConfig.pcp_shard_decode_requests`
 
-> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）核对；以下条目的提交（`af6665b5d`）**不在** v0.33.0 祖先链内（已用 `git merge-base --is-ancestor` 核对），属 main 未发版变化，留待第二波。区间为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079），详见 meta/main-tracking-2026-10-27.md。
+> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079），详见 meta/main-tracking-2026-10-27.md。
 > - [af6665b5d](https://github.com/vllm-project/vllm/commit/af6665b5dd2098898dce52b9e1c5005863738024)（[#61994](https://github.com/vllm-project/vllm/pull/61994)）：DeepSeek-V4.1 模型层原先在 PCP 下拒绝一切 speculative decoding；main 改为允许固定长度 DSpark（其他方法和 adaptive verification 仍报错）。有 spec 时 compressor ring 在每个 PCP rank 聚合完整 tail 以支持拒绝回滚，`PCPManager.sync_drafts` 从 PCP rank 0 广播 draft tokens 与 draft logits，保证各 rank 验证同一提议。上文 `validate_config` 的方法级限制不变。
 
 PCP+PP 时，非末 PP rank 的 `sample_tokens` 恢复 global batch 后接收末 rank 输出；
@@ -2043,9 +2043,10 @@ communication contract 重新建立理解。
 14. `vllm/v1/worker/cp_utils.py`、`vllm/v1/attention/ops/dcp.py`：DCP 通信与归并。
 15. `tests/distributed/`、`tests/v1/engine/`、`tests/v1/worker/`：边界条件与回归测试。
 
-本章正文已按 v0.33.0 静态复核（2026-11-10），源码基线为 commit
-`4ba787ec9959e566d3b587a796dff07673324da5`；v0.32.0（`5df63a7203cdb9328d824a27b682e77c7b9928be`）到 v0.33.0 的
-变化在各节以“v0.33.0”标出。当前环境没有可用的 NVIDIA 多 GPU vLLM
+本章源码基线为 vLLM main commit `05caae03c20f69436ff7ec23ded339ea104f1a01`（2026-11-10 重新钉扎；前一基线 v0.33.0 为
+`4ba787ec9959e566d3b587a796dff07673324da5`）。这次重新钉扎核对了源码引用与行号，并重新绑定了 Model Runner V1 删除带来的变化；
+其余行为没有在 `05caae03` 上逐一重新核实（未写入正文的上游漂移清单见 `meta/upgrade-main-05caae03-2026-11-10/`）。
+v0.32.0（`5df63a7203cdb9328d824a27b682e77c7b9928be`）到 v0.33.0 的变化在各节以“v0.33.0”标出。当前环境没有可用的 NVIDIA 多 GPU vLLM
 运行条件，因此真实 NCCL/Ray 多机实验仍标记为 `runtime_verified: false`，不能把静态源码
 核对和 CPU 教学测试表述成真实 GPU 验证。
 

@@ -45,7 +45,7 @@ flowchart TD
 > **读图方法：** 阅读“本章定位”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
 这一段调用链看起来只是“跑模型”，实际上同时跨越五类边界：编排、进程、设备、并行和状态。
-本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，B6 已把源码引用与行号重新核对到此 revision，详见 `meta/upgrade-main-05caae03-2026-11-10/`），继续使用以下标签：
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，2026-11-10 重新钉扎到此 revision：源码引用与行号已逐条核对，Model Runner V1 删除已重新绑定；其余行为未在 05caae03 上全面重核，清单见 `meta/upgrade-main-05caae03-2026-11-10/`），继续使用以下标签：
 
 - **源码事实**：当前 revision 可直接定位的行为。
 - **设计意图**：源码注释或同 revision 设计文档表达的目标。
@@ -56,7 +56,7 @@ flowchart TD
 > 与 v0.33.0 的 merge-base 是 `fe341a53`，所以只有 `fe341a53..4ba787ec` 里真正在 v0.33.0 祖先链内的
 > 提交才写入正文，逐条用 `git merge-base --is-ancestor <commit> 4ba787ec` 核验，清单见 7.32。
 > 2026-11-10 已按这个 revision 对本章涉及的源码文件做静态复核（读代码与 diff，没有运行 GPU 或上游测试）。
-> 不在 v0.33.0 祖先链内的 main 变化仍以“main 上的变化（未发版）”注记保留，留待后续基线再处理。
+> v0.33.0 之后、已是 `05caae03` 祖先的 main 变化，以“main 上的变化（已包含在本书基线中，正文尚未展开）”注记保留，后续批次补写；不是 `05caae03` 祖先的才会标为“未发版”（目前没有这样的条目）。
 
 ## 阅读目标
 
@@ -618,14 +618,22 @@ $$
   `M_external>0`，则 `M_requested=M_util-M_external`，并检查余量为正且 free memory
   足以满足这个余量。外部权重不能因为不归当前进程 allocator 所有就漏算；
 - `M_nonKV` 包含权重及 profile 期间非 KV 消耗；
-- `M_graph,applied` 是实际扣除的 CUDA Graph 内存估算。固定 revision 中，环境变量
+- `M_graph,applied` 是实际扣除的 CUDA Graph 内存估算。环境变量
   `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` 默认值为 `1`，即默认应用估算；显式设为 `0`
-  才不扣此项。估算本身还要求 CUDA/ROCm 或 XPU 平台，并且满足下面两条之一：
-  `cudagraph_mode` 不是 `NONE`；或者使用 MRV2、开启 `cudagraph_mm_encoder` 且没有 `enforce_eager`
-  （`7128f568a`，#58243：encoder graph 即使 decoder graph 被关掉也要预留显存）。不能把开关开启
-  等同于必有非零预留。
+  才不扣此项。在 `05caae03` 上，Worker 只按两件事决定要不要去估算：平台是 CUDA-alike（含 ROCm）或 XPU，
+  且这个环境变量为真（`gpu_worker.py` L755–L760）。`cudagraph_mode` 是否为 `NONE`、`cudagraph_mm_encoder`
+  是否开启这类判断已不在 Worker 里（#63778，`dc4d977d97`），而是移进 `GPUModelRunner.profile_cudagraph_memory()`：
+  开启 `cache_config.enable_extensible_kv_cache` 时它直接返回 0（`gpu/model_runner.py` L1129–L1136）；
+  否则交给 `cudagraph_utils.py::profile_cudagraph_memory`，该函数在 `cudagraph_mode == NONE` 且
+  `runner.needs_cudagraph_capture()` 也为假时返回 0（L1010–L1014）。`needs_cudagraph_capture()` 把 encoder graph
+  也算进去（`gpu/model_runner.py` L1138–L1146），所以只剩 encoder graph 要捕获时仍会得到估算
+  （`7128f568a`，#58243）。不能把开关开启等同于必有非零预留。
 
-[源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`（估算条件 L707–L717 @ `05caae03`）
+[源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`（估算条件 L748–L760 @ `05caae03`）
+
+[源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.profile_cudagraph_memory`、`needs_cudagraph_capture`
+
+[源码] `vllm/v1/worker/gpu/cudagraph_utils.py` - `profile_cudagraph_memory`
 
 [源码] `vllm/envs.py` - `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS`
 
@@ -693,8 +701,8 @@ JIT 预热（`warmup_kernels`，由 `kernel_config.enable_jit_warmup` 控制）�
 由各 Worker 各自调整，改成 EngineCore 在 profiling 前用全局 KV cache groups 统一确定，Worker 端的
 `WorkerBase.set_kv_cache_layout(kv_cache_layout, cp_kv_cache_interleave_size)`（`worker_base.py` L115）只负责赋值；
 sparse indexer 也不再懒加载缓存这个值。`Executor.set_kv_cache_layout` 因此多了一个参数。
-最终缓存初始化之后（L394），若启用了 `SimpleCPUOffloadConnector` 且开启 prefix caching，EngineCore 还会向
-Executor 取回各 Worker 对齐后的 CPU offload block 数（`get_simple_cpu_offload_num_blocks`，L402，`30aded62d`，
+最终缓存初始化之后（L408），若启用了 `SimpleCPUOffloadConnector` 且开启 prefix caching，EngineCore 还会向
+Executor 取回各 Worker 对齐后的 CPU offload block 数（`get_simple_cpu_offload_num_blocks`，L432，`30aded62d`，
 #52921），保证 PP/speculative decoding 下各 Worker 的池大小一致，再写入 `cache_config`。
 
 [源码] `vllm/v1/engine/core.py` - `EngineCore._initialize_kv_caches`（@ `05caae03`）
@@ -707,8 +715,8 @@ Executor 取回各 Worker 对齐后的 CPU offload block 数（`get_simple_cpu_o
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.compile_or_warm_up_model`
 
-> **main 上的变化（未发版）**：本书正文已升到 v0.33.0（`4ba787ec`）；以下提交**不在** v0.33.0 祖先链内（#62330 已在 v0.33.0 中并入上文），暂不写入正文，留待后续基线处理。详见 meta/main-tracking-2026-10-27.md、meta/main-tracking-2026-10-28.md。
-> - main 2026-10-27～10-28：[dc4d977d97](https://github.com/vllm-project/vllm/commit/dc4d977d97f9cfaa7c6dc2de7fd94a77204a6914)（[#63778](https://github.com/vllm-project/vllm/pull/63778)）：`Worker.determine_available_memory` 在 V2 runner 下只要平台为 CUDA-alike/XPU 就调用 `model_runner.profile_cudagraph_memory()`（`gpu_worker.py` L716–L720 @ `0106c8abc`；L715 为 `cudagraph_memory_estimate = 0`），不再在 Worker 侧要求 `cudagraph_mode != NONE` 或展开 `cudagraph_mm_encoder` 条件；是否真正 profile 由 runner 自决（encoder graph 不依赖 cudagraph_mode）。[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：Worker/EngineCore 子进程可通过 `numa_utils.configure_subprocess` 做 best-effort NUMA 绑定（默认 `numa_bind=None`）。详见 meta/main-tracking-2026-10-28.md。
+> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。（#62330 这些已在 v0.33.0 中并入上文）详见 meta/main-tracking-2026-10-27.md、meta/main-tracking-2026-10-28.md。
+> - main 2026-10-27～10-28：[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：Worker/EngineCore 子进程可通过 `numa_utils.configure_subprocess` 做 best-effort NUMA 绑定（默认 `numa_bind=None`）。详见 meta/main-tracking-2026-10-28.md。
 
 ## 7.11 SchedulerOutput 到长期请求状态
 
@@ -809,7 +817,7 @@ UVA（统一虚拟寻址）帮助设备访问映射后的地址，不表示主�
 数据搬运边界：写入内容仍走 H2D，索引/起点/长度仍走 UVA 缓冲。较长的一段写入（例如 block table 一行里的一大段 block ID）
 因此不再被一个 program 串行写完。
 
-> **main 上的变化（未发版）**：本书正文已升到 v0.33.0（`4ba787ec`）；以下提交**不在** v0.33.0 祖先链内（#62698 已在 v0.33.0 中并入下文），暂不写入正文，留待后续基线处理。详见 meta/main-tracking-2026-10-27.md。
+> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。（#62698 这些已在 v0.33.0 中并入下文）详见 meta/main-tracking-2026-10-27.md。
 > - main 2026-10-25～10-27：[78e2f7960](https://github.com/vllm-project/vllm/commit/78e2f796019384b07c9f9b6d8a371e3ea958b33a)（[#63633](https://github.com/vllm-project/vllm/pull/63633)） 删除写入内容的 `async_tensor_h2d` 分支，默认 GPU-base 路径的写入内容也经 `UvaBufferPool.copy_chunks_to_uva` 进入 UVA 缓冲；上文“把实际写入内容通过 H2D 复制”与下图 `non-blocking H2D` 节点在 main 上不再成立。暂存改用 `array.array`，1-D ndarray/array 按引用保留到 `apply_write`，期间不得修改。
 
 ```mermaid
@@ -1120,7 +1128,7 @@ sequenceDiagram
 
 > **读图方法：** 这是“Grammar mask 的汇合点”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
-> **main 上的变化（未发版）**：本书正文已升到 v0.33.0（`4ba787ec`）；以下提交**不在** v0.33.0 祖先链内，暂不写入正文，留待后续基线处理。详见 meta/main-tracking-2026-10-30.md。
+> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。详见 meta/main-tracking-2026-10-30.md。
 > - [322f90a2a](https://github.com/vllm-project/vllm/commit/322f90a2a356a83276bc07236e0e620a4e4fc93a)（[#63219](https://github.com/vllm-project/vllm/pull/63219)）：`GrammarOutput` 删除 `num_acceptable_drafts`（`output.py` L341–L346）；`DraftTokensHandler` 按 req_id 保留 draft（`spec_decode/utils.py` L51–L131），`execute_model` 开头 `begin_step`（`model_runner.py` L1794–L1795），移除时 `discard`（L1198–L1199）。删除 `grammar_invalid_drafts`。PP + structured output 不再依赖当前 batch 整表 draft。
 
 ## 7.20 MRV2 sample_tokens 时间线
@@ -1288,7 +1296,7 @@ flowchart TD
 旧的 fallback 测试 `test_v2_model_runner_heterogeneous_vocab_draft_falls_back_to_v1`、
 `test_watermarking_forces_model_runner_v2` 在 `05caae03` 的 `tests/test_config.py` 里已不存在。
 
-> **main 上的变化（未发版）**：本书正文已升到 v0.33.0（`4ba787ec`）；以下提交**不在** v0.33.0 祖先链内，暂不写入正文，留待后续基线处理。详见 meta/main-tracking-2026-10-29.md。
+> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。详见 meta/main-tracking-2026-10-29.md。
 > - [d7f68d4c7d](https://github.com/vllm-project/vllm/commit/d7f68d4c7d31004e257b7b2ff142b4edd83e0d8c)（[#62748](https://github.com/vllm-project/vllm/pull/62748)）：`sampler.apply_staged_writes()` 仅在本步有 `scheduled_new_reqs` 时调用（`model_runner.py` L1298–L1302 @ `36d4ef654`）。
 > - [06e172b5cf](https://github.com/vllm-project/vllm/commit/06e172b5cf8845c80c40a6eaaecbcbde3e38e8df)（[#59341](https://github.com/vllm-project/vllm/pull/59341)）：MRV2 lm_head LoRA 的 `prompt_lora_mapping` 按 `num_logits`（每请求 1+drafts 行）展开（`lora_utils.py` L99–L104；调用处 L1913）。
 > - [65faf4efa0](https://github.com/vllm-project/vllm/commit/65faf4efa0281fc2e04096a28cd35fb8dc7d3218)（[#63237](https://github.com/vllm-project/vllm/pull/63237)）：routed experts capturer 在 `profile_run` 中、KV cache profiling 之前初始化。
@@ -1604,8 +1612,8 @@ D2H 分开测量。
 | `0c5dd18e7`（#62041） | KV 传输结果先于 drafter 收集 | 是 | 7.20 |
 | `856b98415`（#62784） | `skip_drafts` | 是 | 7.20 |
 
-没有进入 v0.33.0 祖先链、因此仍只以注记保留的 main 变化有：#63778、#61258、#63633、#63219、
-#61464、#62748、#59341、#63237。
+不在 v0.33.0 祖先链内、但已是 `05caae03` 祖先、仍只以注记保留（正文尚未展开）的 main 变化有：#61258、#63633、#63219、
+#61464、#62748、#59341、#63237（#63778 已写入 7.9 正文）。
 
 ## 本章小结
 

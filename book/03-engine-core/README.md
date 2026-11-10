@@ -36,7 +36,7 @@ LLMEngine / AsyncLLM
 执行期间到达的 abort 怎样生效、多个 batch 如何保持在途，以及进程退出或 worker
 故障如何被前端看见。
 
-本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，B6 已把源码引用与行号重新核对到此 revision，详见 `meta/upgrade-main-05caae03-2026-11-10/`）。文中区分：
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，2026-11-10 重新钉扎到此 revision：源码引用与行号已逐条核对，Model Runner V1 删除已重新绑定；其余行为未在 05caae03 上全面重核，清单见 `meta/upgrade-main-05caae03-2026-11-10/`）。文中区分：
 
 - **源码事实**：可在固定 revision 的实现或测试中直接定位。
 - **设计含义**：由多个源码事实推导出的工程解释。
@@ -1112,7 +1112,7 @@ v0.33.0 还让 NIXL pull connector 支持 sleep（#59635）：唤醒时若 `tags
 `release_kv_cache_memory()` 与释放某个请求的 block 引用不同：它要求 pause 已完成、
 Scheduler 无可推进工作、batch queue 已排空，而且 Executor 的内存当前全部驻留。
 满足条件后先 `_reset_caches()`，再 `model_executor.discard(("kv_cache",))`，丢弃 KV
-物理内存。`keep` 保留的逻辑请求在唤醒后需重算，不能继续读取已丢弃的 KV。
+物理内存。`release_kv_cache_memory(reset_connector=True)` 的 `reset_connector` 参数和 `sleep` 一样，决定清缓存时是否连外部 KV connector 的缓存一起重置（默认为真，`core.py:1189`、`:1206`）。`keep` 保留的逻辑请求在唤醒后需重算，不能继续读取已丢弃的 KV。
 这也不是一般的 `sleep(level=...)` 替代品：前置条件不满足就抛 `RuntimeError`，不会
 替调用者自动等待 pause 完成。
 
