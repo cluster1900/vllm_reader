@@ -623,7 +623,7 @@ $$
   才不扣此项。在 `05caae03` 上，Worker 只按两件事决定要不要去估算：平台是 CUDA-alike（含 ROCm）或 XPU，
   且这个环境变量为真（`gpu_worker.py` L755–L760）。`cudagraph_mode` 是否为 `NONE`、`cudagraph_mm_encoder`
   是否开启这类判断已不在 Worker 里（#63778，`dc4d977d97`），而是移进 `GPUModelRunner.profile_cudagraph_memory()`：
-  开启 `cache_config.enable_extensible_kv_cache` 时它直接返回 0（`gpu/model_runner.py` L1129–L1136）；
+  开启 `cache_config.enable_extensible_kv_cache` 时它直接返回 0（`gpu/model_runner.py` L1129–L1136，见 5.6.5）；
   否则交给 `cudagraph_utils.py::profile_cudagraph_memory`，该函数在 `cudagraph_mode == NONE` 且
   `runner.needs_cudagraph_capture()` 也为假时返回 0（L1010–L1014）。`needs_cudagraph_capture()` 把 encoder graph
   也算进去（`gpu/model_runner.py` L1138–L1146），所以只剩 encoder graph 要捕获时仍会得到估算
