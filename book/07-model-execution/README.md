@@ -1334,7 +1334,7 @@ XPress 挂在 DFlash 族下：一次 query forward 覆盖「1 个已验证锚点
 
 `_generate_draft`（`:60`）先对整块 query 做 backbone forward（`_run_model`），再调用 `_jacobi_refine`（`:82`）。锚点自己的 refined 输出被丢弃，它的 latent 通过 mixer 第 0 列进入 draft 槽——源码注释写明了这一约定。本书停在 speculator 这一层，不展开 `xpress/kernels.py` 里的 Jacobi / top-C 内核。
 
-构造入口是 `init_speculator`（`vllm/v1/worker/gpu/spec_decode/__init__.py:18`）：它只按 `speculative_config.speculator_config.speculator_class` 的限定名实例化，不再在 Runner 里按 architecture 手写分支。XPress 的类名由 `XPressSpeculatorConfig.speculator_class`（`xpress/config.py:8-9`）提供。`method=` 的内置表里没有单独的 `"xpress"` 项（`speculator_config.py` 的 `_CONFIG_BY_METHOD` 只有 `"dflash"` 等）；draft 模型可以声明 `speculator_config_class`（例如 `Qwen3XPressForCausalLM` 指向 `XPressSpeculatorConfig`，`qwen3_xpress.py:290`）。`get_speculator_config_class`（`speculator_config.py:363`）在声明的配置类是当前 method 配置类的子类时采用它，然后 `init_speculator` 再按最终的 `speculator_class` 构造。
+构造入口是 `init_speculator`（`vllm/v1/worker/gpu/spec_decode/__init__.py:18`）：它只按 `speculative_config.speculator_config.speculator_class` 的限定名实例化，不再在 Runner 里按 architecture 手写分支。XPress 的类名由 `XPressSpeculatorConfig.speculator_class`（`xpress/config.py:8-10`）提供。`method=` 的内置表里没有单独的 `"xpress"` 项（`speculator_config.py` 的 `_CONFIG_BY_METHOD` 只有 `"dflash"` 等）；draft 模型可以声明 `speculator_config_class`（例如 `Qwen3XPressForCausalLM` 指向 `XPressSpeculatorConfig`，`qwen3_xpress.py:290`）。`get_speculator_config_class`（`speculator_config.py:363`）在声明的配置类是当前 method 配置类的子类时采用它，然后 `init_speculator` 再按最终的 `speculator_class` 构造。
 
 `44e70e086`（#65175）已是本书基线 `05caae03` 的祖先（不在 v0.33.0 里）：`_jacobi_refine` 在存在 acceptance estimator 时把 Jacobi 的 logits 交给它（`return_logits=self.acceptance_estimator is not None`，`:98`），再调用 `_maybe_predict_acceptance`（`:104-108`）。这里只记录这条交接，不展开 estimator 本身。
 
@@ -1348,17 +1348,17 @@ XPress 挂在 DFlash 族下：一次 query forward 覆盖「1 个已验证锚点
 
 #### FLy（有损的 entropy-gated 验证）
 
-把 `rejection_sample_method` 设为 `"fly"` 后，rejection 内核不再在「本步不会被 native 接受」处立刻截断。它先对 target logits 算一个只覆盖 top-$k$ 的熵。实现是 `compute_fly_entropy`（`vllm/v1/worker/gpu/spec_decode/fly.py:12`）。`rejection_sample` 在 `fly_window_size>0` 时以 `from_logits=True` 调用它（`rejection_sampler_utils.py:1213-1218`）：先取 logits 的 top-$k$，再用**全词表**的 $\operatorname{logsumexp}$ 得到这些位置的 $\log p_i$ 和 $p_i$，然后
+把 `rejection_sample_method` 设为 `"fly"` 后，rejection 内核不再在「本步不会被 native 接受」处立刻截断。它先对 target 的 **processed logits** 算一个只覆盖 top-$k$ 的熵。实现是 `compute_fly_entropy`（`vllm/v1/worker/gpu/spec_decode/fly.py:12`）。`rejection_sample` 收到的是 `apply_sampling_params` 之后的 logits（已含惩罚和温度，`rejection_sampler.py:273-284`）；在 `fly_window_size>0` 时以 `from_logits=True` 调用 `compute_fly_entropy`（`rejection_sampler_utils.py:1213-1218`）：先取这些 logits 的 top-$k$，再用**全词表**的 $\operatorname{logsumexp}$ 做 softmax 得到这些位置的 $\log p_i$ 和 $p_i$，然后
 
 $$
 H(x)=-\sum_{i\in\operatorname{TopK}(p(x))} p_i(x)\,\log p_i(x).
 $$
 
-**白话：** 这不是把 top-$k$ 重新归一化后再算熵，而是只把概率最大的 $k$ 个词对香农熵的贡献加起来。$H$ 大，说明 target 在这些头部候选上比较分散，这一位置更“不确定”。$k$ 由 `fly_entropy_top_k` 给出（默认 3），并与词表大小取较小值；某个 $p_i=0$ 的项不计入。
+**白话：** 这不是把 top-$k$ 重新归一化后再算熵，而是只把概率最大的 $k$ 个词对香农熵的贡献加起来。softmax 是对处理后的 logits（经过惩罚和温度）在**全词表**上归一化，所以 $H$ 大并不表示整个词表更“不确定”。词表很大且分布接近均匀时，头部 $k$ 项各自的概率都很小，它们的贡献加起来反而接近 0。例如默认 $k=3$、词表 $10^5$ 且完全均匀时，$H\approx 0.0003$；若头部三个候选的概率是 $0.5$、$0.3$、$0.2$，则 $H\approx 1.03$。因此 $H$ 大，表示 top-$k$ 里有若干个候选各自占了可观的概率。$k$ 由 `fly_entropy_top_k` 给出（默认 3），并与词表大小取较小值；某个 $p_i=0$ 的项不计入。
 
-**符号说明：** $p(x)$ 是 target 在该 draft 位置上的完整 softmax 分布；$i$ 遍历其中概率最大的 $k$ 个词；$p_i(x)$ 是这些词的真实概率（不是截断后再归一化的值）；$H(x)$ 无量纲，单位与 $\log$ 的底一致（实现用自然对数）。
+**符号说明：** $p(x)$ 是 target 在该 draft 位置上、对处理后的 logits（经过惩罚和温度）做全词表 softmax 得到的分布；$i$ 遍历其中概率最大的 $k$ 个词；$p_i(x)$ 是这些词在全词表分布里的真实概率（不是截断后再归一化的值）；$H(x)$ 无量纲，单位与 $\log$ 的底一致（实现用自然对数）。
 
-若当前步按 native 规则本该拒绝，且 $H$ 不低于 `fly_entropy_threshold`（默认 0.3），并且后面还留得下一个完整窗口，内核就记下 `pending_rejection`、**推迟**这次截断（`_rejection_kernel` 中 `FLY_WINDOW_SIZE>0` 分支，约 `:726-744`）。窗口内后续每一步都必须被 native 接受；走到 `i - pending_rejection == FLY_WINDOW_SIZE` 时，把这一段（含当初被推迟的那一步）算成接受。中途有一步不被 native 接受，验证就此停下，推迟作废。官方文档写明：这是**有意有损**的策略，**不保持** target 分布，可能改变输出。换来的是在 draft 大体正确、只在高熵位置差点被掐断时，少做一次昂贵的重启。
+若当前步按 native 规则本该拒绝，且 $H$ 不低于 `fly_entropy_threshold`（默认 0.3），并且后面还留得下一个完整窗口，内核就记下 `pending_rejection`、**推迟**这次截断（`_rejection_kernel` 中 `FLY_WINDOW_SIZE>0` 分支，约 `:726-744`）。窗口内后续每一步都必须被 native 接受；走到 `i - pending_rejection == FLY_WINDOW_SIZE` 时，把这一段（含当初被推迟的那一步）算成接受。中途有一步不被 native 接受，验证就此停下，推迟作废。官方文档写明：这是**有意有损**的策略，**不保持** target 分布，可能改变输出。换来的是在 draft 大体正确、只在 top-$k$ 内几个候选都占了可观概率因而差点被掐断的位置，少做一次昂贵的重启。
 
 ```mermaid
 flowchart TB
@@ -1377,7 +1377,7 @@ flowchart TB
 
 > **读图方法：** 先只看「native 接受 → 延长 accepted_length」的主路径，这与标准 rejection 相同。再看「本该拒绝」时多出的菱形：那是 FLy 相对 standard rejection 多出来的分支——先决定能不能推迟，再在后续窗口里确认。FLy 不改 draft 怎么生成，只改何时截断。
 
-配置校验：`fly_window_size` 必须严格小于 `num_speculative_tokens`，且 `num_speculative_tokens` 至少为 2；未指定窗口时取 `min(6, num_speculative_tokens-1)`（`vllm/config/speculative.py:1756-1772`）。启用时会打一条 warning：FLy 可能降低输出质量。
+配置校验：`fly_window_size` 必须严格小于 `num_speculative_tokens`，且 `num_speculative_tokens` 至少为 2；未指定窗口时取 `min(6, num_speculative_tokens-1)`（`vllm/config/speculative.py:1756-1776`）。启用时会打一条 warning：FLy 可能降低输出质量。
 
 [源码] `vllm/v1/worker/gpu/spec_decode/fly.py` - `compute_fly_entropy`（`:12` @ `05caae03`）
 
@@ -1681,7 +1681,7 @@ D2H 分开测量。
 | `ce9467b75`（#54448） | XPress 投机解码方法 | 是 | 7.22.1 |
 
 不在 v0.33.0 祖先链内、但已是 `05caae03` 祖先、仍只以注记保留（正文尚未展开）的 main 变化有：#61258、#63633、#63219、
-#61464、#62748、#59341、#63237（#63778 已写入 7.9 正文）。
+#62748、#59341、#63237（#63778 已写入 7.9 正文；#61464 已写入 7.22）。
 `44e70e086`（#65175，XPress + Acceptance Estimator）同样不在 v0.33.0、但是 `05caae03` 的祖先，已写入 7.22.1。
 
 ## 本章小结
