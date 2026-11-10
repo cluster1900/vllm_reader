@@ -384,6 +384,50 @@ flowchart LR
 
 > **读图方法：** 这是“两条路径的共享与分叉”的流程图。先从左向右只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
+### Decisions API：把生成换成结构化判别
+
+> **本节先看：** 聊天接口要模型「写出」答案；Decisions / System One 要模型对预先给定的选项打分。实现上仍可能走到引擎的 generate 或分类路径，但 HTTP schema、handler 与「一次请求含多道题」的编排都在独立模块里。这不是与离线 `LLM.generate`、在线 chat 并列的第三条主链，而是协议面上另外两条入口。
+
+**两条入口。** 都在 `register_api_routers` 里注册（`vllm/entrypoints/launchers/api_server/routers.py:28-38` @ `05caae03`）。这组接口随 #60465（`/v1/decisions`，`c923e7769`）、#59299（`/v1/systemone`，`d33872dfe`）、#62437（joint read，`7e3d55956`）进入，均已包含在本书基线中。
+
+1. `POST /v1/decisions`（`openai/decisions/api_router.py:24-40` @ `05caae03`）——OpenAI Decisions 形状，只接受文本输入（协议层会拒绝 `input_image`，`protocol.py:31-45`）。请求里是 `input` 和 `questions[]`；每题 `type` 为 `predicate`、`choice` 或 `score`（`protocol.py:59-91`；`choice` 至少两个互异选项，`score` 至少两个等级）。`OpenAIServingDecisions.create_decisions`（`serving.py:55-83` @ `05caae03`）做模型检查、题目数上限和 admission，再调用策略的 `read` 或 `read_joint`。没有挂上 handler 时（没有对应 `ReadStrategy`，或策略任务不是 `generate`），入口返回 501（`api_router.py:40-48`；`create_error_response` 把 `NotImplementedError` 映射为 501）。
+2. `POST /v1/systemone`（`generate/structured_decisions/api_router.py:33-45` @ `05caae03`）——TypeSafe System One，由 `ServingStructuredDecisions` 处理。它把「状态」和多道 typed 问题编成一次或多次读取。对 `generate` 任务的策略（如 `NextTokenStrategy`），每次读取取回复首 token 在标签集合上的 logprobs，再对标签做 softmax 得到概率；这类策略还要求启动时 `--logprobs-mode raw_logprobs` 或 `processed_logprobs`（`strategies.py:1483-1486` @ `05caae03`）。有的模型走 `classify` 或 `token_classify` 专用头，不经过「首 token logprobs」这条路径，细节见官方文档。官方文档也写明：有对应策略的生成模型默认会挂上该端点；没有策略时同样返回 501。
+
+白话解释：这里的 softmax 是把各标签的 log-probability 先变成相对大小，再归一化成加起来为 1 的一组概率，而不是再做一次自由文本生成。
+
+```mermaid
+flowchart LR
+    C[客户端] --> D["POST /v1/decisions"]
+    C --> S["POST /v1/systemone"]
+    D --> H1[OpenAIServingDecisions]
+    S --> H2[ServingStructuredDecisions]
+    H1 --> STR[ReadStrategy.read / read_joint]
+    H2 --> STR
+    STR --> ENG[EngineClient / AsyncLLM]
+    ENG --> OUT[答案 + probabilities + usage]
+```
+
+> **读图方法：** 左右两个 HTTP 入口在策略层汇合，都依赖 EngineClient；差别在 schema，以及如何把题目编成模型输入。模型没有对应 ReadStrategy 时，这两个入口都是 501，不要误当成聊天接口的 404。`joint=true` 只有声明了 `joint_reads` 的策略（如 DiffusionGemma）才会走 `read_joint`，否则是 400。
+
+**和 chat 主链的差别（初读只需记住这三句）：**
+
+- 输出是结构化字段（选项 / 分数 / 置信度），不是自由文本 token 流。
+- 一道请求可含多题；是否 joint read 取决于策略与模型。
+- 概率会受同一 batch 里的其他请求以及 prefix cache 影响；要可复现时，官方文档提示设置 `VLLM_BATCH_INVARIANT=1`。
+
+[源码] `vllm/entrypoints/openai/decisions/api_router.py` - `create_decision`（`:40` @ `05caae03`）
+
+[源码] `vllm/entrypoints/openai/decisions/serving.py` - `OpenAIServingDecisions.create_decisions`（`:55` @ `05caae03`）
+
+[源码] `vllm/entrypoints/openai/decisions/protocol.py` - `DecisionRequest`、`PredicateQuestion`、`ChoiceQuestion`、`ScoreQuestion`
+
+[源码] `vllm/entrypoints/generate/structured_decisions/api_router.py` - `/v1/systemone`（`:33` @ `05caae03`）
+
+[源码] `vllm/entrypoints/generate/structured_decisions/serving.py` - `ServingStructuredDecisions`（`:56` @ `05caae03`）
+
+[文档] `docs/models/structured_decisions_models.md`
+
+
 ## 2.4 Renderer 与 InputProcessor 不是同一个阶段
 
 初学者常把“输入处理”理解成一个 tokenize 函数。当前 V1 实际上有两层。
@@ -1572,7 +1616,8 @@ stop 检查。
 离线与在线路径共享 EngineCore 之后的大部分后端。默认两者的 EngineCoreProc 都在
 后台推进；离线前端循环调用 `LLMEngine.step()` 同步取结果，在线前端用异步 output
 handler 分发结果。只有显式关闭多进程的离线 `InprocClient` 路径，调用线程才直接
-执行 `EngineCore.step_fn()`。
+执行 `EngineCore.step_fn()`。协议面上另外还有 `/v1/decisions` 与 `/v1/systemone`：
+它们把预先给定的选项打成结构化判别，仍经 EngineClient 进入同一套后端，细节见上文 Decisions 短节。
 
 [源码] `vllm/v1/engine/llm_engine.py` - `LLMEngine.from_engine_args`、`step`
 
@@ -1702,6 +1747,11 @@ OutputProcessor 生成用户完成输出，并把内部 ID 放入 `reqs_to_abort
   - `OpenAIServingChat.chat_completion_stream_generator`
   - `OpenAIServingChat.chat_completion_stream_generator_raw`
   - `OpenAIServingChat.chat_completion_full_generator`
+- `vllm/entrypoints/openai/decisions/api_router.py`、`serving.py`、`protocol.py`
+  - `create_decision`、`OpenAIServingDecisions.create_decisions`
+- `vllm/entrypoints/generate/structured_decisions/api_router.py`、`serving.py`
+  - `/v1/systemone`、`ServingStructuredDecisions`
+- `docs/models/structured_decisions_models.md`
 - `vllm/renderers/base.py`
   - `BaseRenderer.render_cmpl`
   - `BaseRenderer.render_chat`
