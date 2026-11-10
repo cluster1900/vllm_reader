@@ -6,7 +6,7 @@ source_path: ../vllm
 source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
 source_branch: v0.33.0
 source_dirty: false
-verified_at: 2026-10-19
+verified_at: 2026-11-10
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -55,7 +55,7 @@ rank 还会进入同一专家通信域。
 4. 解释为什么 DP 通常拥有独立的 EngineCore、Scheduler 和 KV Cache。
 5. 解释 EP 的 route、dispatch、local expert compute、combine 四个阶段。
 6. 区分 PCP 与 DCP，尤其理解 DCP partial attention 不能直接求平均。
-7. 根据部署边界选择 UniProc、Multiproc、Ray、Ray V2 或 external launcher。
+7. 根据部署边界选择 UniProc、Multiproc、Ray（v0.33.0 只剩 `RayExecutorV2` 一种实现）或 external launcher。
 8. 用拓扑表、通信量模型和分层日志定位 hang、OOM 与扩展效率下降。
 
 ---
@@ -165,6 +165,32 @@ PCP/DCP=多少、互联是什么、请求分布是什么`。
 例如 global rank 6 可能绑定本机 `cuda:2`，同时是某个 TP group 的 rank 0、某个 PP group
 的 rank 1。看到日志中的 `rank=0` 时，必须先确认它属于哪个命名空间。
 
+**v0.33.0 补充：local rank 怎样换算成本机 GPU 编号。** 上表的 local rank 是 Worker 在“自己这个 DP engine”
+内的本机编号，不一定等于本机 `cuda:N` 的 `N`。同一台机器上放多个 DP engine 时，换算公式是：
+
+$$
+g=\ell+d\times W,\qquad W=\mathrm{TP}\times\mathrm{PP}\times\mathrm{PCP}
+$$
+
+**白话**：同一台机器上，第 0 个 DP engine 占前 $W$ 张卡，第 1 个 DP engine 紧接着占下一段 $W$ 张卡，
+所以要把 engine 序号乘以每个 engine 的卡数，再加上 Worker 在 engine 内的编号。
+
+**符号说明**：$g$ 是本机逻辑 GPU 编号；$\ell$ 是 Worker 的 local rank；$d$ 是这个 DP engine 在本机上的序号
+（`data_parallel_rank_local`，缺省时回退为 `data_parallel_index`）；$W$ 是一个 DP engine 的 Worker 数，
+等于 `ParallelConfig.world_size`，三个并行度都是无单位正整数，$g,\ell,d$ 是从 0 开始的整数。
+
+例如 TP=2、PP=1、PCP=1、同机 DP=2：$W=2$，第 1 个 DP engine 的两个 Worker（$\ell=0,1$）落在 $g=2,3$。
+只有当 backend 不是 `ray` / `external_launcher`、DP backend 不是 `ray` 且一个 DP engine 不跨节点
+（`nnodes_within_dp == 1`）时才加偏移；其余情况直接返回 $\ell$，由 Ray 或外部 launcher 先决定设备可见性。
+
+v0.32.0 里 Worker 初始化、NUMA 绑定和网卡亲和各自复制了一份换算，NUMA 与网卡两份只乘了 `TP×PP`，漏掉 PCP；
+v0.33.0 的 #61237 把它们合并到同一个方法 `ParallelConfig.get_local_gpu_index`，并统一计入 PCP。
+该 PR 的标题是“Share PCP-aware local GPU indexing for NUMA binding”；`PCP>1` 时排查 NUMA 或网卡亲和问题，先确认三处都走这个入口。
+
+[源码] `vllm/config/parallel.py` - `ParallelConfig.get_local_gpu_index`（`parallel.py:842-855` @ `4ba787ec`）
+
+[源码] `vllm/v1/worker/gpu_worker.py` - `Worker.init_device`
+
 ### 9.2.2 group 是 collective 的参与者集合
 
 Collective 不是“向所有 GPU 广播”的模糊动作。每次 all-reduce、all-gather 或
@@ -214,7 +240,7 @@ group 交换 tensor metadata，再在 device group 发送真正的 GPU tensor。
 
 ### 9.3.1 当前源码中的 world size 公式
 
-固定版本 `v0.32.0 / 5df63a72...` 的 `ParallelConfig.__post_init__` 使用：
+固定版本 `v0.33.0 / 4ba787ec...` 的 `ParallelConfig.__post_init__`（`parallel.py:964-972` @ `4ba787ec`，与 v0.32.0 相同）使用：
 
 $$
 W_{\mathrm{engine}}=\mathrm{TP}\times \mathrm{PP}\times \mathrm{PCP}
@@ -235,12 +261,12 @@ $$
 
 所有并行度是无单位正整数，`W` 是 worker 数，不包含 API、EngineCore 等辅助进程。
 能写出乘法不代表组合可运行：此版本已移除 `ParallelConfig` 中 PCP 与 DP 不能同时开启的
-通用禁令，且 v0.32.0 移除了 MRV2 PCP 的 `PP>1` 禁令，但仍要满足 MLA、DCP、speculation 和 graph
+通用禁令，且自 v0.32.0 起 MRV2 PCP 不再禁止 `PP>1`（v0.33.0 沿用），但仍要满足 MLA、DCP、speculation 和 graph
 约束。移除一个校验不代表任意组合可运行。先检查合法性，再算部署规模。
 
 [源码] `vllm/config/parallel.py` - `ParallelConfig` 的 PCP/DCP 校验、`__post_init__`
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-27～10-28（ed1a73079..0106c8abc）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-28.md。
+> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）核对；以下条目的提交**不在** v0.33.0 祖先链内（已逐条用 `git merge-base --is-ancestor` 核对，#61258 的 `4d95f222e6` 不在其中），属 main 未发版变化，留待第二波。区间为 vLLM main 2026-10-27～10-28（ed1a73079..0106c8abc），详见 meta/main-tracking-2026-10-28.md。
 > - [4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：`ParallelConfig.numa_bind` 默认由 `False` 改为 `None`（`parallel.py` L329–L344 @ `0106c8abc`）。`None` 时在多 NUMA、`numactl`、spawn、mp/uni 等条件满足时 best-effort 自动绑定（软 memory preference，`_numa_bind_auto`）；显式 `True` 为严格绑定（失败即启动错误），`False` 关闭。
 
 
@@ -652,12 +678,78 @@ Executor 收集多个 rank 的回复；不能把“一份最终响应”写成�
 [源码] `vllm/v1/executor/multiproc_executor.py` - `MultiprocExecutor._get_output_rank`、
 `collective_rpc`
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-19～10-25（截至 a7407ab44）的变化，升级基线时需复核。
-> - [7050ef881](https://github.com/vllm-project/vllm/commit/7050ef881ff0835f6890a47db1859a24c65481d6)（[#58466](https://github.com/vllm-project/vllm/pull/58466)）：main 移除了 batch-sharded sampling 与 adaptive verification（自适应 spec 验证）不能同时开启的配置限制；BatchSharder 在开启 adaptive verification 时改用实际接纳的 draft token 数切分。
+### v0.33.0：batch-sharded sampling 可与自适应验证同开，PP 广播宽度随 draft 变化
+
+> **本节先看：** 这里记录 v0.32.0 到 v0.33.0 之间落在本章的两处变化。其一，TP 上“按请求分片采样”不再排斥自适应验证；其二，PP 末 stage 向其他 stage 广播采样结果的“宽度”，现在由当步有没有 draft 决定。两处都只发生在 MRV2（Model Runner V2）路径。
+
+**一、batch-sharded sampling 与 adaptive verification（#58466，`7050ef881`）**
+
+v0.32.0 的 `VllmConfig._validate_batch_sharded_sampling` 在自适应验证开启时直接拒绝 batch-sharded sampling。
+原因是每个请求实际验证几个 draft 要到 GPU 上才决定，而 CPU 端的分片计划（`BatchShardMetadata`）按“调度时的上限”
+构建，预算收紧后两边的 logits 行数对不上。v0.33.0 删除了这条限制，做法是让分片计划也使用“实际接纳的 draft 数”：
+`BatchSharder` 多了构造参数 `adaptive_verification_enabled`，`AdaptiveVerification` 在分片开启时把接纳数拷回 host
+（`copy_admitted_drafts_to_host`）。每个请求的实际 logits 行数按下式计算：
+
+$$
+n_i=s_i-d_i+a_i
+$$
+
+**白话**：先按“调度上限”给请求预留 logits 行，再把“调度了但没被接纳”的 draft 行扣掉，得到真正参与采样的行数。
+
+**符号说明**：$i$ 是 batch 内的请求序号；$s_i$ 是调度时该请求的 logits 行数；$d_i$ 是调度时它带的 draft token 数；
+$a_i$ 是自适应验证实际接纳的 draft 数，满足 $0\le a_i\le d_i$；三者与 $n_i$ 都以“行”或“token”为单位，是非负整数。
+未启用自适应验证时 $a_i=d_i$，公式退化为 $n_i=s_i$。各 TP rank 仍按 `req_state_idx % TP` 决定请求归属，
+再用 $n_i$ 汇总出每个 owner 的发送行数，所以所有 rank 不经通信就算出同一份计划。
+
+[源码] `vllm/v1/worker/gpu/sample/batch_shard.py` - `BatchSharder.__init__`、`BatchSharder.shard_sampler_inputs`（`batch_shard.py:146-160`、`:193-204`、`:268-281` @ `4ba787ec`）
+
+[源码] `vllm/v1/worker/gpu/spec_decode/adaptive_verification.py` - `copy_admitted_drafts_to_host`（`adaptive_verification.py:151`、`:183` @ `4ba787ec`）
+
+**二、PP 下 spec-decode 的 sampled token / draft 广播（#64458，v0.33.0 中为 cherry-pick `2b43321152`，原提交 `d8fdf4f61`）**
+
+PP 里只有末 stage 能采样，其他 stage 必须拿到“上一步采样出的 token（以及投机解码的 draft）”才能给下一步准备输入，
+所以末 stage 用专用 NCCL 子组向其他 stage 广播。#64458 修复了两处宽度不一致：
+
+- 采样结果的列数不再固定为 `max_sample_len = 投机步数 + 1`：当步 `num_draft_tokens > 0` 才用这个宽度，否则只广播 1 列
+  （`PPHandler._sample_len`，`pp_utils.py:104-106`）。发送端 `broadcast` 与接收端 `receive` 用同一个函数，保证两端 `shape` 一致。
+- draft 的广播与接收必须成对：接收端 `receive(input_batch, recv_drafts=...)` 的 `recv_drafts` 要等于“末 stage 这一步是否调用
+  `broadcast_drafts`”。模型运行器用 `num_spec_tokens > 0` 同时决定两端（`model_runner.py:2175-2176`、`:2340-2341`）；
+  没有提出 draft 的一步（例如 `skip_drafts`）两端都不广播；collective 两端必须成对调用，否则无法配对。
+- 接收端不再在 `get_prev_sampled_outputs` 里就地改写 `draft_tokens_to_update`：它把 `draft_tokens` 放进返回字典，
+  由 `postprocess_sampled(draft_tokens=...)` 调用的 `post_update` 统一写入请求状态。
+
+```mermaid
+sequenceDiagram
+    participant L as 末 PP stage（采样）
+    participant G as pp_broadcast 子组
+    participant F as 非末 PP stage
+    L->>L: sample 得到 sampled_tokens、num_sampled、num_rejected
+    L->>G: broadcast sampled_tokens（宽度 = _sample_len）
+    L->>G: broadcast combined（num_sampled、num_rejected）
+    F->>G: receive 同宽度 sampled_tokens 与 combined
+    alt 本步 num_spec_tokens > 0
+        L->>G: broadcast_drafts（draft_tokens）
+        F->>G: 接收 draft_tokens（recv_drafts=True）
+    else 本步没有 draft
+        Note over L,F: 两端都跳过 draft 广播
+    end
+    F->>F: pp_size 步之后 get_prev_sampled_outputs 消费并 postprocess_sampled
+```
+
+> **读图方法：** 这是“PP 下 sampled token / draft 广播”的时序图。第一遍只看 `alt` 之前的三行：末 stage 采样后先广播
+> 采样结果，非末 stage 以相同宽度接收；第二遍再看 `alt`：draft 是否广播由 `num_spec_tokens > 0` 同时决定两端。
+> 读完后应记住：collective 两端的“是否参与”和“张量形状”必须由同一个条件推出。
+
+[源码] `vllm/v1/worker/gpu/pp_utils.py` - `PPHandler._sample_len`、`PPHandler.receive`、`PPHandler.broadcast_drafts`、`PPHandler.get_prev_sampled_outputs`
+
+[源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.sample_tokens`
+
+#64458 在 v0.33.0 中以 cherry-pick `2b43321152` 存在；原提交 `d8fdf4f61` 不在 v0.33.0 祖先链内（`git merge-base --is-ancestor` 核对）。
+
+> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）核对；以下条目的提交（`26cbb47d4`、`820be160ce`、`cdd2750cd5`、`edad8b03c5`、`66875d312`）**不在** v0.33.0 祖先链内（已逐条用 `git merge-base --is-ancestor` 核对），属 main 未发版变化，留待第二波。已落入 v0.33.0 的 #58466 与 #64458 见上一小节正文。
 > - main 2026-10-25～10-27：[26cbb47d4](https://github.com/vllm-project/vllm/commit/26cbb47d48e6b1de8ab2b4bc1c839821ffcfd56b)（[#63554](https://github.com/vllm-project/vllm/pull/63554)） 让 probabilistic draft 的 draft logits 缓存也按 batch-shard 分片：开启 batch-sharded sampling、无 draft watermarker 且 speculator 支持时，每个 TP rank 只分配 `cdiv(max_num_reqs, TP)` 行，只存自己负责验证的请求（owner `req_state_idx % TP`，行 `req_state_idx // TP`）；custom rejection sampler 不能读分片 logits。（已被 #64356 取代，见下条）
 > - main 2026-10-27～10-28：[820be160ce](https://github.com/vllm-project/vllm/commit/820be160ce0dc9098deaa2a4c6b5fc534c43881d)（[#64151](https://github.com/vllm-project/vllm/pull/64151)） 在上述分片条件上增加 `prefill_context_parallel_size == 1`（`vllm/v1/worker/gpu/spec_decode/speculator.py` L282–L287 @ `0106c8abc`）。PCP 开启时关闭 batch-sharded draft logits，因为 `PCPManager.sync_drafts` 按 request state 整行索引 draft logits。详见 meta/main-tracking-2026-10-28.md。
 > - main 2026-10-28～10-29：[cdd2750cd5](https://github.com/vllm-project/vllm/commit/cdd2750cd5e7d90849282a16bc46c21bbc58bcbd)（[#61464](https://github.com/vllm-project/vllm/pull/61464)） DBO 可与 speculative decoding 及 decode CP 同开（prefill CP 仍禁；`vllm.py` L3247–L3270 @ `36d4ef654`）；[edad8b03c5](https://github.com/vllm-project/vllm/commit/edad8b03c5285a1c12e7e4f83c1af709b319a01b)（[#61294](https://github.com/vllm-project/vllm/pull/61294)） 跨 PP stage 合并 KV cache layout 支持集。详见 meta/main-tracking-2026-10-29.md。
-> - main 2026-10-29～10-30：同 [#64458](https://github.com/vllm-project/vllm/pull/64458)：PP 下 spec draft/sampled-token 广播宽度与 `recv_drafts` 通道，详见第 7 章 §7.20 注记。
 > - main 2026-10-29～10-30：[66875d312](https://github.com/vllm-project/vllm/commit/66875d3127534183b5ea723964fc7ec388e89722)（[#64356](https://github.com/vllm-project/vllm/pull/64356)）：新增 `DraftLogitsCache`（main 新增文件 `spec_decode/draft_logits.py` L80–L185 @ `2eae56c4b`）。分片 cache 每步 `assign` 按 in-batch 位置 i 分配 rank `i % tp`、行 `i // tp`（`batch_shard.py` L67–L78 现按 batch position，不再按 `req_state_idx`），owner 记入 `shard_mapping`，verification 用 `owners_of`；行每步复用，`stale_drafts` 标记行被改派的 draft。复制 cache（或无 draft logits）按 `shard_owners(num_reqs, tp)` 轮转；从未 draft 的请求仍按 slot 定 owner。
 
 [源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.sample`
@@ -706,7 +798,7 @@ flowchart LR
 
 | 模式 | 代表路径 | 谁选择 DP engine |
 |---|---|---|
-| external load balancing | `DPAsyncMPClient` | 外部负载均衡器或调用者 |
+| external load balancing | `DPAsyncMPClient` | 外部负载均衡器或调用者；v0.33.0 起它也能承接 Elastic EP 扩缩容（见 §9.8 末尾） |
 | internal load balancing | `DPLBAsyncMPClient` | vLLM client 根据 engine stats |
 | hybrid/local | 多节点本地 engine 集合 | 外部先选节点，本地再选 engine |
 
@@ -732,7 +824,7 @@ $$
 这不是一个普适调度定理，而是当前版本的启发式。它试图避免仅依据本地 inflight 计数，
 也避免把新请求持续压到 KV 已接近紧张的 engine。
 
-### 9.7.4 `DPCoordinator` 汇总什么
+### 9.7.4 `DPCoordinator` 汇总什么，以及 v0.33.0 谁来“叫醒”空闲 engine
 
 `vllm/v1/engine/coordinator.py` 中的 coordinator 接收各 engine 的：
 
@@ -741,8 +833,43 @@ $$
 - KV cache usage；
 - engine 是否存活和可接收请求。
 
-在需要跨 DP 同步的 MoE 场景，它还协调 request wave，使所有相关 ranks 能进入相同顺序
-的 collective。
+在需要跨 DP 同步的 MoE 场景，它还维护“请求波次（wave）”：所有 engine 要么一起处于 running，要么一起处于 paused，
+波次号记录“集体从 running 回到 paused”的次数。波次的两条边都由 **engine** 通知 coordinator：
+
+- running → paused：DP rank 0 在跨 DP 的 all-reduce 发现全局没有未完成请求后，发出 `wave_complete`；
+- paused → running：某个**空闲** engine 收到新请求后发出 `start_wave`，coordinator 再向其余 engine 广播 `START_DP_WAVE`。
+
+v0.33.0（#59559，`a94c31571`）改变了第二条边：v0.32.0 的前端（API server）在发现 engines 处于 paused 时会先向 coordinator
+发一条 `FIRST_REQ` 去叫醒其他 engine；现在这条前端路径被删除；除扩缩容标记 `SCALE_ELASTIC_EP` 外，coordinator 收到前端的其他消息只记录一条 error（`coordinator.py:353-355`）。理由写在
+`DPCoordinator` 的文档字符串里：前端看到的“是否 running”可能是过期的，而一个 paused 的 engine 会丢弃 `START_DP_WAVE`；
+所以只有 engine 自己才知道自己是否真的空闲。`DPEngineCoreProc.add_request` 现在在“有 coordinator、`engines_running` 为假、
+调度器未暂停”时就向 coordinator 发 `start_wave`（不再要求 `request_wave != current_wave`）。
+
+```mermaid
+sequenceDiagram
+    participant C as 前端 / 请求
+    participant E1 as 空闲 engine（收到请求）
+    participant K as DPCoordinator
+    participant E0 as 其他 engine（paused）
+    C->>E1: add_request
+    E1->>E1: engines_running = True
+    E1->>K: EngineCoreOutputs(start_wave=current_wave)
+    K->>K: current_wave = wave，engines_running = True
+    K->>E0: START_DP_WAVE（排除已收到请求的 E1）
+    E0->>E0: 进入 running，参与 dummy / 真实 step
+    Note over E1,E0: 之后所有 engine 同步 step；DP rank 0 发现全局无请求后发 wave_complete
+```
+
+> **读图方法：** 这是“DP 波次唤醒”的时序图。第一遍只看实线：请求先到某个空闲 engine，再由它通知 coordinator，
+> coordinator 才广播给其他 engine；第二遍看注意事项：前端不再直接叫醒 engine，因为它看到的 running 状态可能过期。
+> 读完后应得到：波次的“开始”和“结束”都以 engine 为信息源，coordinator 只负责转发与记账。
+
+此外，`DPEngineCoreProc.run_busy_loop` 在 engine 由 paused 变为 running、本 engine 是 DP rank 0 且没有待处理的暂停时也补发一次 `start_wave`（`core.py:2538-2550`），
+让 coordinator 观察到这条边，而不是假设自己发出的 `START_DP_WAVE` 一定被执行。
+
+[源码] `vllm/v1/engine/coordinator.py` - `DPCoordinator`（类 `coordinator.py:23`，文档字符串说明波次规则）、`DPCoordinatorProc`（`coordinator.py:148`；`wave_complete` 处理 `:412`，`start_wave` 处理 `:426-440` @ `4ba787ec`）
+
+[源码] `vllm/v1/engine/core.py` - `DPEngineCoreProc.add_request`（`core.py:2372-2385` @ `4ba787ec`）
 
 ### 9.7.5 为什么 MoE DP 需要 lockstep
 
@@ -775,6 +902,67 @@ sequenceDiagram
 这是正常跨 DP 执行路径的 collective shape 一致性保障，不是普通 API 负载均衡。
 此版本另有 `skip_dp_coordination()` 上下文：启用时不做跨 rank 规约，而以本地
 padding 数构造结果、保留本地 graph mode；不能把正常路径的同步保证推广到该显式跳过路径。
+
+
+### 9.7.7 DP 状态同步：每隔一段 step 做一次 CPU 小张量 all-reduce
+
+> **本节先看：** DP engine 之间需要不时对齐两件事：“有没有人还有活”和“是否都同意暂停”。这件事用一个只有 2 个元素的 CPU 张量做 all-reduce；v0.33.0 把它从通用的 `torch.distributed.all_reduce` 换成了专门的低延迟实现 `cpu_all_reduce_`。
+
+**同步什么。** `DPEngineCoreProc._has_global_unfinished_reqs` 每 `dp_sync_interval`（默认 16，所有 DP rank 必须一致）步，
+以及第 1 步，调用 `ParallelConfig.sync_dp_state`，对每个 rank 的两个 0/1 标志做 SUM：
+
+$$
+S_0=\sum_{r=0}^{N-1}u_r,\qquad S_1=\sum_{r=0}^{N-1}p_r
+$$
+
+$$
+\text{has\_unfinished}=[S_0>0]\ \lor\ [S_1\bmod N\neq 0],\qquad \text{pause\_consensus}=[S_1=N]
+$$
+
+**白话**：第一项是“逻辑或”——只要有一个 rank 还有未完成请求，大家就都继续跑；第二项是“全票通过”——所有 rank 都挂起了暂停请求才算
+达成暂停共识；如果只有一部分 rank 想暂停（$S_1$ 不是 $N$ 的倍数），其余 rank 仍要继续陪跑，否则 MoE 的 collective 会对不上。
+
+**符号说明**：$N$ 是 DP group 的大小（`dp_group.size()`）；$r$ 是 DP rank；$u_r\in\{0,1\}$ 表示该 rank 是否有未完成请求；
+$p_r\in\{0,1\}$ 表示该 rank 是否有待处理的暂停请求；$S_0,S_1$ 是 SUM 之后的计数，无单位；$[\cdot]$ 在条件为真时取 1，否则取 0。
+
+**怎么 all-reduce。** 这个张量很小，而且在 CPU（gloo）上，瓶颈是往返延迟而不是带宽；#61767 的标题就是“Low-latency CPU all-reduce for DP metadata syncs”，它引入
+`vllm.distributed.utils.cpu_all_reduce_`：先把 $N$ 拆成块大小 $B$（$N$ 的最大 2 的幂因子，源码写作 `world_size & -world_size`）和块数 $M=N/B$，
+块内做 recursive doubling，块间再做一次并发交换；#63016 让它把 `cpu_distributed_timeout` 传到每次点对点等待上。
+
+例如 $N=6$：$B=2$、$M=3$。
+
+| 步骤 | 做什么 | 例子（$u=[1,0,0,0,0,1]$） |
+|---|---|---|
+| 块内（$\log_2 B=1$ 轮） | rank `2k` 与 `2k+1` 互换并相加 | 三个块的块和为 $(1,0,1)$ |
+| 块间（1 次并发交换） | 每个 rank 与其他块里同一位置的 rank 交换块和，按块序相加 | 每个 rank 得到 $S_0=1+0+1=2$ |
+
+所有 rank 都按相同顺序相加，所以各 rank 得到的结果逐 bit 一致（源码文档字符串的承诺）。点对点轮数为
+$\log_2 B+\mathbf{1}[M>1]$，$N$ 为 2 的幂时只有 $\log_2 N$ 轮。
+
+```mermaid
+flowchart TD
+    A[每个 DP rank 的 2 元素 CPU 张量 u, p] --> B{world_size == 1?}
+    B -->|是| Z[直接返回]
+    B -->|否| C{CPU 且 contiguous?}
+    C -->|否| F[回退 torch.distributed.all_reduce]
+    C -->|是| D[块内 recursive doubling，块大小 B = N 的最大 2 的幂因子]
+    D --> E{块数 M > 1?}
+    E -->|否| Z
+    E -->|是| G[与其他块同位置 rank 并发交换块和，按块序求和]
+    G --> Z
+```
+
+> **读图方法：** 这是 `cpu_all_reduce_` 的流程图。第一遍沿“否→是→是”的主路径走到底，对应 $N$ 非 2 的幂且是 CPU 张量；
+> 第二遍再看两个旁路：单 rank 直接返回，非 CPU 或非连续张量回退通用 `all_reduce`。读完后应知道：它只是 gloo 上的小张量 SUM，
+> 不替代 NCCL 数据面通信。
+
+`GroupCoordinator.cpu_all_reduce_` 是对应的 group 级封装（使用该 group 的 `cpu_group` 与 `cpu_timeout`）。
+
+[源码] `vllm/config/parallel.py` - `ParallelConfig.sync_dp_state`（`parallel.py:869-894` @ `4ba787ec`）
+
+[源码] `vllm/distributed/utils.py` - `cpu_all_reduce_`（`utils.py:62-127` @ `4ba787ec`）
+
+[源码] `vllm/v1/engine/core.py` - `DPEngineCoreProc._has_global_unfinished_reqs`（`core.py:2554-2575` @ `4ba787ec`）
 
 ---
 
@@ -877,12 +1065,24 @@ MoE dispatch/combine 仍可能使用 sequence-parallel 输入。不要拿旧 com
 [源码] `vllm/config/parallel.py` - `use_sequence_parallel_moe`、`use_all2all`
 
 v0.32.0 的 MRV2 unsupported-feature 清单不再含 Elastic EP；这只是取消统一回退条件，
-扩缩容仍有独立校验与暂停策略。`DPLBAsyncMPClient._eep_commit_pause_mode` 在 V2 无法复用
+扩缩容仍有独立校验与暂停策略。`_eep_commit_pause_mode` 在 V2 无法复用
 fused MoE kernel 的情况下选择 wait，否则选择 keep；不能把支持 EEP 理解为任意组合都无须 drain。
 
 [源码] `vllm/config/vllm.py` - `_get_v2_model_runner_unsupported_features`
 
-[源码] `vllm/v1/engine/core_client.py` - `DPLBAsyncMPClient._eep_commit_pause_mode`
+[源码] `vllm/v1/engine/core_client.py` - `DPAsyncMPClient._eep_commit_pause_mode`（`core_client.py:1622`；`DPLBAsyncMPClient` 继承它，并在 `:2053`、`:2126` 调用 @ `4ba787ec`）
+
+**v0.33.0：Elastic EP 在 external LB 下也能扩缩容。** #43202（`dd9e07a25`）把 `_eep_commit_pause_mode` 和
+`_setup_elastic_ep_reconfig_bootstrap` 从 `DPLBAsyncMPClient` 上移到它的父类 `DPAsyncMPClient`，并给后者新增
+`prepare_elastic_ep`、`commit_elastic_ep`、`abort_external_elastic_ep` 与 `ExternalElasticEPScaleCoordinator`
+（`core_client.py:1489`、`:1667-1700`）。因此 v0.32.0 里“Elastic EP 与 `data_parallel_external_lb` 或 `data_parallel_hybrid_lb`
+都不兼容”的启动校验，在 v0.33.0 改成只拒绝 hybrid LB（`parallel.py:982-986`）：external LB 下由外部调用者驱动 prepare / commit，
+`DPAsyncMPClient` 自己不路由请求；`_get_external_eep_coordinator` 要求 `enable_elastic_ep` 与 external LB 同时成立。
+独立启动的新 rank 没有外部 utility 调用方去参加“提交之后的 resume barrier”，所以 `DPEngineCoreProc.run_busy_loop`
+对 `worker_type == "new"` 且 external LB 的 engine 自己调用 `resume_scheduler`（`core.py:2482-2489`）。
+
+这里只记录归属与校验的变化；扩缩容的完整流程作为新主题，留给第二波 B8。
+
 
 ## 9.9 PCP 与 DCP：都切 context，但切法不同
 
@@ -956,7 +1156,8 @@ prefill 在后，再按 request 与原片段起点排序。切片和正确重排
   DSpark 的 draft model 使用 MLA 时，还要求 `DCP=1` 或 `DCP=PCP`。
 - 通用配置已不再禁止 PCP 与 DP 组合，但仍需通过其他配置和后端校验。
 - PCP 与 `DCP>1` 同时使用时，仅支持 sparse MLA，且要求 `dcp_comm_backend="ag_rs"`。
-- sparse MLA 且 `DCP=1` 时，CUDA Graph 必须为 NONE。
+- sparse MLA 且 `DCP=1` 时，CUDA Graph 默认必须为 NONE；v0.33.0（#62377）只对 `deepseek_v32`（DeepSeek-V3.2）与 `glm_moe_dsa`（GLM-5.2/5.3）
+  两类 `model_type` 放开，其他 sparse MLA 模型仍要设 `-cc.cudagraph_mode=NONE`（`pcp_manager.py:156-229` @ `4ba787ec`）。
 - full graph 仅可用于分离的 decode routine：允许 FULL_DECODE_ONLY 或
   FULL_AND_PIECEWISE；PIECEWISE 和 NONE 仍可用，但还要满足上述 sparse MLA 约束。
 
@@ -967,13 +1168,62 @@ prefill 在后，再按 request 与原片段起点排序。切片和正确重排
 
 [源码] `vllm/config/parallel.py` - `ParallelConfig.pcp_shard_decode_requests`
 
-> **main 上的变化（未发版）**：本书正文仍以 v0.32.0 为准；以下为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079）的变化，升级基线时需复核。详见 meta/main-tracking-2026-10-27.md。
+> **main 上的变化（未发版）**：本书正文已按 v0.33.0（`4ba787ec`）核对；以下条目的提交（`af6665b5d`）**不在** v0.33.0 祖先链内（已用 `git merge-base --is-ancestor` 核对），属 main 未发版变化，留待第二波。区间为 vLLM main 2026-10-25～10-27（a7407ab44..ed1a73079），详见 meta/main-tracking-2026-10-27.md。
 > - [af6665b5d](https://github.com/vllm-project/vllm/commit/af6665b5dd2098898dce52b9e1c5005863738024)（[#61994](https://github.com/vllm-project/vllm/pull/61994)）：DeepSeek-V4.1 模型层原先在 PCP 下拒绝一切 speculative decoding；main 改为允许固定长度 DSpark（其他方法和 adaptive verification 仍报错）。有 spec 时 compressor ring 在每个 PCP rank 聚合完整 tail 以支持拒绝回滚，`PCPManager.sync_drafts` 从 PCP rank 0 广播 draft tokens 与 draft logits，保证各 rank 验证同一提议。上文 `validate_config` 的方法级限制不变。
 
 PCP+PP 时，非末 PP rank 的 `sample_tokens` 恢复 global batch 后接收末 rank 输出；
 因此 PP 输出同步使用全局请求顺序，不是每个 PCP rank 的局部行序。
 
 [源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.sample_tokens`
+
+### v0.33.0：PCP 的创建时机、MoE padding 掩码与 rank 局部批元数据
+
+> **本节先看：** 这一节只补 v0.32.0 到 v0.33.0 之间 `PCPManager` 的三处变化：它何时被创建、MoE 如何知道“哪些 gather 来的行是 padding”、以及每个 rank 的局部批次现在携带哪些全局信息。第一遍记住“为什么要在 profiling 之前创建”，第二遍再看具体字段。
+
+**一、创建时机提前（#60946，`bfdbfa163`）。** v0.32.0 里 `maybe_build_pcp_manager` 要等 KV block tables 建好才调用；v0.33.0 在
+`GPUModelRunner.__init__` 里就创建 `PCPManager`（`model_runner.py:314`，早于显存 profiling），KV cache 初始化完成后再用
+`set_block_tables` 补挂 block tables（`pcp_manager.py:108`，`model_runner.py:731-732`）。这样 profiling 和 CUDA graph capture 使用的 dummy
+batch 也走同一个管理器：`prepare_inputs_to_capture` 改名为 `prepare_inputs_for_capture_or_profile`。
+
+**二、MoE 的 padding 掩码要和 gather 之后的行对齐（#60946）。** 当 PCP>1 且没有 EP all2all kernel 时，`MoERunner._maybe_dispatch`
+会把各 PCP rank 的 token 沿 batch 维 all-gather 后再路由（`moe_runner.py:822-829`）。gather 之后行数是 $P\times\hat T$，
+而 `is_padding` 原来只描述本 rank 的 $\hat T$ 行，路由内核（如 `fused_topk_bias_router`、`dsv4_topk`）会把 padding 行的权重置 0、
+expert id 置 −1，所以掩码必须按 gather 后的行重新展开。`PCPManager` 为此维护 `_moe_is_padding`（长度 `max_num_tokens × PCP`，
+仅当 `moe_gathers_tokens = not enable_expert_parallel` 为真时创建，`pcp_manager.py:924`），逐行写成：
+
+$$
+m_{r,t}=\big[\,t\ \ge\ n_r\,\big],\qquad r=0,\dots,P-1,\quad t=0,\dots,\hat T-1
+$$
+
+**白话**：每个 rank 先把自己的真实 token 排在前面、padding 排在后面；gather 之后各 rank 的片段按 rank 顺序首尾相接，所以第 $r$ 段里
+“序号不小于该 rank 真实 token 数”的位置就是 padding。
+
+**符号说明**：$P$ 是 PCP size；$\hat T$ 是 padding 后每个 rank 的局部行数；$n_r$ 是第 $r$ 个 rank 的真实 token 数（`per_rank_num_tokens`）；
+$m_{r,t}\in\{0,1\}$ 表示 gather 后第 $r$ 段第 $t$ 行是否为 padding；$[\cdot]$ 条件为真取 1。所有量都是无单位整数。
+例如 $P=2$、$\hat T=4$、$n=(3,2)$：掩码为 `[0,0,0,1 | 0,0,1,1]`，其中 1 的位置不参与专家计算。
+
+```mermaid
+flowchart LR
+    A[GPUModelRunner.__init__] --> B[maybe_build_pcp_manager：block_tables 暂为 None]
+    B --> C[显存 profiling / 捕获用 dummy batch：prepare_inputs_for_capture_or_profile]
+    C --> D[KV cache 初始化后 set_block_tables]
+    D --> E[partition_batch：本 rank 局部批次]
+    E --> F[MoE all_gather PCP token]
+    F --> G[用展开后的 _moe_is_padding 路由，padding 行不占专家]
+```
+
+> **读图方法：** 这是 `PCPManager` 生命周期与 MoE padding 的流程图。第一遍从左到右看 A→D：管理器先于 block tables 存在；
+> 第二遍看 E→G：每步的局部批次经 all-gather 后，用重新展开的 padding 掩码做路由。读完后应知道：掩码的行数必须与 MoE 实际看到的行数一致。
+
+**三、局部批次携带全局信息（#62384，`c7476c7a6`）。** v0.33.0 新增 `PCPBatchMetadata`（`pcp_manager.py:28`），挂在 PCP rank 局部
+`InputBatch.pcp` 上：`global_num_tokens`（PCP 切分之前未 padding 的 token 数）、`global_query_lens_np`、`global_seq_lens_cpu_upper_bound_np`，
+以及仅在 PCP+DCP 时存在的 `dcp_local_seq_lens_cpu_upper_bound`（取代 v0.32.0 直接挂在 `InputBatch` 上的同名字段）。
+它的第一个使用者是 DeepSeek-V4.1-Flash 的“解码侧 SWA 有界重放”：每个被裁剪的请求要跨所有 PCP rank，所以各 rank 要能从自己的局部片段
+推出同一个全局保留长度；这属于模型专属路径，本书不展开。
+
+[源码] `vllm/v1/worker/gpu/pcp_manager.py` - `PCPManager.set_block_tables`、`PCPManager.moe_is_padding`、`PCPBatchMetadata`、`maybe_build_pcp_manager`
+
+[源码] `vllm/model_executor/layers/fused_moe/runner/moe_runner.py` - `MoERunner._maybe_dispatch`
 
 ### 9.9.4 DCP 如何分配 KV token
 
@@ -1043,6 +1293,17 @@ PCP/DCP 会改变 block table、slot mapping 或 token owner 的解释。KV Cach
 token 映射到一个 block slot”的原则仍成立，但物理 slot 可能属于某个 context rank。
 排查时必须同时打印 logical position、block id、slot mapping、DCP owner 和 local rank。
 
+**v0.33.0：DCP 与 KV block 大小、P/D 分离下的 interleave。** 启用 DCP 后，被 DCP 分片的注意力 KV 一个 block 在逻辑上覆盖
+$\mathrm{block\_size}\times\mathrm{DCP}$ 个连续 token 位置，而 Mamba/GDN 这类按 rank 复制的状态不乘（`resolve_dcp_kv_block_size`，
+`kv_cache_utils.py:740-742` @ `4ba787ec`）。NIXL P/D 分离下，`cp_kv_cache_interleave_size` 要与本地 block 大小对齐；#62330（`3e75ccba2`）把这一步
+从 worker 端搬到 `VllmConfig.adjust_dcp_kv_cache_interleave_size`（`vllm.py:3339`），由 EngineCore 在显存 profiling 之前、用全局 KV cache groups
+调用一次（`core.py:292-293`），随后经 `set_kv_cache_layout(layout.name, cp_kv_cache_interleave_size)` 把结果发给 workers。
+所以 profiling 时 workers 看到的 interleave 已是最终值；KV 初始化的完整步骤见第 5 章。
+
+[源码] `vllm/config/vllm.py` - `VllmConfig.adjust_dcp_kv_cache_interleave_size`
+
+[源码] `vllm/v1/core/kv_cache_utils.py` - `resolve_dcp_kv_block_size`
+
 ---
 
 ## 9.10 Executor backend：谁启动 Worker，谁传 RPC
@@ -1051,24 +1312,40 @@ token 映射到一个 block slot”的原则仍成立，但物理 slot 可能属
 
 ### 9.10.1 factory 的选择
 
-`vllm/v1/executor/abstract.py:Executor.get_class` 根据配置与环境选择：
+`vllm/v1/executor/abstract.py:Executor.get_class` 根据配置选择（`abstract.py:64-107` @ `4ba787ec`）。判断顺序是：先看
+`distributed_executor_backend` 是不是一个 `Executor` 子类，再依次比较字符串 `"ray"`、`"mp"`、`"uni"`、`"external_launcher"`，
+最后把其他字符串当成全限定类名导入并检查它是 `Executor` 子类：
 
 ```mermaid
 flowchart TD
-    A[Executor.get_class] --> B{external launcher}
-    B -- yes --> E[ExecutorWithExternalLauncher]
-    B -- no --> C{distributed backend}
-    C -- uni --> U[UniProcExecutor]
+    A[Executor.get_class] --> T{backend 本身是 Executor 子类?}
+    T -- 是 --> X1[直接使用该类]
+    T -- 否 --> C{backend 字符串}
+    C -- ray --> R2[RayExecutorV2]
     C -- mp --> M[MultiprocExecutor]
-    C -- ray legacy --> R[RayDistributedExecutor]
-    C -- ray v2 --> R2[RayExecutorV2]
-    C -- custom class --> X[Imported executor class]
+    C -- uni --> U[UniProcExecutor]
+    C -- external_launcher --> E[ExecutorWithExternalLauncher]
+    C -- 其他字符串 --> X2[按全限定名导入并校验为 Executor 子类]
 ```
 
-> **读图方法：** 这是“factory 的选择”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
+> **读图方法：** 这是 `Executor.get_class` 的判断顺序图。第一遍沿“backend 字符串”那条主路径，对应常见的 `ray` / `mp` / `uni`；
+> 第二遍再看最上面的“自定义子类”和最下面的“全限定名”两个扩展入口。读完后应知道：v0.33.0 的 `ray` 分支没有第二个选项，
+> v0.32.0 里的 legacy 出口已经不存在。
+
+v0.32.0 的 `ray` 分支还多一次 `envs.VLLM_USE_RAY_V2_EXECUTOR_BACKEND` 判断（默认真）来选 `RayExecutorV2` 或 legacy
+`RayDistributedExecutor`；v0.33.0 把它删成无条件返回 `RayExecutorV2`（#61712，`e57bb4ace`），环境变量本身随后在 #62228（`52e88e25e`）删除。
+
+当 `distributed_executor_backend` 没有显式给出时，`ParallelConfig.__post_init__` 先按下面的规则补上（`parallel.py:1054-1099` @ `4ba787ec`）：
+跨 DP 的总 worker 数大于 1 时默认 `mp`；但如果 `data_parallel_backend == "ray"`，或 Ray 可用且已处在 Ray placement group 里，则改为 `ray`；
+CUDA 下 `nnodes > 1` 保持 `mp`，且 `world_size` 大于本机 GPU 数会直接报错；`world_size == 1` 时为 `uni`。`nnodes > 1` 只允许
+`mp`、`uni` 或 `external_launcher`。
 
 不要只因为代码库里存在 `vllm/v1/executor/ray_executor_v2.py` 就认定运行时一定使用它；最终选择要看 factory
 和配置。
+
+[源码] `vllm/v1/executor/abstract.py` - `Executor.get_class`
+
+[源码] `vllm/config/parallel.py` - `ParallelConfig.__post_init__`
 
 ### 9.10.2 UniProc
 
@@ -1097,15 +1374,55 @@ flowchart LR
 控制面正常不代表数据面正常。若所有 Worker 都收到 `execute_model` 后才 hang，应优先检查
 collective 顺序、shape 和 NCCL 网络，而不是 API queue。
 
-### 9.10.4 Ray legacy 与 Ray V2
+**v0.33.0：spawn 方式下并发启动 Worker（#60028，`52f44839f`）。** 以前 `MultiprocExecutor._init_executor` 按 `local_rank` 逐个启动 Worker 进程；
+spawn 要重新 import 大量模块，串行启动时这些 import 排队等待。v0.33.0 在满足下列全部条件时用线程池并发启动本机 Worker
+（`_can_start_workers_concurrently`，`multiproc_executor.py:322-334`；`_start_workers_concurrently`，`:337` @ `4ba787ec`）：
 
-> **本节先看：** 下面先给出“Ray legacy 与 Ray V2”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
+- 不是 fork（fork 路径要把前一个 Worker 的文件描述符继承给下一个，`inherited_fds` 非空）；
+- 本机 Worker 数大于 1，且不是 CPU 后端（CPU 后端要逐个设置 OpenMP 环境）；
+- 没有启用 `numa_bind`（`numactl` 包装会逐个改写 `os.environ` 或 multiprocessing 的可执行文件）。
 
-- legacy Ray 把 workers 放入 Ray actors，通过 actor RPC 或 compiled DAG 调用；
-- Ray V2 继承更接近 Multiproc 的消息队列控制结构，但由 Ray 负责 actor placement 和资源；
-- 两者都需要正确的 GPU placement、node ordering 与 distributed init 地址。
+不满足时仍是原来的逐个启动。无论哪条路径，已经启动的 Worker 句柄都会按 rank 顺序放进 `unready_workers`，保证中途失败时能统一清理。
+Worker 启动之后的 `wait_for_ready` 阶段不变。
+
+[源码] `vllm/v1/executor/multiproc_executor.py` - `MultiprocExecutor._can_start_workers_concurrently`、`MultiprocExecutor._start_workers_concurrently`
+
+### 9.10.4 Ray：v0.33.0 只剩 `RayExecutorV2`
+
+> **本节先看：** 先记住结论：现在 `distributed_executor_backend="ray"` 只会得到 `RayExecutorV2`。它是一个 `MultiprocExecutor` 子类：控制面用 message queue，数据面用 NCCL，Ray 只负责“把 Worker 作为 actor 放到哪张卡上”。
+
+- v0.32.0 中 `ray` 默认已经走 `RayExecutorV2`，legacy `RayDistributedExecutor`（Ray actor RPC 加 Ray Compiled Graph）只在显式关闭
+  `VLLM_USE_RAY_V2_EXECUTOR_BACKEND` 时使用；v0.33.0 的 #61712 删除了 `vllm/v1/executor/` 下的 legacy 文件 `ray_executor.py`（含 `RayDistributedExecutor`）、
+  `vllm/distributed/device_communicators/` 下的 `ray_communicator.py`，以及 compiled-graph 专用的环境变量 `VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE`、`VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM`、
+  `VLLM_USE_RAY_WRAPPED_PP_COMM`；依赖也从 `ray[cgraph]` 改为 `ray`。
+- `RayExecutorV2`（`ray_executor_v2.py:239`）继承 `MultiprocExecutor`，沿用基于 message queue 的控制面和 NCCL 数据面，
+  类属性 `uses_ray = True`、`supports_pp = True`（`:249-250`）。Worker 是 Ray actor（`RayWorkerProc`，`:79`），由 Ray 的 placement group 决定放置。
+- 同一节点上的 Worker 与 driver 用共享内存 `MessageQueue`，其他节点用 TCP（`n_local_reader=0`，`_init_message_queues`，`:193-213`）。
+- GPU 分配不改写 `CUDA_VISIBLE_DEVICES`：先按 placement group bundle 放置 actor，再发现每个 actor 实际拿到的物理 GPU id，
+  最后用 `initialize_worker` 把 local rank 与 `assigned_physical_gpu_ids` 一并交给 Worker（`:79-106` 的类文档字符串给出这三步顺序）。
+- #61713（`4a89316ef`）删除了 legacy 遗留的“driver 节点必须有 GPU”约束：`initialize_ray_cluster` 不再有 `require_gpu_on_driver` 参数，
+  `RayExecutorV2._init_executor` 直接调用 `initialize_ray_cluster(self.parallel_config)`（`ray_executor_v2.py:295`）。
+- 两种 backend 都需要正确的 GPU placement、node ordering 与 distributed init 地址；这些在 Ray 之下仍然成立。
+
+```mermaid
+flowchart TD
+    D[driver：RayExecutorV2._init_executor] --> P[initialize_ray_cluster：得到 placement group]
+    P --> B[按节点排序 bundle，为每个 rank 分配 bundle]
+    B --> Q[创建广播 MessageQueue：driver 节点共享内存，其余 TCP]
+    Q --> A[按 bundle 创建 RayWorkerProc actor，延迟初始化]
+    A --> G[读取每个 actor 的节点与物理 GPU id]
+    G --> I[initialize_worker：local_rank + assigned_physical_gpu_ids]
+    I --> R[收集响应 MQ 句柄，run 启动 worker_busy_loop]
+    R --> W[wait_until_ready 屏障后开始收发 RPC]
+```
+
+> **读图方法：** 这是 `RayExecutorV2` 启动顺序图。第一遍只看每一步的名词：先有 placement group，再有 MQ，再有 actor，最后才初始化
+> Worker 并开始 RPC；第二遍对照 `ray_executor_v2.py` 的 “Step 1…9” 注释。读完后应明白：Ray 主要负责放置与资源编排，
+> 之后的 RPC 与 NCCL 通信和 `MultiprocExecutor` 一致。
 
 “使用 Ray”只说明资源编排层，不自动消除 NCCL 或 rank 拓扑问题。
+
+[源码] `vllm/v1/executor/ray_executor_v2.py` - `RayExecutorV2`、`RayWorkerProc`
 
 ### 9.10.5 External launcher
 
@@ -1666,14 +1983,15 @@ communication contract 重新建立理解。
 8. `vllm/v1/engine/core_client.py`：DP clients 与内部负载均衡。
 9. `vllm/v1/engine/coordinator.py`、`vllm/v1/engine/core.py`：DP coordinator 与 DP EngineCore processes。
 10. `vllm/v1/worker/dp_utils.py`：跨 DP batch 协调。
-11. `vllm/v1/executor/`：UniProc、Multiproc、Ray、Ray V2、external launcher。
+11. `vllm/v1/executor/`：UniProc、Multiproc、`RayExecutorV2`（原 legacy `RayDistributedExecutor` 已在 v0.33.0 删除）、external launcher。
 12. `vllm/model_executor/layers/fused_moe/`：expert map、runner、modular kernel 和 all-to-all。
 13. `vllm/v1/worker/gpu/pcp_manager.py`：PCP DualChunkSwap。
 14. `vllm/v1/worker/cp_utils.py`、`vllm/v1/attention/ops/dcp.py`：DCP 通信与归并。
 15. `tests/distributed/`、`tests/v1/engine/`、`tests/v1/worker/`：边界条件与回归测试。
 
-本章正文已按 v0.32.0 静态复核，源码基线为 commit
-`5df63a7203cdb9328d824a27b682e77c7b9928be`。当前环境没有可用的 NVIDIA 多 GPU vLLM
+本章正文已按 v0.33.0 静态复核（2026-11-10），源码基线为 commit
+`4ba787ec9959e566d3b587a796dff07673324da5`；v0.32.0（`5df63a7203cdb9328d824a27b682e77c7b9928be`）到 v0.33.0 的
+变化在各节以“v0.33.0”标出。当前环境没有可用的 NVIDIA 多 GPU vLLM
 运行条件，因此真实 NCCL/Ray 多机实验仍标记为 `runtime_verified: false`，不能把静态源码
 核对和 CPU 教学测试表述成真实 GPU 验证。
 
