@@ -75,8 +75,8 @@ attention 数学变了，而是 attention 读取历史 K/V 的寻址方式变了
 attention 接口的一套具体代码，metadata 是解释请求边界、长度和地址的数据。
 
 **第一遍走法：** 读 6.1–6.8、6.10–6.13、6.16，并运行 6.20；6.19 的 kernel 分析
-留到第二遍。**停下来算：** block size=4，表为 `[2,5,3]`，位置 5 写到哪里？
-逻辑块 `5//4=1`，物理块 5，页内偏移 1，所以 slot=`5*4+1=21`，不是字节地址 21。
+留到第二遍。**停下来算：** $B_{\mathrm{blk}}=4$，表为 `[2,5,3]`，位置 $\mathrm{pos}=5$ 写到哪里？
+逻辑块 `5//4=1`，物理块 5，页内偏移 `5%4=1`，所以 slot=`5*4+1=21`，不是字节地址 21。
 
 ## 6.1 从一个不可能的连续数组开始
 
@@ -203,7 +203,7 @@ attention kernel 读取与计算时所采用的分页粒度。在大多数普通
 
 ### 6.3.5 block table
 
-二维 tensor 的一行描述一个请求：第 `i` 项是该请求逻辑 block `i` 对应的物理 block
+二维 tensor 的一行描述一个请求：第 $i$ 项是该请求逻辑 block $i$ 对应的物理 block
 ID。v0.32.0 必须区分持久的 manager block table 与 backend 使用的 kernel block table；
 两者只有在无需转换时才是同一视图。它们都是地址目录，不保存 K/V。
 
@@ -229,16 +229,16 @@ flowchart TB
 
 ## 6.4 Block Table 的地址公式
 
-先忽略 context parallelism 与需要额外 stride 映射的 packed layout。对请求内位置 `p`，
-`B` 必须与所读表的粒度一致：manager 表配 manager block size，转换后的 kernel 表配
+先忽略 context parallelism 与需要额外 stride 映射的 packed layout。对请求内位置 $\mathrm{pos}$（从 0 起，单位 token），
+$B_{\mathrm{blk}}$ 必须与所读表的粒度一致：manager 表配 manager block size，转换后的 kernel 表配
 kernel block size。对普通线性页视图：
 
 $$
-i = \left\lfloor \frac{p}{B} \right\rfloor
+i = \left\lfloor \frac{\mathrm{pos}}{B_{\mathrm{blk}}} \right\rfloor
 $$
 
 $$
-o = p \bmod B
+\mathrm{off} = \mathrm{pos} \bmod B_{\mathrm{blk}}
 $$
 
 $$
@@ -246,24 +246,46 @@ b = \mathtt{block\_table}[\mathrm{request},i]
 $$
 
 $$
-\mathrm{slot} = bB+o
+\mathrm{slot} = b\,B_{\mathrm{blk}}+\mathrm{off}
 $$
 
-其中：
+**白话：**一个 token 的位置先回答两个问题：它在第几个逻辑 block，以及在这个 block 里排第几格；
+再用 block table 把“逻辑第几块”换成“物理池里的第几块”，物理块的起点加上块内偏移，就是展平后的槽位号。
 
-- `i` 是逻辑 block index；
-- `o` 是页内 token offset；
-- `b` 是这张表对应的物理 block ID；
-- `slot` 是把物理 block 与页内位置展平后的 token slot。
+**其中：**
+
+- $i$ 是逻辑 block index（本节局部字母，无单位）；
+- $\mathrm{off}$ 是页内 token offset，取值 $0\ldots B_{\mathrm{blk}}-1$，单位 token；
+- $b$ 是这张表对应的物理 block ID（本节局部字母，无单位）；`request` 选出表里属于该请求的那一行；
+- $\mathrm{slot}$ 是把物理 block 与页内位置展平后的 token slot，单位 token（槽位），**不是字节地址**。
+
+**怎么算出来：**
+
+1. 把请求的 token 按每 $B_{\mathrm{blk}}$ 个一组切块：第 0 块装位置 $0\ldots B_{\mathrm{blk}}-1$，第 1 块装
+   $B_{\mathrm{blk}}\ldots 2B_{\mathrm{blk}}-1$，依此类推。所以位置 $\mathrm{pos}$ 落在第 $\lfloor \mathrm{pos}/B_{\mathrm{blk}}\rfloor$ 块（向下取整的整除）。
+2. 前 $i$ 块一共装了 $iB_{\mathrm{blk}}$ 个 token，所以 $\mathrm{pos}$ 在块里排第 $\mathrm{pos}-iB_{\mathrm{blk}}$ 位；
+   这个差正好是 $\mathrm{pos}$ 除以 $B_{\mathrm{blk}}$ 的余数，即 $\mathrm{off}$。
+3. block table 的第 $i$ 项给出该逻辑块住在物理池的第 $b$ 块。
+4. 物理池把所有块首尾相接、每块 $B_{\mathrm{blk}}$ 个槽，所以块 $b$ 的起点是前面 $b$ 个块的总槽数 $bB_{\mathrm{blk}}$；
+   起点加上 $\mathrm{off}$ 得到 $\mathrm{slot}$。
+
+代入 $B_{\mathrm{blk}}=4$、表 `[2,5,3]`、$\mathrm{pos}=9$：$i=\lfloor 9/4\rfloor=2$，$\mathrm{off}=9\bmod 4=1$，
+$b=\mathtt{block\_table}[\mathrm{request},2]=3$，$\mathrm{slot}=3\times4+1=13$。单位检查：前面的块数 $b$ 乘以每块的 token 数 $B_{\mathrm{blk}}$（token/块），
+得到 token（槽位）；要得到字节偏移，还要乘每个槽占的字节数，那取决于 cache 布局和 stride，本式不给出。
+
+**核对：**GPU 的 `_compute_slot_mappings_kernel`（`vllm/v1/worker/gpu/block_table.py:402`、`:403`、`:409`）逐行写着
+`block_indices = tl.where(mapping_enabled, local_positions // kv_block_size, 0)`、`block_offsets = local_positions % kv_block_size`、
+`slot_ids = block_numbers * kv_block_size + block_offsets`，其中无 context parallelism 时 `local_positions` 就是 `positions`；
+随书 `slot_for_position()`（`examples/ch06_paged_addressing.py`）实现同一公式，6.4.1 的表由测试固定。
 
 ```mermaid
 flowchart LR
-    P["position p"] --> D["divide by B"]
+    P["position pos"] --> D["divide by B_blk"]
     D --> I["logical block i"]
-    D --> O["offset o"]
+    D --> O["offset off"]
     I --> T["b = table[i]"]
-    T --> MUL["b times B"]
-    MUL --> ADD["plus o"]
+    T --> MUL["b times B_blk"]
+    MUL --> ADD["plus off"]
     O --> ADD
     ADD --> SLOT["flat physical slot"]
 ```
@@ -272,9 +294,9 @@ flowchart LR
 
 ### 6.4.1 手算一个非连续例子
 
-设 `B=4`，请求块表为 `[2, 5, 3]`：
+设 $B_{\mathrm{blk}}=4$，请求块表为 `[2, 5, 3]`：
 
-| position `p` | logical block `i` | offset `o` | physical block `b` | slot |
+| position $\mathrm{pos}$ | logical block $i$ | offset $\mathrm{off}$ | physical block $b$ | slot |
 |---:|---:|---:|---:|---:|
 | 0 | 0 | 0 | 2 | 8 |
 | 1 | 0 | 1 | 2 | 9 |
@@ -313,9 +335,27 @@ manager 坐标，直到构造 backend metadata 时才由 `AttentionGroup` 转换
 backend kernel table: [6, 7, 10, 11]
 ```
 
-若 `A` 是 allocation block size、`K` 是 kernel block size，两者单位均为 token/block，
-则每个 manager block 包含 `r=A/K` 个 kernel blocks，要求 `A % K == 0`。连续拆页时
-manager ID `m` 对应 `m*r+j`，其中 `j=0..r-1`。
+若 $B_{\mathrm{mgr}}$ 是 allocation（manager）block size、$B_{\mathrm{ker}}$ 是 kernel block size，两者单位均为
+token/block，则每个 manager block 包含 $\kappa$ 个 kernel blocks，要求 $B_{\mathrm{mgr}}\bmod B_{\mathrm{ker}}=0$。
+连续拆页时 manager block ID $i_{\mathrm{mgr}}$ 对应的 kernel block ID 是：
+
+$$
+\kappa=\frac{B_{\mathrm{mgr}}}{B_{\mathrm{ker}}},\qquad
+\mathtt{kernel\_id}=i_{\mathrm{mgr}}\,\kappa+j,\quad j=0,1,\dots,\kappa-1
+$$
+
+**白话：**一页 manager block 被均匀切成 $\kappa$ 份 kernel block；表里每个 manager ID 因此展开成连续的 $\kappa$ 个 kernel ID。
+
+**其中：**$\kappa$ 是一个 manager block 含有的 kernel block 数（无单位）；$i_{\mathrm{mgr}}$ 是 manager block 的 ID；
+$j$ 是这一页内第几份（从 0 起）；$\mathtt{kernel\_id}$ 是 backend 读表里的 block ID。
+
+**怎么算出来：**把物理池想成按 kernel 粒度重新编号：第 $i_{\mathrm{mgr}}$ 个 manager block 之前有 $i_{\mathrm{mgr}}$ 页，每页贡献 $\kappa$ 个 kernel 页，
+所以它自己的第一份编号是 $i_{\mathrm{mgr}}\kappa$，第 $j$ 份是 $i_{\mathrm{mgr}}\kappa+j$。代入上面的例子：$B_{\mathrm{mgr}}=32$、
+$B_{\mathrm{ker}}=16$，$\kappa=32/16=2$，$32\bmod16=0$ 满足整除；ID 3 展开成 $3\times2+0=6$、$3\times2+1=7$，
+ID 5 展开成 $10$、$11$，合起来就是 `[6, 7, 10, 11]`。
+
+**核对：**`AttentionGroup.map_to_kernel_block_table()`（`vllm/v1/worker/utils.py:398`）用 `kernel_block_offsets = torch.arange(spec.block_size // self.kernel_block_size)`（即 $0,1,\dots,\kappa-1$，`:340`）加上 `block_table * (kernel_block_stride or blocks_per_kv_block)`（`:407-410`）；随书 `expand_manager_blocks()`
+与 `tests/test_ch06_paged_addressing.py` 固定了这个例子，不能整除时拒绝。
 
 ```mermaid
 flowchart LR
@@ -331,26 +371,72 @@ flowchart LR
 **源码事实：** `AttentionGroup.create_metadata_builders()` 解析 kernel size 并分配每个
 ubatch 的持久输出表；`build_metadata()` 经 `_with_kernel_block_table()` 调用
 `map_to_kernel_block_table()`（`vllm/v1/worker/utils.py:398`），再进入具体 builder。MRV2 通过
-`build_attn_metadata()`（`vllm/v1/worker/gpu/attn_utils.py:503`）进入同一 `AttentionGroup` 包装。
+`build_attn_metadata()`（`vllm/v1/worker/gpu/attn_utils.py:503`）进入同一 `AttentionGroup` 包装；
+CPU runner 另有一份同构的 `build_attn_metadata()`（`vllm/v1/worker/cpu/attn_utils.py:246`），同样经 `AttentionGroup.build_metadata()` 转换读表。
 
 [源码] `vllm/v1/worker/utils.py` - `AttentionGroup.create_metadata_builders`、
 `build_metadata`、`_with_kernel_block_table`、`map_to_kernel_block_table`
 
 [源码] `vllm/v1/worker/gpu/attn_utils.py` - `build_attn_metadata`
 
-### 6.5.1 Packed layout 不能总用 `m*r+j`
+[源码] `vllm/v1/worker/cpu/attn_utils.py` - `build_attn_metadata`
+
+### 6.5.1 Packed layout 不能总用连续拆页的换算式
 
 当多个层的 page 交错存储时，同一层相邻 manager blocks 之间还夹着其他层的数据。
 `map_kv_cache_to_kernel_blocks()` 会按真实 stride 建立 kernel view，并设置
 `kernel_block_stride`。此时转换式为：
 
-```text
-kernel_id = manager_id * (kernel_block_stride or r) + j
+$$
+\mathtt{kernel\_id}=i_{\mathrm{mgr}}\cdot(\mathtt{kernel\_block\_stride}\ \mathrm{or}\ \kappa)+j
+$$
+
+**白话：**还是“第几页乘每页占的编号数，再加页内第几份”，只是每页占的编号数不再等于 $\kappa$，
+而是实际量出来的 stride；stride 为 0 时才退回 $\kappa$。
+
+**其中：**$\kappa$ 只表示一页拆几份；`kernel_block_stride` 表示两个 manager page 起点之间相隔
+多少 kernel-page 单位，不一定相等（`or` 与源码 `self.kernel_block_stride or blocks_per_kv_block` 一致，
+即 stride 为 0 时取 $\kappa$）。
+
+**怎么算出来：**源码在绑定 packed cache 时用 `kernel_block_stride = kv_cache.stride(0) // page_stride`
+（`vllm/v1/worker/utils.py:476`）：相邻 manager page 起点的距离，除以一个 kernel page 的距离。
+这个商里既包含本层的 $\kappa$ 份，也包含夹在中间的其他层的页。例如教学布局 $\kappa=2$、`kernel_block_stride` 为 5，
+ID 3 展开成 $3\times5+0=15$、$3\times5+1=16$，即 `[15,16]`，而不是连续拆页的 $3\times2+0=6$、$3\times2+1=7$ 即 `[6,7]`；
+ID 4 的起点是 $4\times5=20$，中间的 17、18、19 是其他层的页，本层永远不会读到。
+
+```mermaid
+flowchart LR
+    M["manager block ID 3 (B_mgr=32, B_ker=16, kappa=2)"] --> Q{"cache 是 packed layout?"}
+    Q -->|"否: kernel_block_stride = 0, 取 kappa = 2"| C["kernel_id = 3*2 + j: 6, 7"]
+    Q -->|"是: kernel_block_stride = 5"| P["kernel_id = 3*5 + j: 15, 16"]
+    C --> CN["下一个 manager block 4 展开为 8, 9, 紧接在 7 后面"]
+    P --> PN["下一个 manager block 4 从 4*5 = 20 开始, 17 18 19 属于其他层"]
 ```
 
-`r` 只表示一页拆几份，`kernel_block_stride` 表示两个 manager page 起点之间相隔
-多少 kernel-page 单位，不一定相等。例如教学布局 `r=2`、stride=5，ID 3 展开成
-`[15,16]`，而不是 `[6,7]`。后者只适用于无额外间隔的连续拆页。
+> **读图方法：** 先看菱形：它问的是 cache 是否被绑定成 packed view；左边分支是连续拆页，右边分支多出 stride 间隔。读完两条分支后比较最下面两个框：同一个 manager ID 3，在两种布局里得到的 kernel ID 不同，而且右边相邻 manager block 之间有别的层的页。
+
+**核对：**`map_to_kernel_block_table()` 的 `alpha=self.kernel_block_stride or blocks_per_kv_block`（`vllm/v1/worker/utils.py:410`）；
+随书 `expand_manager_blocks(..., kernel_block_stride=5)` 与 `tests/test_ch06_paged_addressing.py` 固定了 `[15,16]`。
+
+写地址也要跟着换算：设置了 `maps_slot_mapping` 的 group（例如 DFlash drafter，`vllm/v1/worker/gpu/spec_decode/dflash/speculator.py:40`），
+`AttentionGroup.map_to_kernel_slot_mapping()`（`vllm/v1/worker/utils.py:415`，注释写作
+“offset `t` of block `b` moves to `b * kernel_block_stride * kernel_block_size + t`”）把 manager 坐标的 slot 改写成 kernel 坐标：
+
+$$
+\mathtt{kernel\_slot}=\mathrm{slot}+\left\lfloor \frac{\mathrm{slot}}{B_{\mathrm{mgr}}}\right\rfloor
+\bigl(\mathtt{kernel\_block\_stride}\cdot B_{\mathrm{ker}}-B_{\mathrm{mgr}}\bigr)
+$$
+
+**白话：**同一个 token 的槽位，在 packed 视图里比 manager 坐标多出“前面每个 manager block 多占的那段间隔”。
+
+**其中：**$\mathtt{kernel\_slot}$ 是 kernel 坐标下的槽位，其余符号同上；$\lfloor \mathrm{slot}/B_{\mathrm{mgr}}\rfloor$ 就是该 token 所在的 manager 块号 $b$。
+
+**怎么算出来：**manager 坐标里 $\mathrm{slot}=b\,B_{\mathrm{mgr}}+\mathrm{off}$（$\mathrm{off}$ 为块内偏移），$\lfloor \mathrm{slot}/B_{\mathrm{mgr}}\rfloor=b$。
+kernel 坐标里块 $b$ 的起点是 $b\cdot\mathtt{kernel\_block\_stride}\cdot B_{\mathrm{ker}}$，所以新槽位是 $b\cdot\mathtt{kernel\_block\_stride}\cdot B_{\mathrm{ker}}+\mathrm{off}$，
+与旧槽位相差 $b\,(\mathtt{kernel\_block\_stride}\cdot B_{\mathrm{ker}}-B_{\mathrm{mgr}})$，这正是源码里的 `shift`（`:429`，
+`slot_mapping < 0` 的 padding 槽位保持不变）。代入 $B_{\mathrm{mgr}}=32$、$B_{\mathrm{ker}}=16$、`kernel_block_stride` 为 5、
+$b=3$、$\mathrm{off}=20$：$\mathrm{slot}=3\times32+20=116$，$\mathtt{shift}=5\times16-32=48$，$\mathtt{kernel\_slot}=116+3\times48=260$；
+另一头验证：偏移 20 落在第 $\lfloor 20/16\rfloor=1$ 份，kernel ID 为 $3\times5+1=16$，页内偏移 $20\bmod16=4$，$16\times16+4=260$，一致。
 
 源码会校验可表达的 cache view，不兼容的 token/state 布局会抛错并提示降低 block size
 或选择 layer-compact layout。`prepare_kernel_block_sizes()` 也不会对 block-outer
@@ -362,10 +448,10 @@ packing 无条件做 group-wide 拆分。因此 backend 接受某个除数，并
 
 ### 6.5.2 写地址与读地址如何保持一致
 
-普通连续拆页下，`A=32`、`K=16`、manager ID 3 内偏移 20，写 slot 是
-`3*32+20=116`；kernel 表对应 ID 7、页内偏移 4，读 slot 是 `7*16+4=116`。
+普通连续拆页下，$B_{\mathrm{mgr}}=32$、$B_{\mathrm{ker}}=16$、manager ID 3 内偏移 20，写 slot 是
+`3*32+20=116`；kernel 表对应 ID 7（偏移 20 在第 1 份，$3\times2+1=7$）、页内偏移 $20\bmod16=4$，读 slot 是 `7*16+4=116`。
 这证明该教学布局两套坐标可指向同一位置，不代表 packed layout 的每个地址都能用
-同一个扁平公式比较；后者还必须核对 tensor view 的 stride。
+同一个扁平公式比较；packed 时要先按上一小节的 `kernel_slot` 换算（同一个 token 变成 260），还必须核对 tensor view 的 stride。
 
 这不是把物理 allocation 变成多个独立所有权对象。Scheduler 始终管理 manager block；
 attention group 为具体 backend 提供适配后的表与 cache view。
@@ -447,6 +533,13 @@ UVA 不是所有数据都免拷贝的保证；须同时检查平台能力和 ten
 
 [源码] `vllm/v1/worker/gpu/block_table.py` - `BlockTables.apply_staged_writes`、`gather_block_tables`
 
+**CPU runner 里的对应实现。**以上都是 GPU runner（`vllm/v1/worker/gpu/`）的路径。`vllm/v1/worker/cpu/` 下另有一份 `CPUBlockTables`（`block_table.py:9`），
+同样提供 `gather_block_tables()`（`:90`）、`get_dummy_block_tables()`（`:145`）和 `compute_slot_mappings()`（`:156`）：
+gather 与 slot mapping 分别交给 C++ 算子 `ops.gather_block_table_cpu`、`ops.compute_slot_mapping_cpu`，不经过 Triton，调用处也没有 context parallelism 参数；
+旧行清零（`_num_dirty_rows`，`:61`）和滑窗 null block（`:130-142`）的规则与 GPU 一致（见 6.6.3、6.6.4）。因此 gather、dummy 清零、null block、slot mapping 这几条地址规则在两种 runner 上语义相同，差别只在执行方式。
+
+[源码] `vllm/v1/worker/cpu/block_table.py` - `CPUBlockTables.gather_block_tables`、`get_dummy_block_tables`、`compute_slot_mappings`
+
 ### 6.6.3 为什么 dummy 行必须清零
 
 CUDA Graph 希望 replay 使用同一批持久 tensor 地址，因此 dummy run 不能随意新建表。当前
@@ -474,7 +567,7 @@ write 是互补保护，不能以“table 已清零”替代有效 request 检�
 这一步只有 3 个，第 3～7 行仍留着上一步真实的 block ID。那些 block 可能已经释放并分给别的请求，
 如果后面的 dummy run 或 profiling 把这些行当成有效行，写入就会落进别人的块。v0.33.0 为此给
 `BlockTables` 记录 `_num_dirty_rows`（`vllm/v1/worker/gpu/block_table.py:88`）：
-`get_dummy_block_tables()` 清零 `max(num_reqs, _num_dirty_rows)` 行（`:222`），
+`get_dummy_block_tables()` 清零 `max(num_reqs, _num_dirty_rows)` 行（`:222`；上一步 8 个请求、这次 dummy run 只要 3 行时，$\max(3,8)=8$，第 3～7 行也被清零），
 `gather_block_tables()` 在使用共享输出时同样把行数扩成 `max(num_reqs_padded, _num_dirty_rows)`
 （`:191`），之后把 `_num_dirty_rows` 更新为本步有效请求数。调用方自己提供 `out` 时不碰共享行。
 对应的上游修复是 [61bb59087](https://github.com/vllm-project/vllm/commit/61bb59087)
@@ -497,30 +590,49 @@ mask 只能在算分数时屏蔽它们，若那块内存里恰好是 NaN，NaN �
 要换成 null block 的表项个数是：
 
 $$
-n_{\mathrm{null}}=\left\lfloor \frac{\max(p_0-R,\,0)}{B} \right\rfloor
+n_{\mathrm{null}}=\left\lfloor \frac{\max(\mathrm{pos}_0-N_{\mathrm{ret}},\,0)}{B_{\mathrm{blk}}} \right\rfloor
 $$
 
-读法：先算出本步第一个 query 能看到的最早 token 位置 $p_0-R$，再看这个位置之前有多少个**完整**的
+**白话：**先算出本步第一个 query 能看到的最早 token 位置 $\mathrm{pos}_0-N_{\mathrm{ret}}$，再数这个位置之前有多少个**完整**的
 block；这些块整块都在窗口之外，可以安全换掉。跨在窗口边界上的那个块不能换，因为里面还有窗口内的 token。
 
-其中：
+**其中：**
 
-- $p_0$：该请求本步第一个被调度 token 的位置，即 `num_computed_tokens`，单位 token；
-- $R$：该 KV cache group 的 `sliding_window_reach`，等于
+- $\mathrm{pos}_0$：该请求本步第一个被调度 token 的位置，即 `num_computed_tokens`，单位 token；
+- $N_{\mathrm{ret}}$：该 KV cache group 的 `sliding_window_reach`，等于
   `SlidingWindowSpec.num_retained_tokens = sliding_window - 1 + extra_retained_tokens`
-  （`vllm/v1/kv_cache_interface.py:929`），单位 token；
-- $B$：该 group 的 manager block size，单位 token/block；
-- $n_{\mathrm{null}}$：从这一行开头数起要换成 null block 的表项个数，即逻辑块下标 $i<n_{\mathrm{null}}$ 的表项。
+  （`vllm/v1/kv_cache_interface.py:929`），单位 token；这里减 1 是因为窗口把 query 自己也算在内；
+- $B_{\mathrm{blk}}$：该 group 的 manager block size，单位 token/block；
+- $n_{\mathrm{null}}$：从这一行开头数起要换成 null block 的表项个数，即逻辑块下标 $i<n_{\mathrm{null}}$ 的表项（无单位）。
 
-手算例子：$B=4$，`sliding_window=8`（无额外保留，所以 $R=7$），某请求 $p_0=30$。
-第一个 query 能看到 token 23～30。$n_{\mathrm{null}}=\lfloor (30-7)/4\rfloor=5$，
+**怎么算出来：**
+
+1. 窗口大小为 `sliding_window` 时，位置 $\mathrm{pos}$ 的 query 能看到 $\mathrm{pos}-(\mathtt{sliding\_window}-1)\ldots\mathrm{pos}$ 这 `sliding_window` 个 token；
+   不加额外保留时 $N_{\mathrm{ret}}=\mathtt{sliding\_window}-1$（`extra_retained_tokens` 大于 0 时 $N_{\mathrm{ret}}$ 更大、窗口起点更靠前，只会少换几个块：额外保留的 token 不会被 attend，但它们的 block 要继续保留，见 `vllm/v1/kv_cache_interface.py` 里 `extra_retained_tokens` 的注释）。本步第一个 query 在 $\mathrm{pos}_0$，它能看到的最早位置是 $\mathrm{pos}_0-N_{\mathrm{ret}}$；
+   后面的 query 位置更大，窗口只会右移，所以位置小于 $\mathrm{pos}_0-N_{\mathrm{ret}}$ 的 token 本步没有任何 query 看得见。
+2. 若 $\mathrm{pos}_0-N_{\mathrm{ret}}\le0$，说明窗口还没离开序列开头，没有 token 在窗口外：$\max(\mathrm{pos}_0-N_{\mathrm{ret}},0)=0$，$n_{\mathrm{null}}=0$。
+3. 下面把 $\mathrm{pos}_0-N_{\mathrm{ret}}$ 口头叫作“窗口起点”（只是称呼，式子里仍写原来的算式）。
+   逻辑块 $i$ 装位置 $iB_{\mathrm{blk}}\ldots(i+1)B_{\mathrm{blk}}-1$。它整块在窗口起点之下，当且仅当最后一个位置 $(i+1)B_{\mathrm{blk}}-1<\mathrm{pos}_0-N_{\mathrm{ret}}$，
+   即 $(i+1)B_{\mathrm{blk}}\le\mathrm{pos}_0-N_{\mathrm{ret}}$，即 $i+1\le(\mathrm{pos}_0-N_{\mathrm{ret}})/B_{\mathrm{blk}}$。满足条件的 $i=0,1,\dots$ 恰有
+   $\lfloor(\mathrm{pos}_0-N_{\mathrm{ret}})/B_{\mathrm{blk}}\rfloor$ 个，这就是 $n_{\mathrm{null}}$。
+4. 含有窗口起点的那个块不满足上面的不等式，所以不被换掉，窗口内的 token 仍可读。
+
+手算例子：$B_{\mathrm{blk}}=4$，`sliding_window=8`（无额外保留，所以 $N_{\mathrm{ret}}=7$），某请求 $\mathrm{pos}_0=30$。
+第一个 query 能看到 token 23～30，窗口起点 $30-7=23$。$n_{\mathrm{null}}=\lfloor (30-7)/4\rfloor=5$，
 逻辑块 0～4（token 0～19）整块在窗口之外；块 5 覆盖 token 20～23，含 token 23，所以保留。
 持久表里的一行 `[11, 4, 9, 6, 2, 8, 3, 5]` gather 到 forward 表后变成 `[0, 0, 0, 0, 0, 8, 3, 5]`。
+边界情形：$\mathrm{pos}_0=31$ 时窗口起点是 $31-7=24$，$n_{\mathrm{null}}=\lfloor24/4\rfloor=6$，块 5（token 20～23）恰好整块在窗口起点之下，这一行变成
+`[0, 0, 0, 0, 0, 0, 3, 5]`；$\mathrm{pos}_0=5$ 时 $5-7=-2<0$，$n_{\mathrm{null}}=0$，整行原样复制。
+
+**核对：**GPU 的 `_gather_block_tables_kernel` 里写作 `tl.where(reach > 0, tl.maximum(first_pos - reach, 0) // block_size, 0)`
+（`vllm/v1/worker/gpu/block_table.py:319-321`，`reach` 即 $N_{\mathrm{ret}}$，`first_pos` 即 $\mathrm{pos}_0$）；
+CPU runner 的 `CPUBlockTables.gather_block_tables()` 用 `num_computed_tokens[idx_mapping].sub(reach)`、`clamp_min_(0)`、`div(block_size, rounding_mode="floor")`
+算出同一个数（`vllm/v1/worker/cpu/block_table.py:133-136`）。上面三个算例的数字用脚本复算过，输出写在 PR 正文里。
 
 ```mermaid
 flowchart TD
-    ROW["持久表中的一行: 逻辑块 0..m 的 block ID"] --> CALC["n_null = floor(max(p0-R, 0) / B)"]
-    OFF["关闭条件: R=0(无滑窗)/ context parallelism>1 / 未传 num_computed_tokens"] -.-> COPY
+    ROW["持久表中的一行: 逻辑块 0..末块 的 block ID"] --> CALC["n_null = floor(max(pos_0-N_ret, 0) / B_blk)"]
+    OFF["关闭条件: N_ret=0(无滑窗)/ context parallelism>1 / 未传 num_computed_tokens"] -.-> COPY
     CALC --> SPLIT{"逻辑块下标 i < n_null ?"}
     SPLIT -->|"是: 整块在窗口下沿之外"| NULL["写入 null block (ID 0)"]
     SPLIT -->|"否: 窗口内或跨窗口边界"| COPY["原样复制 block ID"]
@@ -532,7 +644,7 @@ flowchart TD
 > **读图方法：** 这是 `gather_block_tables` 在滑窗 group 上的判定流程图。先从上向下看一行 block table 如何先算出 $n_{\mathrm{null}}$，再沿“是/否”两条分支看每个表项被置零还是原样复制；虚线表示整个屏蔽步骤被关闭时直接走复制分支。
 
 这一步发生在 gather 的 Triton kernel 里（`_gather_block_tables_kernel` 的 `MASK_SLIDING_WINDOW` 分支，
-`vllm/v1/worker/gpu/block_table.py:275` 起，`num_null` 在 `:314-319`），读源块时用
+`vllm/v1/worker/gpu/block_table.py:275` 起，`num_null` 在 `:314-321`），读源块时用
 `mask=(offset >= num_null) & (offset < num_blocks), other=0` 把前 `num_null` 项读成 0，所以不改动持久表本身，
 只影响本步的 forward 表。上游修复是 [e1f314164](https://github.com/vllm-project/vllm/commit/e1f314164)
 （[#60767](https://github.com/vllm-project/vllm/pull/60767)），测试为
@@ -546,33 +658,46 @@ flowchart TD
 
 staged write 的任务是把“某个请求行从第几列起写入哪些 block ID”提交到设备上的持久表。
 新请求的 prompt 很长时，一行可以有上千个 block ID。v0.32.0 里一条写入由一个 Triton program 循环复制；
-v0.33.0 把 kernel grid 改成二维：第 0 维是写入条数 $n$，第 1 维是块数 $n_{\mathrm{chunk}}$，
+v0.33.0 把 kernel grid 改成二维：第 0 维是本批的写入条数，第 1 维是块数 $n_{\mathrm{chunk}}$，
 每个 program 只复制 `_WRITE_BLOCK_SIZE = 1024` 个元素（`vllm/v1/worker/gpu/buffer_utils.py:27`）。
 
 $$
-n_{\mathrm{chunk}}=\max\left(\left\lceil \frac{L_{\max}}{1024} \right\rceil,\ 1\right)
+n_{\mathrm{chunk}}=\max\left(\left\lceil \frac{E_{\mathrm{max}}}{1024} \right\rceil,\ 1\right)
 $$
 
-读法：用本批所有写入里最长的一条决定要几块；`max(…, 1)` 保证 grid 第 1 维至少为 1。
+**白话：**每个 program 只管 1024 个元素；用本批所有写入里最长的一条决定要几块，这样最长的那条也能被完整覆盖；
+`max(…, 1)` 保证 grid 第 1 维至少为 1。
 
-其中：
+**其中：**
 
-- $L_{\max}$：本批 staged write 中最长一条的元素数（`_staged_write_max_len`，`StagedWriteTensor` 在 `:169`，
-  单 group 与 `FusedStagedWriter.apply` 都取各 tensor 的最大值）；
+- $E_{\mathrm{max}}$：本批 staged write 中最长一条的元素数（`_staged_write_max_len`，`StagedWriteTensor` 在 `:169`，
+  单 group 与 `FusedStagedWriter.apply` 都取各 tensor 的最大值），单位是 block table 里的 int32 元素；
 - $1024$：`_WRITE_BLOCK_SIZE`，每个 program 负责的元素数；
-- $n_{\mathrm{chunk}}$：grid 第 1 维大小，由 `_num_write_chunks`（`:369`）计算。
+- $n_{\mathrm{chunk}}$：grid 第 1 维大小，由 `_num_write_chunks`（`:369`）计算，单位是块（chunk）。
 
-手算例子：本批有 3 条写入，长度分别为 5、3000、64 个元素，则 $L_{\max}=3000$，
-$n_{\mathrm{chunk}}=\lceil 3000/1024\rceil=3$，grid 为 $(3,3)$ 共 9 个 program；长度 5 的那条只有第 0 块有活干，
+**怎么算出来：**
+
+1. 每个 program 复制 1024 个元素，所以覆盖 $E_{\mathrm{max}}$ 个元素需要 $\lceil E_{\mathrm{max}}/1024\rceil$ 个 program：
+   整除时刚好用完，有余数时最后一个 program 只用一部分（其余位置被 mask 掉）。
+2. 所有写入共用一次 kernel launch、同一个 grid 第 1 维，所以第 1 维必须够最长的那一条，按最长的 $E_{\mathrm{max}}$ 来算；短的写入多出来的 program 全被 mask 掉。
+3. $E_{\mathrm{max}}=0$ 时 $\lceil 0/1024\rceil=0$，外面的 $\max(\cdot,1)$ 把它抬到 1。
+
+边界值：$E_{\mathrm{max}}=1024$ 得 1，$E_{\mathrm{max}}=1025$ 得 $\lceil1025/1024\rceil=2$。
+
+手算例子：本批有 3 条写入，长度分别为 5、3000、64 个元素，则 $E_{\mathrm{max}}=3000$，
+$n_{\mathrm{chunk}}=\lceil 3000/1024\rceil=3$（$3\times1024=3072\ge3000$，而 $2\times1024=2048<3000$），grid 为 $(3,3)$ 共 $3\times3=9$ 个 program；长度 5 的那条只有第 0 块有活干，
 其余 program 的 mask 全为假，不读也不写。
+
+**核对：**`_num_write_chunks(max_len)` 就是 `max(triton.cdiv(max_len, _WRITE_BLOCK_SIZE), 1)`（`vllm/v1/worker/gpu/buffer_utils.py:369-371`）；
+kernel 里每个 program 用 `tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)` 取自己的 1024 元素并用 `block < content_len` 做 mask（`:405-406`）。
 
 ```mermaid
 flowchart LR
-    W["staged writes: 行号 / 起始列 / 内容 / 累计长度"] --> MAXL["L_max = 最长一条的元素数"]
-    MAXL --> GRID["grid = (写入条数 n, n_chunk)"]
-    GRID --> P0["program (i, 0): 复制内容 [0, 1024)"]
-    GRID --> P1["program (i, 1): 复制内容 [1024, 2048)"]
-    GRID --> PK["program (i, c): 复制内容 [1024c, 1024(c+1))，越过本条长度的位置被 mask 掉"]
+    W["staged writes: 行号 / 起始列 / 内容 / 累计长度"] --> MAXL["E_max = 最长一条的元素数"]
+    MAXL --> GRID["grid = (写入条数, n_chunk)"]
+    GRID --> P0["program (写入 w, 块 0): 复制内容 [0, 1024)"]
+    GRID --> P1["program (写入 w, 块 1): 复制内容 [1024, 2048)"]
+    GRID --> PK["program (写入 w, 块 c): 复制内容 [1024c, 1024(c+1))，越过本条长度的位置被 mask 掉"]
     P0 --> DST["持久 block table 第 row_i 行，从 start_i 列起"]
     P1 --> DST
     PK --> DST
@@ -701,17 +826,30 @@ C: scheduled 2 tokens
 query_start_loc = [0, 3, 4, 6]
 ```
 
-于是请求 `r` 的 query 区间是：
+于是请求 $r$ 的 query 区间，以及它的 query length 是：
 
 $$
-[q_r, q_{r+1})
+[\mathrm{qsl}_r,\ \mathrm{qsl}_{r+1}),\qquad N_{q,r} = \mathrm{qsl}_{r+1} - \mathrm{qsl}_r
 $$
 
-query length 是：
+**白话：**`query_start_loc` 是“每个请求的 query 在展平 batch 里从第几行开始”的累计表；
+请求 $r$ 占的行就是从自己的起点到下一个请求的起点（不含），长度是两个起点之差。
 
-$$
-L^Q_r = q_{r+1} - q_r
-$$
+**其中：**$\mathrm{qsl}_r$ 是 `query_start_loc[r]`，请求 $r$ 的 query 在展平 batch 里的起点（行号，从 0 起，单位 token）；
+区间写成 `[a, b)` 表示含 a、不含 b；$N_{q,r}$ 是请求 $r$ 本步的 query token 数（单位 token）。
+
+**怎么算出来：**
+
+1. 起点从 0 开始：$\mathrm{qsl}_0=0$。
+2. 每个请求排在上一个请求后面，所以下一个起点 = 上一个起点 + 上一个请求本步的 query 长度，即 $\mathrm{qsl}_{r+1}=\mathrm{qsl}_r+N_{q,r}$，也就是各请求 query 长度的累加和。
+3. 这一式移项就是 $N_{q,r}=\mathrm{qsl}_{r+1}-\mathrm{qsl}_r$；区间“含起点不含终点”使相邻请求既不空隙也不重叠，最后一个起点等于本步 token 总数。
+
+代入 A、B、C 三个请求，$(N_{q,\mathrm{A}},N_{q,\mathrm{B}},N_{q,\mathrm{C}})=(3,1,2)$：$\mathrm{qsl}=[0,\ 0+3,\ 3+1,\ 4+2]=[0,3,4,6]$。
+请求 A 的区间是 $[0,3)$，占第 0、1、2 行；B 是 $[3,4)$，占第 3 行；C 是 $[4,6)$，占第 4、5 行。
+反过来验算：$N_{q,\mathrm{A}}=3-0=3$，$N_{q,\mathrm{B}}=4-3=1$，$N_{q,\mathrm{C}}=6-4=2$，合计 $6$ 个 token，等于最后一个起点。
+
+**核对：**GPU runner 在 `vllm/v1/worker/gpu/model_runner.py:1534-1535` 先置 `query_start_loc_np[0] = 0`，再用 `np.cumsum(num_scheduled_tokens_np, out=query_start_loc_np[1 : num_reqs + 1])` 求累加和（`:1538` 把后面的 padding 位置填成 token 总数以保持非递减）；
+随书 `build_query_start_loc()` 做同一件事。
 
 ```mermaid
 flowchart LR
@@ -728,8 +866,18 @@ flowchart LR
 `seq_lens[r]` 是本轮执行后请求可见的总序列长度。已计算 context 长度可以在设备上得到：
 
 $$
-L^{\mathrm{context}}_r = L^{\mathrm{seq}}_r - L^{Q}_r
+N_{\mathrm{ctx},r} = S_r - N_{q,r}
 $$
+
+**白话：**请求这一步要看的总长度，减去这一步新算的 query 行数，剩下的就是之前已经算过、只需要从 cache 里读的 context。
+
+**其中：**$S_r$ 是请求 $r$ 本步执行后可见的总序列长度（`seq_lens[r]`，单位 token）；$N_{q,r}$ 是它本步的 query token 数；
+$N_{\mathrm{ctx},r}$ 是已有的 context token 数，也就是 `num_computed_tokens`（单位 token）。
+
+**怎么算出来：**请求本步执行后能看到的 token，由两部分组成：之前已经算完的 $N_{\mathrm{ctx},r}$ 个，加上这一步新算的 $N_{q,r}$ 个，
+即 $S_r=N_{\mathrm{ctx},r}+N_{q,r}$（源码里 `seq_len = num_computed_tokens + query_len`，
+`vllm/v1/worker/gpu/input_batch.py:383`；本步各 query 的位置从 `num_computed_tokens` 起依次加 1，`:389`）。移项得 $N_{\mathrm{ctx},r}=S_r-N_{q,r}$。
+下面的表就是用这个式子算的：A 的 $11-3=8$，B 的 $25-1=24$，C 的 $6-2=4$，单位都是 token。
 
 例如：
 
@@ -749,7 +897,7 @@ flowchart TB
 > **读图方法：** 这是“Ragged Batch：两个边界数组胜过 padding 矩阵”的流程图。先从上向下只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
 **源码事实：** `CommonAttentionMetadata.compute_num_computed_tokens()`（`vllm/v1/attention/backend.py:491`）
-在 device 上执行 `seq_lens - query_lens`，其中 `query_lens` 就是 `query_start_loc` 的相邻差（`:494`），结果缓存在
+在 device 上执行 `seq_lens - query_lens`（即上面的 $S_r-N_{q,r}$），其中 `query_lens` 就是 `query_start_loc` 的相邻差（`:494`，即 $N_{q,r}$），结果缓存在
 `_num_computed_tokens_cache`。旧的 `naive_query_lens()` 辅助方法随 #63373 删除，调用者直接用这个相邻差。
 
 ## 6.9 Prefill、Decode 与 Mixed Batch
@@ -837,11 +985,20 @@ flowchart TD
 
 `num_actual_tokens` 不是通用的“去 padding token 数”。在本章固定 revision，
 `CommonAttentionMetadata` 声明旁仍保留重命名 TODO（`vllm/v1/attention/backend.py:417`，“可能含 padding，名字有误导性”）。
-唯一的主构造点是 MRV2 的 `build_attn_metadata()`（`attn_utils.py:578`），它把调用方传入的 `num_tokens` 原样写入
-`num_actual_tokens`、`num_reqs` 原样写入 `num_reqs`；而调用方 `DefaultModelState.prepare_attn`
-（`vllm/v1/worker/gpu/model_states/default.py:166`）按 CUDA Graph 模式选值：FULL graph 时（`:178`）取 padded 的
-`num_reqs_after_padding` / `num_tokens_after_padding`（`:180-181`），piecewise 与 eager 取未 padding 的 `num_reqs` / `num_tokens`（`:184-185`）。
-因而这个字段描述的是当前 metadata 覆盖的执行规模（FULL graph 下含 padding），不能用它代替 Scheduler 的
+主要的构造点是两份同构的 `build_attn_metadata()`：GPU runner 的 `vllm/v1/worker/gpu/attn_utils.py:503`（`CommonAttentionMetadata(` 在 `:578`），
+和 CPU runner 的 `vllm/v1/worker/cpu/attn_utils.py:246`（构造在 `:298`）。它们都把调用方传入的 `num_tokens` 原样写入
+`num_actual_tokens`、`num_reqs` 原样写入 `num_reqs`。GPU 一份的调用方有 `DefaultModelState.prepare_attn`（`gpu/model_states/default.py:221`）、
+`gpu/model_states/encoder_decoder.py:139`、`gpu/model_states/mamba_hybrid.py:344` 以及 speculative decoding 的 speculator 等；
+CPU 一份的调用方是 `cpu/model_states/default.py:145` 与 `cpu/model_states/encoder_decoder.py:124`。
+另有几处**不经过** `build_attn_metadata()` 的构造：encoder-only 模型状态直接构造（`gpu/model_states/encoder_only.py:216`、`cpu/model_states/encoder_only.py:167`，
+用的是 dummy block table 与 dummy slot mapping），以及从已有对象派生新对象的 `CommonAttentionMetadata.unpadded()`（`vllm/v1/attention/backend.py:526`）、
+`make_local_attention_virtual_batches()`（`vllm/v1/attention/backends/utils.py:754`）和 `make_kv_sharing_fast_prefill_common_attn_metadata()`（同文件 `:841`）。
+所以“只有 GPU 的 `build_attn_metadata()` 才构造它”不成立。
+
+数值怎么来取决于调用方：GPU 的 `DefaultModelState.prepare_attn`（`vllm/v1/worker/gpu/model_states/default.py:166`）按 CUDA Graph 模式选值：FULL graph 时（`:178`）取 padded 的
+`num_reqs_after_padding` / `num_tokens_after_padding`（`:180-181`），piecewise 与 eager 取未 padding 的 `num_reqs` / `num_tokens`（`:184-185`）；
+CPU 的 `prepare_attn`（`cpu/model_states/default.py:109`）没有 graph padding，直接取 `input_batch.num_reqs` / `input_batch.num_tokens`（`:118-119`）。
+因而这个字段描述的是当前 metadata 覆盖的执行规模（GPU FULL graph 下含 padding），不能用它代替 Scheduler 的
 `total_num_scheduled_tokens` 统计有效工作。
 
 FlashAttention builder 将该值传到自己的 metadata；forward 按它切片 query/output，并不会仅因
@@ -852,6 +1009,8 @@ FlashAttention builder 将该值传到自己的 metadata；forward 按它切片 
 [源码] `vllm/v1/attention/backend.py` - `CommonAttentionMetadata`
 
 [源码] `vllm/v1/worker/gpu/attn_utils.py` - `build_attn_metadata`（`CommonAttentionMetadata(` 构造）
+
+[源码] `vllm/v1/worker/cpu/attn_utils.py` - `build_attn_metadata`（`CommonAttentionMetadata(` 构造）
 
 [源码] `vllm/v1/worker/gpu/model_states/default.py` - `DefaultModelState.prepare_attn`
 
@@ -911,6 +1070,7 @@ sequenceDiagram
 MRV2 `prepare_attn()` 先用 `idx_mapping` gather block tables（v0.33.0 起同时传入
 `num_computed_tokens`，让滑窗 group 的窗口外表项变成 null block，见 6.6.4），再以
 `query_start_loc` 和 `positions` 计算所有 cache group 的 slot mappings（`vllm/v1/worker/gpu/model_runner.py:1665`）。
+CPU runner 的顺序相同：先用 `CPUBlockTables` gather 与算 slot mapping（`vllm/v1/worker/cpu/standalone_model_runner.py:910`、`:915`，见 6.6.2），再由 `prepare_attn()` 调 CPU 版 `build_attn_metadata()`。
 
 随后 Model Runner 创建 `CommonAttentionMetadata`，核心赋值关系是：
 
@@ -923,11 +1083,13 @@ max_query_len     <- batch query upper bound
 max_seq_len       <- batch context upper bound
 ```
 
+其中 `seq_lens` 就是 6.8 节的 $S_r=N_{\mathrm{ctx},r}+N_{q,r}$（`num_computed_tokens + query_len`），不是单独的另一个量。
+
 每个 KV cache group 可能拥有不同 block table、slot mapping 或 attention group。Model Runner
 按 group 组织 common metadata，经 `AttentionGroup.build_metadata()` 转换读表后再调用
 builder。多个 group 的 spec 与 builder 类型相同、builder 支持 `update_block_table()`（`vllm/v1/attention/backend.py:708`）
 时可以复用已构造的 metadata；MRV2 的 `build_attn_metadata()` 把这个复用分支明确限定在 `MambaSpec`
-（`attn_utils.py:603-608`：`supports_update_block_table and isinstance(kv_cache_spec, MambaSpec)`），其他 spec 每个 attention group
+（`attn_utils.py:603-608`：`supports_update_block_table and isinstance(kv_cache_spec, MambaSpec)`；CPU 版 `cpu/attn_utils.py:321-325` 条件相同），其他 spec 每个 attention group
 独立构造。MRV1 里曾有更宽的复用条件，随 #63373 删除，不需要再对照。
 
 [源码] `vllm/v1/worker/gpu/attn_utils.py` - `build_attn_metadata`
@@ -1426,25 +1588,59 @@ backend 的 cache layout、metadata 和 kernel 调用是否消费 block table。
 
 ## 6.18 分页只改变地址，不应改变数学结果
 
-对一个 query 向量 `q` 和逻辑顺序 K/V：
+对一个 query 向量 $q$ 和逻辑顺序 K/V（$k_j$、$v_j$ 是第 $j$ 个位置的 key、value 向量）：
 
 $$
-s_j = \frac{q \cdot k_j}{\sqrt{d}}
-$$
-
-$$
-p_j = \frac{e^{s_j}}{\sum_t e^{s_t}}
+s_j = \frac{q \cdot k_j}{\sqrt{d_h}}
 $$
 
 $$
-o = \sum_j p_j v_j
+a_j = \frac{e^{s_j}}{\sum_t e^{s_t}}
 $$
 
-分页实现改变的是取得 `k_j`、`v_j` 的方式：
+$$
+o = \sum_j a_j v_j
+$$
+
+**白话：**先给每个历史位置打分（query 和这个位置的 key 有多相像），再把分数变成加起来为 1 的权重，最后用权重把各位置的 value 加权求和得到输出。
+
+**其中：**$q$、$k_j$ 都是长度为 $d_h$ 的向量；$s_j$ 是第 $j$ 个位置的分数，无单位；$a_j$ 是 softmax 之后的 attention 权重，无单位，$\sum_j a_j=1$；
+$t$ 是对所有位置求和的下标；$v_j$ 是第 $j$ 个位置的 value 向量；$o$ 是输出向量（本节局部字母，长度与 $v_j$ 相同）。
+
+**怎么算出来：**
+
+1. 点积 $q\cdot k_j=\sum_c q_c k_{j,c}$ 把 $d_h$ 对元素的乘积加起来。若各元素大致独立、均值 0、方差 1，这个和的方差是 $d_h$，标准差是 $\sqrt{d_h}$；
+   除以 $\sqrt{d_h}$ 让分数回到同一量级，避免 $d_h$ 大时 softmax 过于尖锐。
+2. 分数可正可负，取 $e^{s_j}$ 保证为正；除以全部位置的 $e^{s_t}$ 之和，权重就加起来等于 1。
+3. 用权重对 $v_j$ 加权求和：权重大的位置贡献大。
+
+代入 $d_h=4$、$q=(1,1,1,1)$，三个位置的 key 是 $k_0=(0,0,0,0)$、$k_1=(1,1,0,0)$、$k_2=(1,1,1,1)$，value 是 $v_0=(1,0)$、$v_1=(0,1)$、$v_2=(1,1)$：
+
+- 点积是 $0$、$2$、$4$，$\sqrt{d_h}=2$，所以 $(s_0,s_1,s_2)=(0,\,1,\,2)$；
+- $(e^{s_0},e^{s_1},e^{s_2})=(1,\,2.718,\,7.389)$，和为 $11.107$，所以 $(a_0,a_1,a_2)=(0.090,\,0.245,\,0.665)$（和为 1）；
+- $o=0.090\,(1,0)+0.245\,(0,1)+0.665\,(1,1)=(0.755,\,0.910)$。
+
+**核对：**随书 `contiguous_attention()` 默认 `scale = 1/sqrt(len(query))`，并用 softmax 之后对 value 加权求和（`examples/ch06_paged_addressing.py`）；
+上面三步的数字用脚本复算过。FlashAttention 等 kernel 为了不保存完整分数向量，把这三步做成分块累计，见 6.19.4。
+
+分页实现改变的是取得 $k_j$、$v_j$ 的方式：
 
 $$
-(k_j,v_j)=\mathrm{KV}\bigl[\mathtt{block\_table}[\lfloor j/B\rfloor],\;j\bmod B\bigr]
+(k_j,v_j)=\mathtt{kv\_cache}\bigl[\mathtt{block\_table}[\lfloor j/B_{\mathrm{blk}}\rfloor],\;j\bmod B_{\mathrm{blk}}\bigr]
 $$
+
+**白话：**第 $j$ 个历史位置的 K/V，不再是“连续数组的第 $j$ 项”，而是先用 block table 找到它住的物理块，再取块内第几格。
+
+**其中：**$\mathtt{kv\_cache}[\,b,\mathrm{off}\,]$ 表示物理 KV cache 里物理块 $b$ 的第 $\mathrm{off}$ 个槽（里面存着该位置的 K 和 V）；
+$j$ 是逻辑位置（即 6.4 节的 $\mathrm{pos}$）；$B_{\mathrm{blk}}$ 是与所读表一致的 block size；
+$\lfloor j/B_{\mathrm{blk}}\rfloor$ 是逻辑块号 $i$，$j\bmod B_{\mathrm{blk}}$ 是块内偏移 $\mathrm{off}$。
+
+**怎么算出来：**这就是 6.4 节三个式子把 $\mathrm{pos}$ 换成 $j$ 的结果：$i=\lfloor j/B_{\mathrm{blk}}\rfloor$，$\mathrm{off}=j\bmod B_{\mathrm{blk}}$，$b=\mathtt{block\_table}[i]$，
+再把二元坐标 $(b,\mathrm{off})$ 直接当成 cache 的下标，不展平成 $\mathrm{slot}=bB_{\mathrm{blk}}+\mathrm{off}$（两者指向同一个槽）。
+继续用上面的三个位置，$B_{\mathrm{blk}}=2$、块表 `[7,4]`：$j=0$ 在块 7 偏移 0，$j=1$ 在块 7 偏移 1（slot $7\times2+1=15$），
+$j=2$ 在块 `table[1]=4` 偏移 0（slot $4\times2+0=8$）。三个位置的物理槽 14、15、8 并不连续，但逻辑顺序 $j=0,1,2$ 没变，所以 $s_j$、$a_j$、$o$ 的结果与连续存放完全相同。
+
+**核对：**当前 FlashAttention 路径把 `block_table` 直接交给 `flash_attn_varlen_func`（6.16.5）；随书 `paged_attention()` 先按块表 gather 再调用同一个 `contiguous_attention()`，测试用非连续块表验证。
 
 只要地址翻译保持逻辑次序、mask 和数值精度相同，分页与连续布局的参考输出应一致。
 
@@ -1524,22 +1720,64 @@ final K/V pointer
 输出的简单平均。为了不保存完整分数矩阵，kernel 只保留能继续累计的摘要。
 
 长 KV 往往按 tile/partition 处理。tile 是本轮处理的一小片 K/V。对一个 Query，
-`s_j` 为第 `j` 个候选的无单位分数；稳定 softmax 通常维护局部最大值 $m$、归一化分母 $\ell$ 和
-加权输出状态。新 tile 到来时旧状态需要按新的最大值重标定：
+$s_j$ 为第 $j$ 个候选的无单位分数；稳定 softmax 通常维护局部最大值 $m$、归一化分母 $Z$ 和
+加权输出状态 $o$。新 tile 到来时旧状态需要按新的最大值重标定：
 
 $$
 m' = \max(m, m_{\mathrm{tile}})
 $$
 
 $$
-\ell' = e^{m-m'}\ell + \sum_{j\in\mathrm{tile}}e^{s_j-m'}
+Z' = e^{m-m'}Z + \sum_{j\in\mathrm{tile}}e^{s_j-m'}
 $$
 
-`m_tile` 是新片段的最大分数；变量 $m$、$\ell$、$m_{\mathrm{tile}}$ 都是标量。分母 $\ell$ 保存的是
-$\sum_j \exp(s_j-m)$，换用更大的最大值 $m'$ 后，要把旧分母乘 $\exp(m - m')$，
-才能和新片段相加。加权输出摘要是长度为 Value 维度的向量，也必须使用相同缩放。
-LSE 指 `log(sum(exp(score)))`，可由 $m+\log\ell$ 得到。DCP 或 split-K 最终合并的正是这类 `(output, LSE)` 状态，而不是
-直接平均各分区输出。
+$$
+o' = \frac{e^{m-m'}Z\,o+\sum_{j\in\mathrm{tile}}e^{s_j-m'}v_j}{Z'}
+$$
+
+**白话：**每读一个新 tile，就把“到目前为止的摘要”换到新的最大值上重新计价，再把新 tile 的贡献加进去；摘要只有三样东西（最大值、分母、输出），不需要保留全部分数。
+
+**其中：**$m$、$Z$、$o$ 是只处理了此前所有 tile 之后的最大值、分母和（已归一化的）输出，$m$、$Z$ 是标量，$o$ 是长度为 Value 维度的向量；
+带撇号的 $m'$、$Z'$、$o'$ 是合入新 tile 之后的值；$m_{\mathrm{tile}}$ 是新片段的最大分数；$j\in\mathrm{tile}$ 表示对新片段里的每个候选求和；
+$s_j$、$v_j$ 同 6.18 节。第一个 tile 到来之前取 $m=-\infty$、$Z=0$、$o=0$，此时 $e^{m-m'}=0$，旧状态不起作用。
+分母 $Z$ 保存的是 $\sum_j \exp(s_j-m)$（对已处理的所有 $j$）。
+
+**怎么算出来：**
+
+1. 直接算 $\sum_j e^{s_j}$ 可能溢出，所以减去最大值：$Z=\sum_j e^{s_j-m}$，每一项都不超过 1。
+2. 新 tile 把最大值抬到 $m'$。旧的每一项要改成相对于 $m'$ 的写法：$e^{s_j-m'}=e^{s_j-m}\cdot e^{m-m'}$，
+   所以旧分母整体乘以 $e^{m-m'}$（因子不超过 1）；新 tile 里的项直接用 $m'$ 计算，两部分相加得到 $Z'$。
+3. 输出同理：旧输出 $o$ 已经除以过 $Z$，先乘回 $Z$ 得到旧的未归一化加权和 $Z\,o=\sum_j e^{s_j-m}v_j$，再乘同一个 $e^{m-m'}$ 换到 $m'$，
+   加上新 tile 的 $\sum e^{s_j-m'}v_j$，最后除以新的分母 $Z'$。
+4. 不管 tile 怎么切分，最后一个 tile 之后的 $o$ 都等于 6.18 节一次性算出来的 $o$。
+
+LSE 指 $\log\sum_j e^{s_j}$，这里 $\log$ 是自然对数。可由 $m$ 与 $Z$ 得到：
+
+$$
+\operatorname{LSE}=m+\log Z
+$$
+
+推导：$\log\sum_j e^{s_j}=\log\bigl(e^{m}\sum_j e^{s_j-m}\bigr)=m+\log Z$。
+
+手算例子：沿用 6.18 节的三个分数 $(s_0,s_1,s_2)=(0,1,2)$ 与 $v_0=(1,0)$、$v_1=(0,1)$、$v_2=(1,1)$，把它们切成 tile 0（$j=0,1$）和 tile 1（$j=2$）：
+
+- tile 0（旧状态为空）：$m_{\mathrm{tile}}=1$，$m'=1$，$Z'=e^{0-1}+e^{1-1}=0.368+1=1.368$，
+  $o'=\bigl(e^{-1}(1,0)+1\cdot(0,1)\bigr)/1.368=(0.269,\,0.731)$；
+- tile 1：$m=1$、$Z=1.368$、$o=(0.269,0.731)$，$m_{\mathrm{tile}}=2$，所以 $m'=2$，重标定因子 $e^{m-m'}=e^{-1}=0.368$，
+  $Z'=0.368\times1.368+e^{2-2}=0.503+1=1.503$，
+  $o'=\bigl(0.368\times1.368\times(0.269,0.731)+1\cdot(1,1)\bigr)/1.503=(0.755,\,0.910)$，
+  与 6.18 节一次算出的 $o=(0.755,0.910)$ 一致；
+- LSE：$m+\log Z=2+\log1.503=2.408$，直接算 $\log(e^0+e^1+e^2)=\log11.107=2.408$，一致。
+
+**核对：**Triton 版的递推在 `softmax_step()`（`vllm/v1/attention/ops/triton_attention_helpers.py:462`）：
+`m_j = tl.maximum(M, tl.max(S, axis=1))`（$m'$，`:472`）、`alpha = tl.exp(M - safe_m_j)`（$e^{m-m'}$，`:481`）、
+`L_new = L * alpha + l_j`（$Z'$，`:483`；`safe_m_j` 在最大值仍是 $-\infty$ 时改用 0，使第一个 tile 的 `alpha` 为 0，对应上面 $m=-\infty,Z=0$ 的约定）。
+调用方 `vllm/v1/attention/ops/triton_unified_attention.py` 在 `:682-683` 取回 `alpha` 并把累加器乘上去，之后 `acc += tl.dot(P_v, V)`（`:703`），
+最后 `acc = acc / L[:, None]`（`:773`）：源码里的 `acc` 存的是未归一化的 $Z\,o$，结果与上面先归一化再重标定的写法等价。上面的数字用脚本复算过（见 PR 正文）。
+DCP 或 split-K 最终合并的正是这类 `(output, LSE)` 状态（第 09 章用 $\operatorname{LSE}_i$ 写同一个量），而不是
+直接平均各分区输出。随书教学模型没有实现 online softmax（见 6.20）。
+
+[源码] `vllm/v1/attention/ops/triton_attention_helpers.py` - `softmax_step`
 
 ```mermaid
 flowchart LR
@@ -1740,7 +1978,8 @@ positions 为 `[30,31,32,33]`。先按 manager 表计算四个写 slot；再在�
 ### 练习 3：追踪 metadata 的共享
 
 从 `build_attn_metadata()`（`vllm/v1/worker/gpu/attn_utils.py:503`）里的 `CommonAttentionMetadata(...)` 开始，
-找出 `cached_metadata` 的 key、`supports_update_block_table` 快速路径和 layer name 映射。
+找出 `cached_metadata` 的 key、`supports_update_block_table` 快速路径和 layer name 映射；再对照 CPU 版（`vllm/v1/worker/cpu/attn_utils.py:246`）
+有哪些差别（例如 CPU 版没有 `for_cudagraph_capture` 分支）。
 
 ### 练习 4：从模型层追到 FlashAttention kernel API
 
