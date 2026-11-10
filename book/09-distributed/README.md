@@ -720,7 +720,7 @@ PP 里只有末 stage 能采样，其他 stage 必须拿到“上一步采样出
 
 - `broadcast_drafts` 还有第二个前提：只有同一步 `sampled_tokens_broadcast` 为真才真正发送（`pp_utils.py:165-168`）。该标志在 `broadcast`
   里设置：当 `compute_need_sampled_mask(input_batch)` 为 `None`（没有请求需要给后续步提供采样结果）时置 `False` 并直接返回，否则置 `True`
-  （`pp_utils.py:241-247`）。接收端 `receive` 用同一个 `compute_need_sampled_mask(input_batch)` 判断并提前返回（`:181-183`），
+  （`pp_utils.py:241-247`）。接收端 `receive` 用同一个 `compute_need_sampled_mask(input_batch)` 判断并提前返回（`:181-184`），
   所以两端对“这一步有没有广播”的结论一致。
 
 ```mermaid
