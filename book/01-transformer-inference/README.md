@@ -6,7 +6,7 @@ source_path: ../vllm
 source_commit: 4ba787ec9959e566d3b587a796dff07673324da5
 source_branch: v0.33.0
 source_dirty: false
-verified_at: 2026-10-19
+verified_at: 2026-11-10
 content_complete: true
 runtime_verified: false
 audience: "初中级程序员和软件工程类学生；具备 Python 基础，不要求推理系统背景"
@@ -54,7 +54,7 @@ prerequisites:
 > **本节先看：** 这一部分先划定结论成立的源码版本和讨论边界。超出范围的实现不能直接套用本章结论，需要重新核对源码。
 
 - 源码仓库：`vllm-project/vllm`
-- 源码 commit：`5df63a7203cdb9328d824a27b682e77c7b9928be`
+- 源码 commit：`4ba787ec9959e566d3b587a796dff07673324da5`（v0.33.0）
 - 阅读主线：decoder-only 文本生成、vLLM V1 Engine、Llama 类模型。
 - 本章使用单层、单 attention head 的教学模型建立直觉；真实模型通常有多层、
   多个 query heads，并可能使用 GQA、量化、TP 和不同 attention backend。
@@ -560,13 +560,68 @@ Top-k 与 top-p 最终都通过 mask 排除候选，并对保留项重新归一�
 边界并列时要看实现。当前 PyTorch 参考路径屏蔽的是“严格小于第 k 大分数”的项；
 例如 logits 为 `[4,2,2]`、k=2，两个分数为 2 的候选都可能保留，不能据此断言
 一定只剩两个 token。随书模型按排序后截取候选，是教学简化；其他 backend 的并列
-处理需分别核对，不能只凭 top-k 名称推断。v0.32.0 的 Triton top-k-only 路径按索引打破第 k 位并列，
+处理需分别核对，不能只凭 top-k 名称推断。v0.33.0（`4ba787ec`）的 Triton top-k-only 路径按索引打破第 k 位并列，
 保留恰好 k 项；PyTorch 参考实现可以额外保留并列项。对应测试只要求额外项确实与第 k 位同分，
-不再要求两条实现的候选数严格相同。
+不再要求两条实现的候选数严格相同（`tests/v1/sample/test_topk_topp_sampler.py:254` 的注释）。
 
 [测试] `tests/v1/sample/test_topk_topp_sampler.py` - `TestTritonTopkTopp`
 
 [源码] `vllm/v1/sample/ops/topk_topp_sampler.py` - `apply_top_k_top_p_pytorch`、`apply_top_k_only`
+
+**批内有的请求只开 top-p 时，kernel 怎么分工。** 这一节只在 CUDA 上的 Triton 路径成立，是工程细节，不改变上面的
+采样语义。同一个 batch 里，每行请求可以有自己的 `top_k` 与 `top_p`：`top_k` 等于词表大小 $V$ 表示
+“这一行没开 top-k”，`top_p` 等于 1 表示“没开 top-p”。vLLM 的 Triton 实现有两种 kernel：
+单体 kernel 同时处理 top-k 与 top-p（对带 top-k 的行很快）；当 batch 不超过 64（`_SPLIT_MAX_BATCH`，
+`vllm/v1/sample/ops/topk_topp_triton.py:986`）且开了 top-p 时，对“没开 top-k”的行改用分块的 split top-p 流水线，
+因为小 batch 下单体 kernel 的纯 top-p 路径受延迟限制。若 batch 里还混着带 top-k 的行，这些行先由单体 kernel 处理，
+之后**仅当确有纯 top-p 的行**才再补跑一遍 split top-p。MRV2 为此在每步算一个布尔值：
+
+$$
+\mathrm{has\_topp\_only\_rows}=\mathrm{do\_top\_p}\ \wedge\ \exists\, i:\ (k_i\ge V\ \wedge\ p_i<1)
+$$
+
+读法：只要本批里至少有一行“没开 top-k 但开了 top-p”，就必须补跑；否则可以省掉这一遍。
+
+其中：
+
+- $k_i$：第 $i$ 行请求的 `top_k`，等于 $V$ 表示该行没开 top-k；
+- $p_i$：第 $i$ 行请求的 `top_p`，范围 $(0,1]$，等于 1 表示该行没开 top-p；
+- $V$：词表大小（logits 最后一维）；
+- $\mathrm{do\_top\_p}$：本批是否有任何一行 $p_i\ne 1$；
+- $\mathrm{has\_topp\_only\_rows}$：是否需要补跑 split top-p。
+
+手算例子：$V=100$，一批 4 行，$k=[100,100,5,100]$，$p=[0.9,1.0,0.9,1.0]$。第 0 行 $k_0=100\ge V$ 且 $p_0=0.9<1$，
+所以结果为真，要补跑；若换成 $k=[5,3]$、$p=[0.9,0.8]$，两行都开了 top-k，结果为假，补跑被跳过。
+
+```mermaid
+flowchart TD
+    B["一批请求: 每行 k_i, p_i"] --> DO{"任意 p_i != 1 ?"}
+    DO -->|"否"| K1["只剩 top-k 路径, 无 top-p"]
+    DO -->|"是"| SMALL{"CUDA 且 batch <= 64 ?"}
+    SMALL -->|"否"| MONO["只用单体 kernel"]
+    SMALL -->|"是"| TKON{"本批有任何行开了 top-k ?"}
+    TKON -->|"否"| SPLIT["全部行走 split top-p"]
+    TKON -->|"是"| MONO2["单体 kernel 处理带 top-k 的行"]
+    MONO2 --> GATE{"has_topp_only_rows ?"}
+    GATE -->|"真: 存在 k_i>=V 且 p_i<1"| SPLIT2["再补跑 split top-p"]
+    GATE -->|"假"| SKIP["跳过补跑"]
+```
+
+> **读图方法：** 这是 Triton top-k/top-p 在一个 batch 内如何分工的决策图。先从上往下看三道条件：有没有 top-p、是不是小批量 CUDA、有没有带 top-k 的行；最后一个菱形就是上面公式的结果，它只决定“要不要多跑一遍 split top-p”。
+
+这个布尔值在 `SamplingStates.get_top_k_top_p()`（`vllm/v1/worker/gpu/sample/states.py:105`）里用 CPU 侧 numpy 数组
+一次算好，经 `apply_top_k_top_p(..., has_topp_only_rows=…)`（`vllm/v1/sample/ops/topk_topp_sampler.py:501`）传给
+`apply_top_k_top_p_triton()`（`vllm/v1/sample/ops/topk_topp_triton.py:1618`），其函数 docstring 明确要求：
+只要有行满足 $p<1$ 且 $k\ge V$，调用方必须传 `True`，否则这样的行会得不到 top-p。默认值是 `True`（保守）。
+上游提交：[7b6310c10](https://github.com/vllm-project/vllm/commit/7b6310c10)（[#61996](https://github.com/vllm-project/vllm/pull/61996)）。
+同一区间内 split top-p 还修了两个正确性问题：第 k 位并列时的“并列配额”现在能跨 block 累计
+（[ce49c47cb](https://github.com/vllm-project/vllm/commit/ce49c47cb)，[#62046](https://github.com/vllm-project/vllm/pull/62046)，
+测试 `test_topp_ties_across_blocks`）；logits 极大时 split top-p 不再把整行屏蔽掉
+（[852989f58](https://github.com/vllm-project/vllm/commit/852989f58)，[#58231](https://github.com/vllm-project/vllm/pull/58231)）。
+
+[源码] `vllm/v1/worker/gpu/sample/states.py` - `SamplingStates.get_top_k_top_p`
+
+[源码] `vllm/v1/sample/ops/topk_topp_triton.py` - `apply_top_k_top_p_triton`
 
 ### Penalty、Bias 与约束
 
@@ -859,6 +914,11 @@ $$
 MLA（多头潜在注意力）需要另看实际缓存表示：当前 `MLAAttentionSpec` 使用单份潜在
 状态，并将 `head_size_v` 设为 0；还可能包含量化和对齐开销。不能把模型的 Query/Key/Value
 维度直接代入普通 K/V 公式来估算 MLA 显存，应读取实际 spec 的 `page_size_bytes`。
+
+上述公式的 $B_{\mathrm{dtype}}$ 假设每个元素占整数个字节。v0.33.0 起 `--kv-cache-dtype` 可由平台通过
+`register_kv_cache_dtype()` 注册新名字（[9499c949b](https://github.com/vllm-project/vllm/commit/9499c949b)，
+[#52670](https://github.com/vllm-project/vllm/pull/52670)），其存储布局、量化 scale 和对齐由各 spec/backend 决定，
+因此不能再默认用元素字节数估算；以实际 spec 的 `page_size_bytes` 为准。
 
 [源码] `vllm/model_executor/layers/attention/attention.py` - `Attention.__init__`
 
