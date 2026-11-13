@@ -36,7 +36,7 @@ KV Cache 不是一个 Python 字典，也不只是一块 GPU tensor。阅读当�
 3. EngineCore 中代表物理页所有权的 `KVCacheBlock` 元数据；
 4. 每个请求按逻辑 token 顺序维护的 block table。
 
-本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，2026-11-10 重新钉扎到此 revision：源码引用与行号已逐条核对，Model Runner V1 删除已重新绑定；其余行为未在 05caae03 上全面重核，清单见 `meta/upgrade-main-05caae03-2026-11-10/`）。文中继续使用三种
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09）。源码引用与行号已按此 revision 核对，Model Runner V1 删除已重新绑定；正文其余部分最初按 v0.33.0 `4ba787ec` 写成，其中未在 `05caae03` 上全面重核的行为，仍按当时的 v0.33.0 叙述。文中继续使用三种
 证据标签：
 
 - **源码事实**：能在固定 revision 的实现或测试中直接定位。
@@ -393,6 +393,8 @@ state_content_size_bytes
 
 再乘 32 层得 $32\times256\ \mathrm{KiB}=8\ \mathrm{MiB}$，正好是 §5.2.1 的 $M_{\mathrm{blk}}$：dense 情形下页公式就是 $M_{\mathrm{blk}}$ 公式按层拆开。反过来 $256\ \mathrm{KiB}\div64=4096$ byte，等于每层每 token 的 $2H_{\mathrm{kv,local}}d_hb_{\mathrm{elem}}=2\times8\times128\times2$。`tokens_per_state` 为 2 时一个状态覆盖两个 token，`num_states` 减半成 32；取分数 $1/k$ 时一个 token 对应 $k$ 个状态，`num_states` 变成 $64\times k$。
 
+单位检查：`num_heads`（个）× `num_states`（状态/页）× `state_content_size_bytes`（byte / (head·状态)）= byte/页（一层）。$8\times64\times512=262\,144$ byte，再乘 32 层得到 $M_{\mathrm{blk}}$ 的 8 MiB，单位仍是 byte。
+
 **核对：** `vllm/v1/kv_cache_interface.py:601-616`（`state_content_size_bytes`、`unpadded_page_size_bytes`、`page_size_bytes`）与 `:262-267`（`num_states`、`get_num_kernel_states`）@ `05caae03`；`page_size_padded` 只在补齐时取代未补齐大小（`:612-616`，且断言不小于未补齐大小）。
 
 [源码] `vllm/v1/kv_cache_interface.py` - `AttentionSpec.page_size_bytes`、`unpadded_page_size_bytes`
@@ -459,6 +461,8 @@ $$
 
 算例（与上图一致，$B_{\mathrm{blk}}=4$）：$S=5$ 时 $5\bmod4=1$，$N_{\mathrm{tail}}=(4-1)\bmod4=3$，共 2 块；$S=9$ 时余 1，$N_{\mathrm{tail}}=3$，共 3 块；$S=3$ 时余 3，$N_{\mathrm{tail}}=(4-3)\bmod4=1$，共 1 块；再看 $S=8$：余 0，$(4-0)\bmod4=0$，恰好 2 块填满。折成字节，最坏情形是浪费 $B_{\mathrm{blk}}-1$ 个 token 的 KV：用 §5.2.1 的 $M_{\mathrm{tok}}=128$ KiB，$B_{\mathrm{blk}}=64$ 时最坏浪费 $63\times128\ \mathrm{KiB}=8064\ \mathrm{KiB}\approx7.9\ \mathrm{MiB}$，$B_{\mathrm{blk}}=16$ 时最坏 $15\times128\ \mathrm{KiB}=1.875\ \mathrm{MiB}$。
 
+单位检查：$S$、$B_{\mathrm{blk}}$、$S\bmod B_{\mathrm{blk}}$ 和 $N_{\mathrm{tail}}$ 的单位都是 token（位置）；减法与取模都在同一单位上进行。
+
 **核对：** 图中三个请求的“尾部浪费 3、3、1”，以及本章“第一遍自检”第 1 题（9 个 token、block 大小 4）都与这个式子一致。
 
 block 越小，尾部浪费通常越少，但 block table 更长、元数据更多，kernel 支持和对齐约束也
@@ -519,6 +523,8 @@ offset + l * layer_stride + b * block_stride
 
 - layer-outer：$2\times(256\times1000)+5\times256=512\,000+1280=513\,280$ KiB；
 - block-outer（设这个 tensor 的 3 层就是最宽 group 的全部层）：`block_stride` $=3\times256=768$ KiB，`layer_stride` $=256$ KiB，所以 $2\times256+5\times768=512+3840=4352$ KiB。
+
+单位检查：`offset`、`layer_stride`、`block_stride` 都是字节（算例里统一写成 KiB），层序号 `l` 与 block ID `b` 无量纲，相乘相加后仍是字节（或 KiB）。
 
 **核对：** 同一个 `KVCacheTensor` 在 `get_kv_cache_config_from_groups` 里按这两种布局生成（`vllm/v1/core/kv_cache_planning.py:665`）；这里的地址式是教学化的字节偏移，不含 kernel 内部的 slot 寻址（第 06 章）。
 
@@ -728,7 +734,7 @@ flowchart TB
 
 ### 5.6.1 先确定“可给 KV 的字节数”
 
-`Worker.determine_available_memory()` 的主路径是：
+`Worker.determine_available_memory()` 的 GPU/XPU 主路径是：
 
 1. 等外部 loader 持有的权重就绪，再记录初始显存快照与本进程预算；
 2. 运行 dummy forward，profile 权重之外的非 KV 和瞬时峰值；
@@ -767,7 +773,9 @@ $$
 
 算例（教学取值，非实测）：总显存 80 GiB，利用率 0.9，无外部权重：$M_{\mathrm{req}}=\lceil80\times0.9\rceil=72$ GiB（源码按字节取整，这里按 GiB 近似）；profiling 得到 $M_{\mathrm{nonKV}}=20$ GiB（权重约 16 GiB，激活峰值与开销约 4 GiB），graph 估算 $M_{\mathrm{graph}}=1$ GiB；于是 $M_{\mathrm{KV}}=72-20-1=51$ GiB。§5.6.3 接着用它算 `num_blocks`。
 
-**核对：** `vllm/v1/worker/utils.py:794`（`request_memory`）与 `vllm/v1/worker/gpu_worker.py:789-793`（`available_kv_cache_memory_bytes` 的减法）@ `05caae03`。源码里没有名为 `applied_cudagraph_memory_estimate` 的变量，上面用的是 Worker 里的实际名字 `cudagraph_memory_estimate`。
+单位检查：$M_{\mathrm{req}}$、$M_{\mathrm{nonKV}}$、$M_{\mathrm{graph}}$、$M_{\mathrm{KV}}$ 都是 byte（算例里统一写成 GiB），相减后单位不变。
+
+**核对：** `vllm/v1/worker/utils.py:794`（`request_memory`）与 `vllm/v1/worker/gpu_worker.py:789-793`（`available_kv_cache_memory_bytes` 的减法）@ `05caae03`。以上是 GPU/XPU 路径（`vllm/v1/worker/gpu_worker.py`；XPU worker 继承同一套 `determine_available_memory`）。CPU worker 不走这条减法：`cpu_worker.py:185` 的 `determine_available_memory` 在配置了 `kv_cache_memory_bytes`（也可由环境变量 `VLLM_CPU_KVCACHE_SPACE` 按 GiB 换算写入，`vllm/platforms/cpu.py:340-343`）时直接用该字节数；否则用预留的 CPU 内存减去进程 RSS。
 
 ```mermaid
 flowchart TD
@@ -799,10 +807,10 @@ torch 看不到，也就不会在 cuBLAS 申请失败时清理自己的空闲缓
 
 ### 5.6.2 手动字节数是另一条路径
 
-如果配置了 `kv_cache_memory_bytes`，Worker 仍执行 `profile_run()` 以完成最大 batch token
+如果配置了 `kv_cache_memory_bytes`，GPU/XPU Worker 仍执行 `profile_run()` 以完成最大 batch token
 相关编译，但以手工指定的 KV 字节数为基准，再经过 `reserve_mm_ipc_gpu_memory()` 的多模态 IPC
 预留处理；它不由 `gpu_memory_utilization` 推导。它适合明确控制容量，不适合把旧机器上的数值无条件复制到显存
-环境不同的进程。
+环境不同的进程。CPU worker 也认同一字段（以及把它写入该字段的 `VLLM_CPU_KVCACHE_SPACE`），见 §5.6.1。
 
 ### 5.6.3 从字节数到 block 数
 
@@ -827,7 +835,7 @@ num_blocks = available_memory // bytes_per_block
 
 单位检查：byte $\div$ (byte/block) = block。
 
-**核对：** 除法在 `vllm/v1/core/kv_cache_planning.py:704`；null block 在容量检查里被先扣掉一个 block（同文件 `:195`、`:1610` 的注释）；启动日志里的 `GPU KV cache size` 由 `get_kv_cache_capacity` 算出（`vllm/v1/core/kv_cache_utils.py:1141`，等于 `int(max_concurrency × max_model_len)`），在这个单 group 的例子里是 $6528/128\times8192=417\,792$，与上面的折算一致（§5.6.4）。
+**核对：** 除法在 `vllm/v1/core/kv_cache_planning.py:704`；null block 在容量检查里被先扣掉一个 block（同文件 `:195`、`:1610` 的注释）；启动日志里的「设备名 KV cache size」由 `get_kv_cache_capacity` 算出（`vllm/v1/core/kv_cache_utils.py:1141`，等于 `int(max_concurrency × max_model_len)`；前缀由 `_kv_cache_device_name`（`:1152-1154`）给出：CUDA 上是 `GPU`，否则是 `device_type` 的大写，例如 CPU 上是 `CPU`），在这个单 group 的例子里是 $6528/128\times8192=417\,792$，与上面的折算一致（§5.6.4）。
 
 当前启动流程还会：
 
@@ -878,7 +886,7 @@ Worker 只负责接收并赋值。
 
 [源码] `vllm/config/vllm.py` - `VllmConfig.adjust_dcp_kv_cache_interleave_size`
 
-> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-28～10-29（0106c8abc..36d4ef654）。详见 meta/main-tracking-2026-10-29.md。
+> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-28～10-29（0106c8abc..36d4ef654）。
 > - [edad8b03c5](https://github.com/vllm-project/vllm/commit/edad8b03c5285a1c12e7e4f83c1af709b319a01b)（[#61294](https://github.com/vllm-project/vllm/pull/61294)）：`resolve_kv_cache_layout` / `_merge_supported_layouts` 跨 PP stage 取各 worker 支持布局的**交集**，再按“多数 worker 把该布局排第一”排序（`vllm/v1/attention/backends/utils.py` L243–L337 @ `36d4ef654`），不再要求各 stage 列表完全一致。
 > - [317081fb6d](https://github.com/vllm-project/vllm/commit/317081fb6dc8b125a3134711a7750707bfd55371)（[#62860](https://github.com/vllm-project/vllm/pull/62860)）：DSA decode indexer logits 计入 memory profile workspace（`sparse_attn_indexer.py` L496–L541）。
 
@@ -898,11 +906,13 @@ $$
 **怎么算出来：** 沿用 §5.5.3 的 16 384 个 block、3 个 group（1 个 full、2 个 sliding），再取 `max_model_len = 8192`、$B_{\mathrm{blk}}=64$：
 
 1. full 组：$\lceil8192/64\rceil=128$ 个 block；
-2. 每个 sliding 组：按 §5.16 的准入上限，窗口 1024、每步最多 2048 个 in-flight token 时是 49 个 block；
+2. 每个 sliding 组：按 §5.16 的准入上限，窗口 1024（$N_{\mathrm{ret}}=1023$）、`max_in_flight_tokens` $=\texttt{max\_concurrent\_batches}\times\texttt{max\_num\_batched\_tokens}=2048$（这是并发 batch 的合计上限，例如 $2\times1024$，不是单个 batch 一步的上限）时，$\texttt{num\_tokens}=\min(1023+2048,\,8192)=3071$，$\lceil3071/64\rceil+1=48+1=49$ 个 block；
 3. 每个请求合计 $128+49+49=226$ 个 block；
 4. $16\,384\div226\approx72.5$，即理论并发约 72.5 个请求。
 
 如果只按 full 组的 128 个 block 估，得到 $16\,384/128=128$，会高估并发。
+
+单位检查：分子 `num_blocks` 的单位是 block，分母是各 group 每请求最多占用的 block 数之和，也是 block；block ÷ block 得到无量纲的请求并发（可以是小数）。
 
 **核对：** `get_max_concurrency_for_kv_cache_config`（`vllm/v1/core/kv_cache_utils.py:1082` @ `05caae03`）逐组累加后相除，返回浮点数而不取整；host group 用另一个池，取两者里较小的并发。启动日志的 “Maximum concurrency for … tokens per request” 就是它的输出（`:1157-1176`）。
 
@@ -1264,6 +1274,8 @@ available = free_blocks - reserved_blocks
 
 再做比较：设 `num_blocks = 1000`、`watermark = 0.02`，则 `watermark_blocks` $=\lfloor0.02\times1000\rfloor=20$；设 `free_blocks = 30`、`reserved_blocks = 10`，则 `available` $=30-10=20$。有水位线时 `required` $=4+20=24>20$，返回 `None`；没有水位线（`watermark_blocks = 0`）时 $4\le20$，可以继续。
 
+单位检查：`predicted_new_blocks`、`watermark_blocks`、`free_blocks`、`reserved_blocks`、`required`、`available` 的单位都是 block；`required = predicted_new_blocks + watermark_blocks` 与 `available = free_blocks - reserved_blocks` 都是 block 与 block 相加减。中间的 `num_tokens_need_slot` 是 token，$\lceil\texttt{num\_tokens\_need\_slot}/B_{\mathrm{blk}}\rceil$ 是 token ÷ (token/block) = block。
+
 **核对：** `vllm/v1/core/kv_cache_manager.py:539-548`（`watermark_blocks`）、`:603-608`（`available_blocks`、`required_blocks` 的比较）与 `vllm/v1/core/single_type_kv_cache_manager.py:181-271`（预测）@ `05caae03`。完整序列准入（`full_sequence_must_fit`）那一次检查在 `:552-569`，加上 `watermark_blocks` 后直接与 `get_num_free_blocks()` 比较，不扣 `reserved_blocks`。
 
 只有确认可容纳后，才附着新命中 block 并分配新页。随书模型用测试固定“失败不创建请求、
@@ -1316,7 +1328,7 @@ min(total_computed_tokens + num_new_tokens, request.num_tokens)
 
 **怎么算出来：** 取两者中较小的一个作为上限，超出的部分就是还没确认的 draft 位置。算例（$B_{\mathrm{blk}}=16$）：已确认 100 个 token（`request.num_tokens = 100`），已计算 99 个，本步要算 1 个已确认但未计算的 token 加 3 个 draft，所以 `num_new_tokens = 4`：$99+4=103$，$\min(103,100)=100$。只有前 100 个 token 参与登记，其中完整 block 是 $\lfloor100/16\rfloor=6$ 个（96 个 token）；位置 100 到 102 的 3 个 draft 不会被登记。
 
-**核对：** `vllm/v1/core/kv_cache_manager.py:640-645`（`num_tokens_to_cache` 与 `coordinator.cache_blocks`）@ `05caae03`。
+**核对：** `vllm/v1/core/kv_cache_manager.py:637-646`（`num_tokens_to_cache` 与 `coordinator.cache_blocks`）@ `05caae03`。
 
 这个 `request.num_tokens` 上限防止把尚未确认属于请求的 token 位置注册到 prefix
 cache。这里 finalized 指 **token 内容已确认**，不是 GPU 已经执行完成：本地
@@ -1771,7 +1783,7 @@ v0.33.0 另外带入了一批 KV offload / P2P 的修复，本书只讲到 offlo
 P2P 失败处理 [#63708](https://github.com/vllm-project/vllm/pull/63708)（send 不阻塞）、
 [#63628](https://github.com/vllm-project/vllm/pull/63628)、[#63664](https://github.com/vllm-project/vllm/pull/63664)、[#63498](https://github.com/vllm-project/vllm/pull/63498)。
 
-> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。详见 meta/main-tracking-2026-10-27.md ～ 10-30.md。
+> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。
 > - main 2026-10-25～10-27：[c13d4a5a4](https://github.com/vllm-project/vllm/commit/c13d4a5a46c2c663b728aa21af7eb00ece6bd698)（[#57646](https://github.com/vllm-project/vllm/pull/57646)） finalize 时暴露已处理前缀；P2P [963399729](https://github.com/vllm-project/vllm/commit/9633997299f29d54f1da38fb4a37e7d1a6535005)（[#63781](https://github.com/vllm-project/vllm/pull/63781)）分模式超时 10s/30s。
 > - main 2026-10-27～10-28：[e3883b7a7e](https://github.com/vllm-project/vllm/commit/e3883b7a7ec41f3117dfb7ca764746ec80a24d87)（[#60469](https://github.com/vllm-project/vllm/pull/60469)） KVCR 按请求聚合 completed_prefixes 并保序，由 scheduler finalize recency；[36f5ff3172](https://github.com/vllm-project/vllm/commit/36f5ff3172eb75433e54e496d64c473e951f8ecc)（[#63889](https://github.com/vllm-project/vllm/pull/63889)） 降低 KVCR adapter 开销；[70cb50dab2](https://github.com/vllm-project/vllm/commit/70cb50dab240a03f7db9ab87a613b5b52f1339fe)（[#62592](https://github.com/vllm-project/vllm/pull/62592)） 新增 `HiSparseBackend` 平台后端（pin/unpin、cache ops、IPC event）。
 > - main 2026-10-28～10-29：[0beab6c251](https://github.com/vllm-project/vllm/commit/0beab6c251e8046c0c6cf2fef114cd23b58cda74)（[#63779](https://github.com/vllm-project/vllm/pull/63779)） tier promotion 可失败并 `defer_write_release`（`tiering/manager.py` L170–L214、L556–L638 @ `36d4ef654`）；[77f58e5304](https://github.com/vllm-project/vllm/commit/77f58e530450416d217e4816727a35910bf3d9bf)（[#64229](https://github.com/vllm-project/vllm/pull/64229)） bounded-replay SWA 计入 lazy walk；P2P [f4fd1ab68e](https://github.com/vllm-project/vllm/commit/f4fd1ab68e2ba3a76bf6b903662eb6a8ee8202ab)（[#63207](https://github.com/vllm-project/vllm/pull/63207)）、[a1cfd2c1b5](https://github.com/vllm-project/vllm/commit/a1cfd2c1b584c4ac197db9cc9ac84a6d973d39df)（[#64250](https://github.com/vllm-project/vllm/pull/64250)）；NIXL `transfer_mode` push（[#64230](https://github.com/vllm-project/vllm/pull/64230)）、Mooncake 跳过 padding（[#63513](https://github.com/vllm-project/vllm/pull/63513)）、MORI embedded（[#61793](https://github.com/vllm-project/vllm/pull/61793)）仅清单。
@@ -1824,7 +1836,7 @@ return max(checkpoint_position, 0)
 
 **白话：** 在 prompt 末尾之前，找一个“既对齐、又留得出重算空间”的最后位置，把 Mamba 的状态存在那里。留多少空间取决于有没有走 EAGLE 末块回退：走回退时，Full Attention 一侧已经会丢掉最后一个命中的 block，所以这里先用全长，对齐后再退一个单位来和它对上；不回退时，要留出最后 token 重算 logits 的位置，lookahead 哈希路径还要留出 hash 需要的那几个 token。
 
-**其中：** `num_tokens` 是用来定位 checkpoint 的 token 长度（调用点传入 prompt 长度或 prefill 终点）；`hash_block_size` 是对齐单位（token），调用点传入的可能是 hash 粒度、调度器 block 大小或 `cache_hit_alignment_tokens`，下面的算例统一把它取成 32，即 $B_{\mathrm{blk}}=32$；`drop_eagle_block` 是是否走 EAGLE 末块回退（布尔）；`num_hash_lookahead_tokens` 就是 $N_{\mathrm{look}}$（token，没有 lookahead 时为 0）；`proof_limit` 是“这个位置之前才允许存 checkpoint”的上限。
+**其中：** `num_tokens` 是用来定位 checkpoint 的 token 长度（调用点传入 prompt 长度或 prefill 终点）；`hash_block_size` 是对齐单位（token），调用点传入的可能是 hash 粒度、调度器 block 大小或 `cache_hit_alignment_tokens`，下面的算例统一把对齐单位取成 32（它可以和 block size $B_{\mathrm{blk}}$ 不同，这里不复用 $B_{\mathrm{blk}}$）；`drop_eagle_block` 是是否走 EAGLE 末块回退（布尔）；`num_hash_lookahead_tokens` 就是 $N_{\mathrm{look}}$（token，没有 lookahead 时为 0）；`proof_limit` 是“这个位置之前才允许存 checkpoint”的上限。
 
 **怎么算出来：**
 
@@ -1833,9 +1845,9 @@ return max(checkpoint_position, 0)
 3. 走回退时再减一个对齐单位；
 4. 结果小于 0 就取 0。
 
-算例（对齐单位 $B_{\mathrm{blk}}=32$）：
+算例（对齐单位 32）：
 
-- 长度 128、走回退：`proof_limit = 128`，对齐得 $128\div32\times32=128$，再减 32，返回 96。旧写法是先把长度减 1 再对齐（$127\div32\times32=96$），再退一个单位得 64，多退了一个边界；
+- 长度 128、走回退：`proof_limit = 128`，对齐得 $128\div32\times32=128$，再减 32，返回 96。#60533（v0.32.0）之前的旧写法是先把长度减 1 再对齐（$127\div32\times32=96$），再退一个单位得 64，多退了一个边界；
 - 长度 130、走回退：$130//32\times32-32=128-32=96$；
 - 长度 130、不回退、$N_{\mathrm{look}}=2$：`proof_limit` $=130-\max(1,2)=128$，对齐得 128，返回 128，比回退路径多保留了一个对齐单位的可复用前缀。
 
@@ -1939,6 +1951,8 @@ processed_computed_tokens = max(0, total_computed_tokens - request.num_in_flight
 
 **怎么算出来：** 乐观位置减去还在飞的那部分，得到“确认安全”的位置。算例：`total_computed_tokens = 300`，其中最近一批 20 个 token 还在 in-flight，则 `processed_computed_tokens` $=300-20=280$；如果没有 in-flight，就是 300。
 
+单位检查：`total_computed_tokens`、`num_in_flight_tokens` 和 `processed_computed_tokens` 的单位都是 token，相减后单位不变。
+
 原因是 in-flight attention 仍可能读取较旧窗口，speculative token 也可能回滚。过早释放会
 把仍在 GPU 执行的读取指向已复用页面，这是严重正确性问题。
 
@@ -1954,15 +1968,17 @@ num_skipped_blocks = min(num_skipped_tokens // B_blk, 已有 block 数)
 
 **白话：** 窗口左边那些不会再读的 token，如果凑满了整块，这些整块就可以释放（换成 null block）；不足一整块的零头那块还要留着。
 
-**其中：** `sliding_window` 是窗口大小 $W$（token）；`extra_retained_tokens` 是为 multi-module 投机额外往窗口左侧多留的 token 数；$N_{\mathrm{ret}}=W-1+\texttt{extra\_retained\_tokens}$；$B_{\mathrm{blk}}$ 是该 group 的 block size；`已有 block 数` 是 `len(req_to_blocks[request_id])`，防止释放数超过实际存在的 block（外部已计算的 token 区间可能还没分配 block）。
+**其中：** `sliding_window` 是窗口大小（token）；`extra_retained_tokens` 是为 multi-module 投机额外往窗口左侧多留的 token 数；$N_{\mathrm{ret}}=\texttt{sliding\_window}-1+\texttt{extra\_retained\_tokens}$；$B_{\mathrm{blk}}$ 是该 group 的 block size；`已有 block 数` 是 `len(req_to_blocks[request_id])`，防止释放数超过实际存在的 block（外部已计算的 token 区间可能还没分配 block）。
 
 **怎么算出来：**
 
-1. 下一个 token 的窗口覆盖 $W$ 个位置，包含它自己，所以窗口左侧不会再读的 token 数是“已算 token 数 $-(W-1)$”；再往左多留 `extra_retained_tokens` 个，得到 `num_skipped_tokens` $=\max(0,\,\texttt{processed\_computed\_tokens}-N_{\mathrm{ret}})$（“已算”指上面已确认的 token 数）；
+1. 下一个 token 的窗口覆盖 `sliding_window` 个位置，包含它自己，所以窗口左侧不会再读的 token 数是“已算 token 数 $-(\texttt{sliding\_window}-1)$”；再往左多留 `extra_retained_tokens` 个，得到 `num_skipped_tokens` $=\max(0,\,\texttt{processed\_computed\_tokens}-N_{\mathrm{ret}})$（“已算”指上面已确认的 token 数）；
 2. 只能释放整块：`num_skipped_tokens // B_blk`；
 3. 取与已有 block 数中较小者。
 
-算例：$W=128$、`extra_retained_tokens = 0`（$N_{\mathrm{ret}}=127$）、$B_{\mathrm{blk}}=16$，`processed_computed_tokens = 280`：`num_skipped_tokens` $=280-127=153$，`num_skipped_blocks` $=\lfloor153/16\rfloor=9$，即前 9 块（token 0 到 143）可以释放，对应表项换成 null。若 `processed_computed_tokens` 为 100（小于 127），则 `max(0, …)` 得 0，不释放。
+算例：`sliding_window = 128`、`extra_retained_tokens = 0`（$N_{\mathrm{ret}}=127$）、$B_{\mathrm{blk}}=16$，`processed_computed_tokens = 280`：`num_skipped_tokens` $=280-127=153$，`num_skipped_blocks` $=\lfloor153/16\rfloor=9$，即前 9 块（token 0 到 143）可以释放，对应表项换成 null。若 `processed_computed_tokens` 为 100（小于 127），则 `max(0, …)` 得 0，不释放。
+
+单位检查：`num_skipped_tokens` 是 token；$B_{\mathrm{blk}}$ 是 token/block，所以 $\lfloor\texttt{num\_skipped\_tokens}/B_{\mathrm{blk}}\rfloor$ 的单位是 block。
 
 **核对：** `SlidingWindowManager.get_num_skipped_tokens`（`vllm/v1/core/single_type_kv_cache_manager.py:1153-1188`）与 `remove_skipped_blocks`（同文件 `:687-725`）@ `05caae03`。
 
@@ -1998,7 +2014,9 @@ max_admission_blocks_per_request = ceil(num_tokens / B_blk) + 1
 2. 向上取整成 block 数：$\lceil\texttt{num\_tokens}/B_{\mathrm{blk}}\rceil$；
 3. 加 1：源码注释的例子是 block size 4、窗口里 4 个 token，因为起点不对齐，要两个块 `[XXCD][EF]` 才装得下 `[CDEF]`。
 
-算例：$W=512$、`extra_retained_tokens = 0`，所以 $N_{\mathrm{ret}}=511$；设 `max_concurrent_batches = 2`、`max_num_batched_tokens = 128`（仅作示意），则 `max_in_flight_tokens` $=2\times128=256$；$B_{\mathrm{blk}}=16$，`max_model_len = 8192`。`num_tokens` $=\min(511+256,\,8192)=767$，$\lceil767/16\rceil=48$，所以 `max_admission_blocks_per_request` $=48+1=49$ 块，而不是 $\lceil512/16\rceil=32$ 块。若 `max_model_len` 只有 400，则 `num_tokens` $=400$，$\lceil400/16\rceil+1=26$。
+算例：`sliding_window = 512`、`extra_retained_tokens = 0`，所以 $N_{\mathrm{ret}}=511$；设 `max_concurrent_batches = 2`、`max_num_batched_tokens = 128`（仅作示意），则 `max_in_flight_tokens` $=2\times128=256$；$B_{\mathrm{blk}}=16$，`max_model_len = 8192`。`num_tokens` $=\min(511+256,\,8192)=767$，$\lceil767/16\rceil=48$，所以 `max_admission_blocks_per_request` $=48+1=49$ 块，而不是 $\lceil512/16\rceil=32$ 块。若 `max_model_len` 只有 400，则 `num_tokens` $=400$，$\lceil400/16\rceil+1=26$。
+
+单位检查：$N_{\mathrm{ret}}$、`max_in_flight_tokens`、`max_model_len`、`num_tokens` 都是 token；$B_{\mathrm{blk}}$ 是 token/block，$\lceil\texttt{num\_tokens}/B_{\mathrm{blk}}\rceil+1$ 的单位是 block。
 
 **核对：** `vllm/v1/kv_cache_interface.py:929-934`（`num_retained_tokens`）与 `:936-964`（`max_admission_blocks_per_request`）@ `05caae03`。
 
@@ -2006,7 +2024,7 @@ max_admission_blocks_per_request = ceil(num_tokens / B_blk) + 1
 
 Manager 释放窗口外的页以后，这些页可能很快被别的请求复用；但 attention kernel 加载 KV tile
 时，tile 可能跨过窗口起点，把窗口左侧已被复用的页也读进来，被 mask 掉的位置如果恰好是
-NaN，仍会污染输出。#60767 在 MRV2 的 `BlockTables.gather_block_tables` 里补了一道保险：
+NaN，仍会污染输出。#60767 起，GPU 与 CPU runner 都在 `gather_block_tables` 里补了一道保险：
 给每个 Sliding Window group，把“本步第一个被调度位置”窗口左侧的整块 entry 换成 null block：
 
 $$
@@ -2036,10 +2054,12 @@ $\lfloor(300-127)/16\rfloor=\lfloor173/16\rfloor=10$，前 10 个 entry（覆盖
 这里的 $B_{\mathrm{blk}}=16$ 只是为了让整除关系好看的教学取值，不是当前配置默认；未指定时配置默认
 block size 是 64，见 §5.2.1。启动时平台、backend 和混合模型对齐可能改成别的值。这是对源码规则的手算，不是 GPU 运行结果。
 
+单位检查：$\mathrm{pos}$、$N_{\mathrm{ret}}$ 都是 token；$B_{\mathrm{blk}}$ 是 token/block，所以 $n_{\mathrm{null}}=\lfloor\max(\mathrm{pos}-N_{\mathrm{ret}},0)/B_{\mathrm{blk}}\rfloor$ 的单位是 block（entry 个数）。
+
 注意它和上面 Manager 的释放用的是同一个式子，只是输入不同：Manager 用已确认的 `processed_computed_tokens`（算例里 280，释放 9 块），Worker 用本步第一个被调度位置 $\mathrm{pos}$（算例里 300，改写 10 个 entry）；Worker 多改写的那一块只是不再被读到，并没有被 Manager 释放。Context parallel（`cp_size>1`）时 block table 的列
 不再对应连续的 token 区间，这道保险被关闭。
 
-**核对：** `vllm/v1/worker/gpu/block_table.py:316-320`（`reach`、`first_pos`、整除 `block_size`）、`:55-63`（`cp_size>1` 时 reach 置 0）与 `vllm/v1/worker/gpu/model_runner.py:689-693`（把 `num_retained_tokens` 传入）@ `05caae03`。
+**核对：** `vllm/v1/worker/gpu/block_table.py:316-320`（`reach`、`first_pos`、整除 `block_size`）、`:55-63`（`cp_size>1` 时 reach 置 0）与 `vllm/v1/worker/gpu/model_runner.py:689-693`（把 `num_retained_tokens` 传入）@ `05caae03`。CPU runner 走同一规则：`vllm/v1/worker/cpu/block_table.py` 的 `CPUBlockTables.gather_block_tables`（`sliding_window_reach` 由 `standalone_model_runner.py:380-417` 传入）用 `floor(max(first_pos - reach, 0) / block_size)` 把行首整块置 null（`:133-141`）；`cp_size>1` 时关闭保险是 GPU `BlockTables.__init__` 的行为（`gpu/block_table.py:59-60`）。
 
 ```mermaid
 flowchart LR
@@ -2492,15 +2512,12 @@ KV Cache 管理的核心不是“保存一个 tensor”，而是维护动态服�
 9. partial-tail 是条件化的细粒度能力，继续写必须维护 CoW 一致性；
 10. Scheduler 负责抢占策略，PagedAttention 负责消费 block table，它们都不等于本层。
 
-2026-10-19 的 v0.32.0 静态复核与 CPU 教学测试记录见
-[升级核对](../../meta/upgrade-v0.32.0-2026-10-19/05-kv-cache.md)；重点是对齐容量、
+2026-10-19 对 v0.32.0 的静态复核与 CPU 教学测试，重点是对齐容量、
 checkpoint 可恢复边界以及按 group 防止异步写入与清零竞争。
-2026-11-10 对 v0.33.0（`4ba787ec9959`）的静态复核见
-[v0.33.0 升级核对](../../meta/upgrade-v0.33.0-2026-11-10/05-kv-cache.md)；重点是规划模块
+2026-11-10 对 v0.33.0（`4ba787ec9959`）的静态复核，重点是规划模块
 迁到 `kv_cache_planning.py`、启动流程里全局分组前移、EAGLE lookahead 哈希，以及
 Sliding Window 的 null 头部处理。那一次核对针对的是当时的 v0.33.0 基线；本章当前源码基线
-是 `05caae03`（见章首），默认 block size 与 Extensible KV 的正文已按此 revision 补写，
-记录见 [本次核对](../../meta/upgrade-main-05caae03-2026-11-10/b7-block64-extensible-kv.md)。
+是 `05caae03`（见章首），默认 block size 与 Extensible KV 的正文已按此 revision 写入。
 
 本章正文、图示、教学模型和 CPU 测试已经完成，`content_complete=true`。当前机器没有可用
 的 vLLM NVIDIA GPU runtime，无法核对真实显存 profiling、GPU copy 和 attention 执行，
