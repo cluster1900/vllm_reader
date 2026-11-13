@@ -90,6 +90,23 @@ EP、PCP、DCP 是进阶支线。**停下来算：** TP=2、PP=2、DP=2、PCP=1�
 假设一份完整模型需要 70 GiB 权重，而单卡只有 48 GiB。增加 DP 不会解决问题，因为
 每个 DP engine 仍要持有完整模型。此时应优先考虑 TP、PP，或者对 MoE 使用 EP。
 
+**白话：**“放不放得下”是一道除法：先算每张卡要装多少权重，再和单卡显存比。
+
+**其中：**完整权重 70 GiB、单卡显存 48 GiB 是教学数字，不是某个真实模型；TP 把层内权重切成 $\mathrm{TP}$ 份，
+所以每卡权重约为 $70\ \mathrm{GiB}/\mathrm{TP}$（“约”是因为 LayerNorm 权重等小张量每个 rank 上都有完整一份）；
+DP 不切权重，每个 DP engine 的每张卡仍是 70 GiB。
+
+**怎么算出来：**
+
+| 配置 | 每卡权重 | 与 48 GiB 比 | 结论 |
+|---|---|---|---|
+| 单卡，或 TP=1 只加 DP | $70\ \mathrm{GiB}$ | 超出 $70-48=22\ \mathrm{GiB}$ | 放不下 |
+| TP=2 | $70/2=35\ \mathrm{GiB}$ | 还剩 $48-35=13\ \mathrm{GiB}$ | 权重放得下；13 GiB 还要装 KV Cache、激活和 CUDA Graph 等（第 05、08 章） |
+
+**核对：**这是教学数字，不对应源码。“切成 $\mathrm{TP}$ 份”的规则见 §9.5（权重沿一个维度切）；
+KV head 少于 TP 时 K/V 投影会复制而不是切分，所以“约”要打折扣，见 §9.1.3 引用的 `LlamaAttention.__init__`
+（`vllm/model_executor/models/llama.py:148-156` @ `05caae03`）。
+
 反过来，如果模型已经能在一张卡上运行，但服务有大量互不相关的请求，DP 往往比 TP
 更直接：每张卡运行完整副本，各自处理请求，避免每层都发生跨卡 collective。
 
@@ -169,19 +186,87 @@ PCP/DCP=多少、互联是什么、请求分布是什么`。
 内的本机编号，不一定等于本机 `cuda:N` 的 `N`。同一台机器上放多个 DP engine 时，换算公式是：
 
 $$
-g=\ell+d\times W,\qquad W=\mathrm{TP}\times\mathrm{PP}\times\mathrm{PCP}
+g=\ell+i_{\mathrm{dp}}\times W_{\mathrm{engine}},\qquad W_{\mathrm{engine}}=\mathrm{TP}\times\mathrm{PP}\times\mathrm{PCP}
 $$
 
-**白话**：同一台机器上，第 0 个 DP engine 占前 $W$ 张卡，第 1 个 DP engine 紧接着占下一段 $W$ 张卡，
+**白话：**同一台机器上，第 0 个 DP engine 占前 $W_{\mathrm{engine}}$ 张卡，第 1 个 DP engine 紧接着占下一段 $W_{\mathrm{engine}}$ 张卡，
 所以要把 engine 序号乘以每个 engine 的卡数，再加上 Worker 在 engine 内的编号。
 
-**符号说明**：$g$ 是本机逻辑 GPU 编号；$\ell$ 是 Worker 的 local rank；$d$ 是这个 DP engine 在本机上的序号
-（`data_parallel_rank_local`，缺省时回退为 `data_parallel_index`）；$W$ 是一个 DP engine 的 Worker 数，
-等于 `ParallelConfig.world_size`，三个并行度都是无单位正整数，$g,\ell,d$ 是从 0 开始的整数。
+**其中：**$g$ 是本机逻辑 GPU 编号（Worker 绑定 `cuda:g`）；$\ell$ 是 Worker 的 local rank，即它在本 engine 内的编号；
+$i_{\mathrm{dp}}$ 是这个 DP engine 在**本机**上的序号（`data_parallel_rank_local`，缺省时回退为 `data_parallel_index`）；
+$W_{\mathrm{engine}}$ 是一个 DP engine 的 Worker 数，等于 `ParallelConfig.world_size`（§9.3.1）。
+TP、PP、PCP 是无单位正整数；$g,\ell,i_{\mathrm{dp}}$ 是从 0 开始的整数，且 $0\le\ell<W_{\mathrm{engine}}$。
 
-例如 TP=2、PP=1、PCP=1、同机 DP=2：$W=2$，第 1 个 DP engine 的两个 Worker（$\ell=0,1$）落在 $g=2,3$。
+**怎么算出来：**
+
+1. 一个 DP engine 的 $W_{\mathrm{engine}}$ 个 Worker 各占一张卡，占用本机一段连续的 $W_{\mathrm{engine}}$ 个编号；
+2. 本机上排第 $i_{\mathrm{dp}}$ 位的 engine 前面已有 $i_{\mathrm{dp}}$ 个 engine，它们一共占了 $i_{\mathrm{dp}}\times W_{\mathrm{engine}}$ 张卡，
+   所以本 engine 的第一张卡编号是 $i_{\mathrm{dp}}\times W_{\mathrm{engine}}$；
+3. engine 内第 $\ell$ 号 Worker 在这一段里排第 $\ell$ 位（从 0 数），卡号就是段首加 $\ell$。
+
+算例一（对应下面的图）：TP=2、PP=1、PCP=1、同机 DP=2，$W_{\mathrm{engine}}=2\times1\times1=2$。
+engine 0 的偏移是 $0\times2=0$，两个 Worker（$\ell=0,1$）落在 $g=0,1$；
+engine 1 的偏移是 $1\times2=2$，两个 Worker 落在 $g=2+0=2$ 与 $g=2+1=3$。
+
+算例二（对应上面的 global rank 6）：TP=2、PP=2、PCP=1、DP=2，$W_{\mathrm{engine}}=2\times2\times1=4$。
+global rank 6 属于 DP engine 1，是该 engine 内的 $\ell=2$ 号 Worker（PP stage 1、TP rank 0，$1\times2+0=2$）。
+如果两个 engine 在**同一台 8 卡机**上，它的本机序号是 $i_{\mathrm{dp}}=1$，$g=2+1\times4=6$，绑定 `cuda:6`；
+如果是两台 4 卡机、每台只放一个 engine，每台机器上的本机序号都是 $i_{\mathrm{dp}}=0$，$g=2+0\times4=2$，绑定 `cuda:2`，
+这就是上面说的“global rank 6 可能绑定本机 `cuda:2`”。
+
 只有当 backend 不是 `ray` / `external_launcher`、DP backend 不是 `ray` 且一个 DP engine 不跨节点
 （`nnodes_within_dp == 1`）时才加偏移；其余情况直接返回 $\ell$，由 Ray 或外部 launcher 先决定设备可见性。
+
+**核对：**公式对应 `ParallelConfig.get_local_gpu_index`（`vllm/config/parallel.py:939-953` @ `05caae03`：条件判断、
+`return local_rank + dp_local_rank * self.world_size` 与回退的 `return local_rank`）；Worker 在 `init_device` 里调用它
+（`vllm/v1/worker/gpu_worker.py:458` @ `05caae03`）。
+
+```mermaid
+flowchart TD
+    A["local rank ℓ：Worker 在本 engine 内的编号"] --> B{"ray 或 external_launcher，DP backend 是 ray，或 DP engine 跨节点？"}
+    B -- 是 --> C["g = ℓ，设备可见性由 Ray 或外部 launcher 决定"]
+    B -- 否 --> D["g = ℓ + i_dp × W_engine"]
+    D --> E0["本机 engine 0（i_dp=0，偏移 0）：ℓ=0,1 对应 cuda:0, cuda:1"]
+    D --> E1["本机 engine 1（i_dp=1，偏移 2）：ℓ=0,1 对应 cuda:2, cuda:3"]
+```
+
+> **读图方法：** 这张图只回答一个问题：Worker 的 local rank 怎样变成 `cuda:N`。第一遍只看菱形：回答“是”的部署由 Ray 或外部 launcher 决定哪张卡可见，本节公式不适用，$g$ 就等于 $\ell$；
+> 回答“否”才进入公式。第二遍看最下面两个方框：它们是 TP=2、PP=1、PCP=1、同机 DP=2 的算例，偏移等于本机 engine 序号乘每个 engine 的卡数 2。
+> 读完后应能对任意 TP、PP、PCP 和本机 engine 序号算出一个 Worker 的 `cuda:N`，并说清它与 global rank、rank in group 不是同一个编号。
+
+同一个 Worker 在三个命名空间里的编号，用算例二（TP=2、PP=2、PCP=1、DP=2，两台 4 卡机各放一个 DP engine）画出来：
+
+```mermaid
+flowchart TB
+    subgraph M0["机器 0：DP engine 0，本机序号 i_dp=0，偏移 0"]
+        direction LR
+        subgraph S00["PP stage 0"]
+            A0["global 0｜ℓ=0｜cuda:0｜TP组内0 PP组内0"]
+            A1["global 1｜ℓ=1｜cuda:1｜TP组内1 PP组内0"]
+        end
+        subgraph S01["PP stage 1"]
+            A2["global 2｜ℓ=2｜cuda:2｜TP组内0 PP组内1"]
+            A3["global 3｜ℓ=3｜cuda:3｜TP组内1 PP组内1"]
+        end
+    end
+    subgraph M1["机器 1：DP engine 1，本机序号 i_dp=0，偏移 0"]
+        direction LR
+        subgraph S10["PP stage 0"]
+            B0["global 4｜ℓ=0｜cuda:0｜TP组内0 PP组内0"]
+            B1["global 5｜ℓ=1｜cuda:1｜TP组内1 PP组内0"]
+        end
+        subgraph S11["PP stage 1"]
+            B2["global 6｜ℓ=2｜cuda:2｜TP组内0 PP组内1"]
+            B3["global 7｜ℓ=3｜cuda:3｜TP组内1 PP组内1"]
+        end
+    end
+    M0 ~~~ M1
+```
+
+> **读图方法：** 这张图只回答一个问题：同一个 Worker 的 global rank、local rank 和“组内编号”各是多少。每个方框是一个 Worker，方框里从左到右依次是 global rank、local rank $\ell$、本机 `cuda:g`、它在 TP 组和 PP 组里的位置；
+> 大框是机器（也是一个 DP engine），中框是 PP stage，同一个中框里的两个方框属于同一个 TP 组。先找“global 6”：它在机器 1，$\ell=2$，$g=2+0\times4=2$，所以是 `cuda:2`，在 TP 组 $\{6,7\}$ 里排第 0、在 PP 组 $\{4,6\}$ 里排第 1，与 §9.3.2 的列表一致。
+> 再对照机器 0 的“global 2”：它的 $\ell$、`cuda:g` 和 TP/PP 组内编号与 global 6 完全相同，只有 global rank 不同——这就是看日志时必须先问“哪个编号”的原因。
+> 如果两个 engine 改放在同一台 8 卡机上，机器 1 的偏移变成 $1\times4=4$，global 6 就绑定 `cuda:6`，图中其余编号不变。
 
 v0.32.0 里 Worker 初始化、NUMA 绑定和网卡亲和各自复制了一份换算，NUMA 与网卡两份只乘了 `TP×PP`，漏掉 PCP；
 v0.33.0 的 #61237 把它们合并到同一个方法 `ParallelConfig.get_local_gpu_index`，并统一计入 PCP。
@@ -250,6 +335,39 @@ $$
 W_{\mathrm{all\_dp}}=\mathrm{TP}\times \mathrm{PP}\times \mathrm{PCP}\times \mathrm{DP}
 $$
 
+**白话：**每多一个并行维度，Worker 数就乘上这个维度的路数；DCP 不在乘积里，因为它复用已有的 rank（§9.3.4）。
+
+**其中：**TP、PP、PCP、DP 是各并行度（无单位正整数）；$W_{\mathrm{engine}}$ 是一个 DP engine 内的 Worker 数，
+$W_{\mathrm{all\_dp}}$ 是所有 DP engine 的 Worker 总数，两者都不含 API、EngineCore 等辅助进程。
+
+**怎么算出来：**把每个 Worker 看成 rank 张量（§9.3.2）里的一个格点：
+
+1. 一个 DP engine 内，格点沿 PP、PCP、TP 三个轴展开，格点数是三个轴长之积 $\mathrm{TP}\times\mathrm{PP}\times\mathrm{PCP}$，每个格点是一个 Worker 进程（一张卡）；
+2. DP 是最外层的轴，把整个 engine 复制 $\mathrm{DP}$ 份，所以总数再乘 $\mathrm{DP}$。
+
+算例：TP=2、PP=2、PCP=1、DP=2：$W_{\mathrm{engine}}=2\times2\times1=4$，$W_{\mathrm{all\_dp}}=4\times2=8$，
+与 §9.3.2 的表（8 个 rank）一致，也与本章开头“停下来算”的 8 个 Worker 一致。把 PCP 改成 2，$W_{\mathrm{engine}}$ 翻倍成 8；把 DCP 改成 2，两个公式的结果都不变。
+
+**核对：**`ParallelConfig.__post_init__` 先令 `world_size = PP × TP × PCP`，再在 `external_launcher` 下乘 DP
+（`vllm/config/parallel.py:1062-1070` @ `05caae03`）；属性 `world_size_across_dp` 是 `world_size × data_parallel_size`
+（`parallel.py:704-707`）。教学代码里 `ParallelTopology.worker_world_size` 与 `world_size_across_dp`
+（`examples/ch09_parallel_topology.py:48-57`）与这两个公式一一对应，运行 `python3 examples/ch09_parallel_topology.py`
+会打印 `workers per DP engine: 4` 与 `workers across DP: 8`。
+
+```mermaid
+flowchart LR
+    TP["TP = 2"] --> M1["× PP = 2"]
+    M1 --> M2["× PCP = 1"]
+    M2 --> WE["W_engine = 4：一个 DP engine 内的 Worker 数"]
+    WE --> M3["× DP = 2"]
+    M3 --> WA["W_all_dp = 8：所有 DP engine 的 Worker 总数"]
+    DCP["DCP：复用 TP 内已有的 rank，不进入乘积"] -.-> WE
+    EXT["external_launcher：world_size 字段已含 DP"] -.-> WA
+```
+
+> **读图方法：** 这张图只回答一个问题：Worker 数是由哪些并行度怎样乘出来的。先顺着实线从左到右读：TP、PP、PCP 三个因子依次相乘得到一个 DP engine 的 $W_{\mathrm{engine}}$，再乘 DP 得到 $W_{\mathrm{all\_dp}}$，框里的数字是上文算例（TP=2、PP=2、PCP=1、DP=2）。
+> 再看两条虚线：DCP 指向 $W_{\mathrm{engine}}$ 但不乘任何数，表示它只重新解释已有的 rank；external_launcher 指向 $W_{\mathrm{all\_dp}}$，表示这条路径下 `world_size` 字段本身就已经是总数，不能再乘一次 DP。
+
 源码字段附近仍有把 `world_size` 简写成 “TPxPP” 的旧说明，但真实赋值已经包含 PCP。
 因此本书以执行代码为准：**PCP 会增加 worker process 数，DCP 不会。**
 
@@ -258,8 +376,10 @@ $$
 在 external launcher 下，`world_size` 本身已经是 `TP×PP×PCP×DP`。此时若再机械读取
 `world_size_across_dp = world_size×DP`，会把 DP 重复计算，不能把该 property 无条件当作
 真实进程总数。读代码时必须同时确认启动方式和字段的消费位置。
+算例：TP=2、PP=1、PCP=1、DP=2 且使用 `external_launcher`：`world_size` 是 $2\times1\times1\times2=4$（真实进程数），
+而 `world_size_across_dp` 是 $4\times2=8$，把 DP 数了两遍。
 
-所有并行度是无单位正整数，`W` 是 worker 数，不包含 API、EngineCore 等辅助进程。
+所有并行度都是无单位正整数。
 能写出乘法不代表组合可运行：此版本已移除 `ParallelConfig` 中 PCP 与 DP 不能同时开启的
 通用禁令，且自 v0.32.0 起 MRV2 PCP 不再禁止 `PP>1`（v0.33.0 沿用），但仍要满足 MLA、DCP、speculation 和 graph
 约束。移除一个校验不代表任意组合可运行。先检查合法性，再算部署规模。
@@ -340,9 +460,39 @@ flowchart TB
 - PCP group：固定 DP、PP、TP，沿 PCP 取一列。
 - PP group：固定 DP、PCP、TP，沿 PP 取一列。
 - DP group：固定 PP、PCP、TP，沿 DP 取一列。
-- EP group：固定 PP，把 DP、PCP、TP 展平为一个专家并行维度。
+- EP group：固定 PP，把 DP、PCP、TP 展平为一个专家并行维度（只有 MoE 模型才创建 EP group，dense 模型没有）。
 
 这是比背 rank 列表更可靠的心智模型。只要画出 rank 张量，就能重新推导 group。
+
+**白话：**rank 张量里每个格点有四个坐标（DP、PP、PCP、TP）。全局 rank 就是按“TP 变化最快”把坐标展平成一维编号；
+固定其中三个坐标、让第四个坐标走遍它的取值，得到的那几个 rank 就是一个 group。
+
+**其中：**$i_{\mathrm{dp}}$、$i_{\mathrm{pp}}$、$i_{\mathrm{pcp}}$、$i_{\mathrm{tp}}$ 是 Worker 在 DP、PP、PCP、TP 四个轴上的坐标，
+都从 0 起，分别小于 $\mathrm{DP}$、$\mathrm{PP}$、$\mathrm{PCP}$、$\mathrm{TP}$；$\mathrm{rank}$ 是全局 rank（无 ExternalDP 时）：
+
+$$
+\mathrm{rank}=\bigl((i_{\mathrm{dp}}\,\mathrm{PP}+i_{\mathrm{pp}})\,\mathrm{PCP}+i_{\mathrm{pcp}}\bigr)\,\mathrm{TP}+i_{\mathrm{tp}}
+$$
+
+**怎么算出来：**
+
+1. 这是行主序展平，最内层的 TP 每走一格，rank 加 $1$；PCP 每走一格要越过 $\mathrm{TP}$ 个 rank，加 $\mathrm{TP}$；
+   PP 每走一格要越过一整个 PCP×TP 块，加 $\mathrm{PCP}\times\mathrm{TP}$；
+   DP 每走一格加 $\mathrm{PP}\times\mathrm{PCP}\times\mathrm{TP}=W_{\mathrm{engine}}$。把四个“每走一格”乘上各自坐标再相加，就是上面的公式；
+2. group 是固定另外三个坐标、让这一个坐标从 0 走到轴长减 1，所以成员之间的间隔就是第 1 步的“每走一格加多少”：
+   TP group 间隔 $1$，PCP group 间隔 $\mathrm{TP}$，PP group 间隔 $\mathrm{PCP}\times\mathrm{TP}$，DP group 间隔 $W_{\mathrm{engine}}$；
+3. EP group 不沿单个轴：固定 PP 坐标后，把 DP、PCP、TP 三个轴合成一个维度。
+
+算例：TP=2、PP=2、PCP=1、DP=2，四个间隔分别是 TP 的 $1$、PP 的 $1\times2=2$、DP 的 $2\times1\times2=4$。
+坐标 $(i_{\mathrm{dp}},i_{\mathrm{pp}},i_{\mathrm{pcp}},i_{\mathrm{tp}})=(1,1,0,0)$ 的 rank 是 $((1\times2+1)\times1+0)\times2+0=6$，与 §9.3.2 的表一致。
+它所在的 TP group：间隔 1，$i_{\mathrm{tp}}=0,1$，成员 $\{6,7\}$；PP group：间隔 2，$i_{\mathrm{pp}}=0,1$，成员 $\{4,6\}$；
+DP group：间隔 4，$i_{\mathrm{dp}}=0,1$，成员 $\{2,6\}$；EP group：固定 $i_{\mathrm{pp}}=1$，$i_{\mathrm{dp}}$ 与 $i_{\mathrm{tp}}$ 各取 0、1，成员 $\{2,3,6,7\}$。
+这四组都出现在 §9.3.2 的列表里。
+
+**核对：**`initialize_model_parallel` 把 rank 排成 `[ExternalDP, DP, PP, PCP, TP]` 五维张量（`vllm/distributed/parallel_state.py:2164-2170` @ `05caae03`，这里取 ExternalDP=1），
+TP group 是 `view(-1, TP)`（`:2175`），PCP 是 `transpose(3, 4)`（`:2285-2287`），PP 是 `transpose(2, 4)`（`:2305`），DP 是 `transpose(1, 4)`（`:2321`），
+EP 是 `transpose(1, 2)` 后按 DP×PCP×TP 重排（`:2343-2353`，且只在 MoE 模型里创建）；
+教学代码 `ParallelTopology.rank` 与 `groups`（`examples/ch09_parallel_topology.py:58`、`:94`）给出同样的公式和四组列表。
 
 ### 9.3.4 DCP 复用现有进程
 
@@ -352,6 +502,16 @@ worker 数。当 PCP 开启时，当前配置要求 DCP 为 `1`、`PCP` 或 `TP�
 
 这个差异直接影响容量规划：`PCP=2` 会让每个 DP engine 的 worker 数翻倍，`DCP=2`
 不会自动多启动两张卡，而是重新解释既有 ranks 的 attention 工作。
+
+**算一算：DCP 取值是否合法。**这是两条校验规则，同样要会手算：
+
+| 条件 | 合法的 DCP | 算例 |
+|---|---|---|
+| $\mathrm{PCP}=1$ | 整除 TP 的数，即 $\mathrm{TP}\bmod\mathrm{DCP}=0$ | TP=8：DCP 可取 1、2、4、8；DCP=3 不合法（$8\bmod3=2$） |
+| $\mathrm{PCP}>1$ | 只能取 $1$、$\mathrm{PCP}$、$\mathrm{TP}\times\mathrm{PCP}$ 三个值之一 | TP=4、PCP=2：DCP 可取 1、2、8；DCP=4 不合法（4 不在 $\{1,2,8\}$ 里） |
+
+**核对：**`ParallelConfig` 的校验（`vllm/config/parallel.py:638-651` @ `05caae03`：`pcp == 1` 时检查 `tp % dcp`，否则检查 `dcp not in (1, pcp, tp * pcp)`）；
+教学代码 `ParallelTopology.__post_init__`（`examples/ch09_parallel_topology.py:39-46`）有同样的两条检查。
 
 ---
 
@@ -427,10 +587,10 @@ workers 可能属于同一个 EP group。只要某些 ranks 进入 all-to-all，
 
 ### 9.5.1 Column Parallel Linear
 
-对线性层 `Y = X A + b`，把权重沿输出维切成：
+对线性层 `Y = X A + b`，把权重沿输出维切成 $\mathrm{TP}$ 份：
 
 $$
-A=[A_0,A_1,\ldots,A_{p-1}]
+A=[A_0,A_1,\ldots,A_{\mathrm{TP}-1}]
 $$
 
 每个 TP rank 计算：
@@ -439,14 +599,46 @@ $$
 Y_i=XA_i+b_i
 $$
 
-先用 shape 建立坐标：`X:[T,Din]`、`A:[Din,Dout]`、`b:[Dout]`，
-`T` 为本轮 token 数，`Din/Dout` 为输入/输出宽度，`p` 为 TP rank 数。Column
-切分后 `A_i:[Din,Dout/p]`、`Y_i:[T,Dout/p]`。本地结果是最终输出的一组列。如果下一个算子也接受分片输出，可以继续保持分片；若
+**白话：**输出的每一列只依赖权重的同一列。所以把权重按列切开，每个 rank 用完整的输入 $X$ 乘自己那几列，
+直接得到输出的那几列，算的时候不需要和别的 rank 通信。
+
+**其中：**先用 shape 建立坐标：`X:[T,D_in]`、`A:[D_in,D_out]`、`b:[D_out]`，$T$ 是本步 token 数，
+$D_{\mathrm{in}}$、$D_{\mathrm{out}}$ 是输入、输出宽度（元素数），$\mathrm{TP}$ 是 TP 路数，$i=0,\ldots,\mathrm{TP}-1$ 是 TP rank 序号
+（$D_{\mathrm{out}}$ 必须能被 $\mathrm{TP}$ 整除）。Column 切分后 `A_i:[D_in,D_out/TP]`、`b_i:[D_out/TP]`、`Y_i:[T,D_out/TP]`：
+$A_i$ 是 $A$ 的第 $i$ 份列块，$b_i$ 是偏置里对应这些列的那一段，$Y_i$ 是本 rank 算出的输出列块。
+
+**怎么算出来：**
+
+1. 矩阵乘的第 $j$ 列输出只用到 $A$ 的第 $j$ 列，与其他列无关；
+2. 把 $A$ 的列按顺序分成 $\mathrm{TP}$ 块，分块乘法给出 $XA=[XA_0,XA_1,\ldots,XA_{\mathrm{TP}-1}]$；
+3. 偏置对每个输出列各加一个数，所以也按同样的列切成 $b_i$，每个 rank 加自己那一段：$Y_i=XA_i+b_i$，把各块拼起来就是 $XA+b$。
+
+算例（TP=2，教学数字）：$X=[1,2]$（$T=1$、$D_{\mathrm{in}}=2$），$A=\begin{bmatrix}1&2&3&4\\5&6&7&8\end{bmatrix}$（$D_{\mathrm{out}}=4$），$b=[1,1,1,1]$。
+完整计算：$XA=[1\times1+2\times5,\ 1\times2+2\times6,\ 1\times3+2\times7,\ 1\times4+2\times8]=[11,14,17,20]$，加 $b$ 得 $[12,15,18,21]$。
+切分后 $A_0=\begin{bmatrix}1&2\\5&6\end{bmatrix}$、$A_1=\begin{bmatrix}3&4\\7&8\end{bmatrix}$，$b_0=b_1=[1,1]$：
+rank 0 算 $[11,14]+[1,1]=[12,15]$，rank 1 算 $[17,20]+[1,1]=[18,21]$，两块拼起来是 $[12,15,18,21]$，与完整计算相同。
+shape 检查：$Y_i$ 是 `[1,2]`，两块拼成 `[1,4]`。
+
+**核对：**`ColumnParallelLinear` 的文档字符串同样写 $Y=XA+b$、$A=[A_1,\ldots,A_p]$（`vllm/model_executor/layers/linear.py:439-443` @ `05caae03`，源码从 1 起数）；
+偏置按 `output_size_per_partition` 建（`:550-551`）；`forward` 里 `skip_bias_add` 为假才把偏置交给本地矩阵乘（`:623`）；
+教学代码 `column_parallel_linear` 返回不含偏置的 $XA_i$（`examples/ch09_parallel_topology.py:184`），对上面的 $X,A$ 得到 `[[[11, 14]], [[17, 20]]]`。
+
+先用 shape 看本地结果：它是最终输出的一组列。如果下一个算子也接受分片输出，可以继续保持分片；若
 调用者要求完整 hidden states，则执行 all-gather：
 
 $$
-Y=\operatorname{concat}(Y_0,Y_1,\ldots,Y_{p-1})
+Y=\operatorname{concat}(Y_0,Y_1,\ldots,Y_{\mathrm{TP}-1})
 $$
+
+**白话：**all-gather 把每个 rank 手里的列块按 rank 序号首尾相接，之后每个 rank 都持有完整的 $Y$。
+
+**其中：**$Y_i$ 的 shape 是 `[T,D_out/TP]`，$\operatorname{concat}$ 沿最后一维（列）按 $i=0,1,\ldots$ 的顺序拼接，结果 $Y$ 的 shape 是 `[T,D_out]`。
+
+**怎么算出来：**上面的算例里 $Y_0=[12,15]$、$Y_1=[18,21]$，沿列拼接得 $[12,15,18,21]$，两个 `[1,2]` 变成 `[1,4]`，列数 $\mathrm{TP}\times D_{\mathrm{out}}/\mathrm{TP}=D_{\mathrm{out}}$。
+每个 rank 要从其余 $\mathrm{TP}-1$ 个 rank 各收到 $T\times D_{\mathrm{out}}/\mathrm{TP}$ 个元素，上例每个 rank 收到 2 个元素，是完整 $Y$（4 个元素）的 $(\mathrm{TP}-1)/\mathrm{TP}=1/2$。
+
+**核对：**`gather_output` 为真且 `tp_size > 1` 时调用 `tensor_model_parallel_all_gather(output_parallel)`（`linear.py:629-630` @ `05caae03`），
+它默认沿 `dim=-1` 拼接（`vllm/distributed/communication_op.py:17-21`）；教学代码 `all_gather_columns`（`examples/ch09_parallel_topology.py:190`）按行拼接各 rank 的输出列，得到 `[[11, 14, 17, 20]]`（不含偏置）。
 
 ```mermaid
 flowchart LR
@@ -460,7 +652,7 @@ flowchart LR
 > **读图方法：** 这是“Column Parallel Linear”的流程图。先从左向右只追一条主路径，确认输入经过哪些关键阶段到达输出；第二遍再看虚线、回边和旁路，它们通常表示反馈、复用或可选分支。
 
 `vllm/model_executor/layers/linear.py` 的 `ColumnParallelLinear` 体现了这套契约；是否 gather
-由层构造参数与后续算子布局决定，不是每次都无条件通信。
+由构造参数 `gather_output`（默认 `False`）、`tp_size > 1` 与后续算子布局决定，不是每次都无条件通信。
 
 ### 9.5.2 Row Parallel Linear
 
@@ -468,26 +660,45 @@ flowchart LR
 
 $$
 \begin{aligned}
-A &= \begin{bmatrix} A_0 \\ A_1 \\ \vdots \\ A_{p-1} \end{bmatrix},\\
-X &= [X_0,X_1,\ldots,X_{p-1}].
+A &= \begin{bmatrix} A_0 \\ A_1 \\ \vdots \\ A_{\mathrm{TP}-1} \end{bmatrix},\\
+X &= [X_0,X_1,\ldots,X_{\mathrm{TP}-1}].
 \end{aligned}
 $$
 
 每个 rank 只能得到 partial output：
 
 $$
-P_i=X_iA_i
+Y^{\mathrm{part}}_i=X_iA_i
 $$
 
 最终输出是所有 partial output 的和：
 
 $$
-Y=\sum_i P_i+b
+Y=\sum_{i=0}^{\mathrm{TP}-1} Y^{\mathrm{part}}_i+b
 $$
 
-这里 `X_i:[T,Din/p]`、`A_i:[Din/p,Dout]`，所以每个 `P_i` 都是 `[T,Dout]`，
-但只累加了部分输入维度，必须求和。例如 `X=[1,2]`、`A=[[3],[4]]`，两个 rank 分别
-算出 3 和 8，完整结果是 11；concat 得到 `[3,8]` 就错了。
+**白话：**切在输入维上，每个 rank 只看到输入的一段和权重对应的几行，算出来的只是“部分和”，还不是最终输出。
+必须把各 rank 的部分和**加**起来；把它们拼接是错的。
+
+**其中：**这里 `X_i:[T,D_in/TP]`、`A_i:[D_in/TP,D_out]`，所以每个 $Y^{\mathrm{part}}_i$ 的 shape 是 `[T,D_out]`，与最终的 $Y$ 相同，
+只是只累加了部分输入维度；$b$ 是偏置 `[D_out]`，整个输出只加一次；$i=0,\ldots,\mathrm{TP}-1$ 是 TP rank 序号。
+
+**怎么算出来：**
+
+1. 输出的每个元素是对输入维 $k$ 的一个求和：$Y[t,j]=\sum_{k}X[t,k]\,A[k,j]$；
+2. 把求和下标 $k$ 切成 $\mathrm{TP}$ 段，第 $i$ 段由 rank $i$ 负责，它只需要 $X$ 的对应列 $X_i$ 和 $A$ 的对应行 $A_i$，算出这一段的和 $Y^{\mathrm{part}}_i=X_iA_i$；
+3. 加法可以分段结合，所以各段的和相加等于整个和：$XA=\sum_iX_iA_i$；偏置不依赖 $k$，最后加一次。
+
+算例（TP=2，教学数字）：$X=[1,2]$、$A=\begin{bmatrix}3\\4\end{bmatrix}$（$T=1$、$D_{\mathrm{in}}=2$、$D_{\mathrm{out}}=1$）。
+完整结果是 $1\times3+2\times4=11$。切分后 rank 0 持有 $X_0=[1]$、$A_0=[3]$，算出 $Y^{\mathrm{part}}_0=3$；rank 1 持有 $X_1=[2]$、$A_1=[4]$，算出 $Y^{\mathrm{part}}_1=8$。
+求和 $3+8=11$，与完整结果一致；concat 得到 $[3,8]$ 就错了。
+加上偏置 $b=[1]$：只有 rank 0 把 $b$ 加进自己的部分和（$3+1=4$），all-reduce 之后 $4+8=12=11+1$；如果每个 rank 都加，会得到 $4+9=13$，偏置被加了两次。
+shape 检查：$[1,1]\cdot[1,1]=[1,1]$，$Y^{\mathrm{part}}_i$ 与 $Y$ 同为 `[1,1]`。
+
+**核对：**`RowParallelLinear` 的文档字符串同样把 $A$ 沿第一维、$X$ 沿第二维切成 $p$ 份（`vllm/model_executor/layers/linear.py:1686-1697` @ `05caae03`）；
+`forward` 里 `bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias`（`:1847`），保证偏置不被加多次；
+`reduce_results` 且 `tp_size > 1` 时对 `output_parallel` 做 all-reduce（`:1850-1851`）；
+教学代码 `row_parallel_linear` 与 `all_reduce_sum`（`examples/ch09_parallel_topology.py:202`、`:220`）对 $X=[1,2]$、$A=[[3],[4]]$ 分别给出 `[[[3]], [[8]]]` 与 `[[11]]`（不含偏置）。
 
 默认 `reduce_results=True` 且 `TP>1` 时执行 all-reduce；关闭规约则返回 partial
 output，让上层继续处理。直接加 bias 的路径只在 TP rank 0 加一次；若
@@ -551,10 +762,31 @@ TP rank 和 shard dimension 只装载本地片段。排查 shape 错误时，应
 粗略地，一层的时间可以写成：
 
 $$
-T_{\mathrm{layer}}(p)\approx \frac{T_{\mathrm{compute}}(1)}{p}+T_{\mathrm{collective}}(p)+T_{\mathrm{imbalance}}
+\Delta t_{\mathrm{layer}}(\mathrm{TP})\approx \frac{\Delta t_{\mathrm{compute}}(1)}{\mathrm{TP}}+\Delta t_{\mathrm{collective}}(\mathrm{TP})+\Delta t_{\mathrm{imbalance}}
 $$
 
-小 batch decode 的矩阵乘较小，$T_{\mathrm{compute}}/p$ 的收益有限，而每层 collective 的固定启动
+**白话：**TP 路并行时，一层的耗时 = 被摊薄的计算时间 + 这一层必须付的通信时间 + 最慢的 rank 拖出来的等待。
+计算能摊薄，通信和等待摊不薄，所以 TP 不一定更快。
+
+**其中：**$\Delta t_{\mathrm{layer}}(\mathrm{TP})$ 是 TP 路时一层的耗时；$\Delta t_{\mathrm{compute}}(1)$ 是单卡（TP=1）时这一层的计算耗时；
+$\Delta t_{\mathrm{collective}}(\mathrm{TP})$ 是这一层所有 collective（例如 all-reduce）的总耗时，TP=1 时没有；
+$\Delta t_{\mathrm{imbalance}}$ 是各 rank 计算量或速度不均造成的等待，不小于 0；单位都是 s 或 ms。这是本书的粗略教学模型，$\Delta t_{\mathrm{layer}}$ 等记号是本书记号，不是源码里的变量。
+
+**怎么算出来：**
+
+1. 理想情况下，矩阵乘的计算量均分给 $\mathrm{TP}$ 个 rank，各自并行算，每个 rank 只花单卡的 $1/\mathrm{TP}$：$\Delta t_{\mathrm{compute}}(1)/\mathrm{TP}$；
+2. 但每个 RowParallel 端点都要做 collective（§9.5.3），它有固定的启动延迟，数据量也不随计算变小，不能被 $\mathrm{TP}$ 摊薄，所以直接加上 $\Delta t_{\mathrm{collective}}(\mathrm{TP})$；
+3. collective 要等所有 rank 到齐，一层结束的时刻由最慢的 rank 决定，所以再加上等待 $\Delta t_{\mathrm{imbalance}}$。
+
+算例（教学数字）：大 batch，$\Delta t_{\mathrm{compute}}(1)=1.0\ \mathrm{ms}$、TP=2、$\Delta t_{\mathrm{collective}}(2)=0.1\ \mathrm{ms}$、$\Delta t_{\mathrm{imbalance}}=0.02\ \mathrm{ms}$：
+$\Delta t_{\mathrm{layer}}(2)\approx1.0/2+0.1+0.02=0.62\ \mathrm{ms}$，比单卡的 $1.0\ \mathrm{ms}$ 快，加速约 $1.0/0.62\approx1.6$ 倍。
+小 batch decode，$\Delta t_{\mathrm{compute}}(1)=0.1\ \mathrm{ms}$、其他不变：$\Delta t_{\mathrm{layer}}(2)\approx0.1/2+0.1+0.02=0.17\ \mathrm{ms}$，比单卡的 $0.1\ \mathrm{ms}$ 还慢。
+单位检查：ms $+$ ms $+$ ms $=$ ms。
+
+**核对：**这是估算模型，源码里没有对应函数；它与 §9.14.1 的 alpha-beta 通信模型是同一个思路（固定延迟加数据量除以带宽）。
+实际占比要用 profiler 的时间线测，不能用这个公式代替测量。
+
+小 batch decode 的矩阵乘较小，$\Delta t_{\mathrm{compute}}(1)/\mathrm{TP}$ 的收益有限，而每层 collective 的固定启动
 延迟仍存在。PCIe、跨 NUMA 或跨节点 TP 会进一步放大通信成本。所以“TP=2 比单卡慢”
 完全可能是合理结果，不表示 TP 实现错误。
 
@@ -568,10 +800,29 @@ $$
 
 `vllm/distributed/utils.py:get_pp_indices` 负责默认层划分。它不仅做平均除法，还把余数
 从倒数第二个 stage 开始向前逐个分配，每个 stage 加一层，最后一 stage 不接收余数。
-这不是按几何中心对称分配：12 层、PP=5 的层数是 `[2,2,3,3,2]`，而非 `[2,3,3,2,2]`。
+12 层、PP=5 的层数是 `[2,2,3,3,2]`：多出来的 2 层给了 stage 3 和 stage 2，stage 0 和最后的 stage 4 都没有。
 显式设置 `VLLM_PP_LAYER_PARTITION` 时则使用校验后的自定义分配。
 
-例如 10 层、PP=3：
+**白话：**先让每个 stage 平分，再把除不尽的余数一层一层补给倒数第二个、倒数第三个……stage；最后一个 stage 不补，
+因为它还要承担最终 norm（见 §9.6.3）。
+
+**其中：**$L$ 是模型层数，PP 是 stage 数；stage 编号从 0 起；`partitions` 是各 stage 层数组成的列表，下标 $-1$ 表示最后一个 stage、$-2$ 表示倒数第二个，依此类推；
+stage 的层区间写成左闭右开 $[\mathrm{start},\mathrm{end})$。
+
+**怎么算出来：**
+
+1. 每个 stage 先分到基数 $\lfloor L/\mathrm{PP}\rfloor$ 层；
+2. 余数是 $L\bmod\mathrm{PP}$，有几层余数就给几个 stage 各加一层，顺序是 `partitions[-2]`、`partitions[-3]`……（源码里的 `for i in range(2, remaining_layers + 2): partitions[-i] += 1`）；
+3. stage $k$ 的 $\mathrm{start}$ 是前面所有 stage 的层数之和，$\mathrm{end}=\mathrm{start}+\mathtt{partitions}[k]$。
+
+算例一：$L=10$、PP=3：基数 $\lfloor10/3\rfloor=3$，余数 $10\bmod3=1$，给 `partitions[-2]`（stage 1）加一层，得 `[3,4,3]`；
+区间是 $[0,3)$、$[3,7)$、$[7,10)$，总层数 $3+4+3=10$。
+算例二：$L=12$、PP=5：基数 $\lfloor12/5\rfloor=2$，余数 $12\bmod5=2$，给 `partitions[-2]`（stage 3）和 `partitions[-3]`（stage 2）各加一层，得 `[2,2,3,3,2]`，总层数 $2+2+3+3+2=12$。
+
+**核对：**`get_pp_indices`（`vllm/distributed/utils.py:239-256` @ `05caae03`：基数、余数循环与前缀和）；教学代码 `pipeline_partitions`
+（`examples/ch09_parallel_topology.py:233`）对 $L=10$、PP=3 给出 `[(0, 3), (3, 7), (7, 10)]`，对 $L=12$、PP=5 给出 `[(0, 2), (2, 4), (4, 7), (7, 10), (10, 12)]`。
+
+例如 10 层、PP=3（算例一的结果）：
 
 ```text
 stage 0: [0, 3)  -> 3 layers
@@ -579,7 +830,7 @@ stage 1: [3, 7)  -> 4 layers
 stage 2: [7, 10) -> 3 layers
 ```
 
-若只是用 `ceil(num_layers / pp)` 手算，会得到不同边界。
+若只是用 `ceil(num_layers / pp)` 手算，$L=10$、PP=3 会得到 $\lceil10/3\rceil=4$ 层一段的边界 $[0,4)$、$[4,8)$、$[8,10)$，与上面不同。
 
 ### 9.6.2 `PPMissingLayer` 表达“不归本 rank 所有”
 
@@ -604,7 +855,9 @@ flowchart TB
 
 以 Llama 路径为例：
 
-- PP first rank 负责 token embedding；
+- PP first rank 负责 token embedding 的查表（`LlamaModel.forward` 只在 `is_first_rank` 时调用 `embed_input_ids`，`llama.py:414-420` @ `05caae03`）。
+  `embed_tokens` 这个模块本身在 Llama 里还会在另外两种情况下于最后一个 rank 上构建：`tie_word_embeddings` 为真（`lm_head` 与它共享权重），
+  或 `spec_decode_needs_target_embed(vllm_config)` 为真（hidden-state drafter 可能复用目标模型的输入 embedding）；其余 rank 放 `PPMissingLayer`（`llama.py:377-388`）；
 - 非 first rank 从 `IntermediateTensors` 取得上游 hidden states；
 - 非 last rank 执行本地 layers 后返回 `IntermediateTensors`；
 - PP last rank 执行最终 norm，并进入 logits 与 sampling 路径。
@@ -637,6 +890,23 @@ sequenceDiagram
 TP group 内 all-gather 恢复完整 tensor。这减少了跨 stage 重复发送完整张量的字节数，
 同时增加接收侧 TP group 的通信；端到端收益需要结合互连拓扑测量。已经分片的 tensor（例如特定 SP residual）
 需要关闭该 gather 优化，不能重复切分。
+
+**算一算：切片发送省了多少字节。**
+
+**白话：**发送侧 TP 各 rank 手里的这份 tensor 是一模一样的副本。与其每个 rank 都把整份发给下一个 stage 的对应 rank，
+不如每个 rank 只发 $1/\mathrm{TP}$ 片，接收侧再用 all-gather 把片拼回去。
+
+**其中：**$M_{\mathrm{payload}}$ 是这个 tensor 的字节数；TP 是发送侧（也是接收侧）的 TP 路数；默认只有 tensor 的元素数能被 $\mathrm{TP}$ 整除时才切片
+（`_should_use_all_gather` 的默认判据；调用方可以按 key 覆盖，例如已经分片的 tensor 设为不切）。
+
+**怎么算出来：**不切片时，$\mathrm{TP}$ 个 rank 各发 $M_{\mathrm{payload}}$ 字节，跨 stage 的链路上一共 $\mathrm{TP}\times M_{\mathrm{payload}}$；
+切片时每个 rank 只发 $M_{\mathrm{payload}}/\mathrm{TP}$，合计 $M_{\mathrm{payload}}$，跨 stage 的字节数降到原来的 $1/\mathrm{TP}$，代价是接收侧多一次 TP 内 all-gather。
+算例（教学数字）：hidden states 的 shape 是 `[T,D]`，取 $T=1024$、$D=4096$、bf16（2 byte/元素）：
+$M_{\mathrm{payload}}=1024\times4096\times2\ \mathrm{byte}=8\ \mathrm{MiB}$。TP=4 时，每个 rank 发 $8/4=2\ \mathrm{MiB}$，四个 rank 合计 $4\times2=8\ \mathrm{MiB}$；
+不切片则是 $4\times8=32\ \mathrm{MiB}$。单位检查：token $\times$ 元素/token $\times$ byte/元素 $=$ byte。
+
+**核对：**发送侧用 `tensor.reshape(all_gather_size, -1)[all_gather_rank]` 取自己那一片（`vllm/distributed/parallel_state.py:1224-1227` @ `05caae03`）；
+判据是 `numel % all_gather_group.world_size == 0`（`:1073-1085`）；接收侧在 `:1338-1360` 同样判断，先收片再 `all_gather` 并还原 shape。
 
 [源码] `vllm/distributed/parallel_state.py` - `GroupCoordinator.isend_tensor_dict`、
 `irecv_tensor_dict`、`_should_use_all_gather`
@@ -671,6 +941,23 @@ EngineCore。MultiprocExecutor 当前计算的输出 rank 与末 PP stage、TP/P
 PCP rank 0、TP rank 0 的 Worker。普通执行路径选择它向 EngineCore 回复，是 Executor 的
 输出路由约定，不表示只有它计算 logits、采样或持有结果。
 
+**白话：**这个 Executor 约定回复 EngineCore 的 Worker，是最后一个 PP stage 里排第一的那个（PCP 序号 0、TP 序号 0）。
+
+**其中：**`world_size` 是一个 DP engine 的 Worker 数，即 $W_{\mathrm{engine}}=\mathrm{TP}\times\mathrm{PP}\times\mathrm{PCP}$（§9.3.1）；
+输出 rank 记为 $\mathrm{rank}_{\mathrm{out}}$，它是 engine 内的 rank，而不是 DP 全局 rank。
+
+$$
+\mathrm{rank}_{\mathrm{out}}=W_{\mathrm{engine}}-\mathrm{TP}\times\mathrm{PCP}
+$$
+
+**怎么算出来：**engine 内的 rank 按 PP、PCP、TP 展平，TP 变化最快（§9.3.3）；最后一个 PP stage 占最后 $\mathrm{PCP}\times\mathrm{TP}$ 个 rank，
+它的第一个 rank 就是总数减去这段长度；这个 rank 的 PCP 坐标和 TP 坐标都是 0。
+算例一（源码注释里的例子）：TP=8、PP=4、PCP=1，$W_{\mathrm{engine}}=32$，$32-8\times1=24$：stage 3 占 rank 24 到 31，24 号是它的 TP rank 0。
+算例二：TP=2、PP=2、PCP=2，$W_{\mathrm{engine}}=8$，$8-2\times2=4$：stage 1 占 rank 4 到 7，4 号是 PCP 0、TP 0（按 §9.3.3 的公式 $((0\times2+1)\times2+0)\times2+0=4$）。
+
+**核对：**`MultiprocExecutor._get_output_rank` 返回 `world_size - tensor_parallel_size * prefill_context_parallel_size`，注释里同样用 TP=8、PP=4 算出 $32-8=24$
+（`vllm/v1/executor/multiproc_executor.py:683-697` @ `05caae03`）。
+
 例如 MRV2 启用 batch-sharded sampling 时，会让不同 TP ranks 为各自负责的请求采样，
 再通过 `gather_sampler_output` 汇合结果。KV/encoder connector 的输出聚合器还可能要求
 Executor 收集多个 rank 的回复；不能把“一份最终响应”写成所有配置下只收一个 rank。
@@ -691,17 +978,37 @@ v0.32.0 的 `VllmConfig._validate_batch_sharded_sampling` 在自适应验证开�
 （构造参数 `copy_admitted_drafts_to_host`）。每个请求的实际 logits 行数按下式计算：
 
 $$
-n_i=s_i-d_i+a_i
+N_{\mathrm{row},i}=N_{\mathrm{sch},i}-N_{\mathrm{drf},i}+N_{\mathrm{acc},i}
 $$
 
-**白话**：先按“调度上限”给请求预留 logits 行，再把“调度了但没被接纳”的 draft 行扣掉，得到真正参与采样的行数。
+**白话：**先按“调度上限”给请求预留 logits 行，再把“调度了但没被接纳”的 draft 行扣掉，得到真正参与采样的行数。
 
-**符号说明**：$i$ 是 batch 内的请求序号；$s_i$ 是调度时该请求的 logits 行数；$d_i$ 是调度时它带的 draft token 数；
-$a_i$ 是自适应验证实际接纳的 draft 数，满足 $0\le a_i\le d_i$；三者与 $n_i$ 都以“行”或“token”为单位，是非负整数。
-未启用自适应验证时 $a_i=d_i$，公式退化为 $n_i=s_i$。各 TP rank 仍按 `req_state_idx % TP` 决定请求归属，
-再用 $n_i$ 汇总出每个 owner 的发送行数，所以所有 rank 不经通信就算出同一份计划。
+**其中：**$i$ 是 batch 内的请求序号；$N_{\mathrm{sch},i}$ 是调度时该请求预留的 logits 行数，$N_{\mathrm{drf},i}$ 是调度时它带的 draft token 数，
+$N_{\mathrm{acc},i}$ 是自适应验证实际接纳的 draft 数，满足 $0\le N_{\mathrm{acc},i}\le N_{\mathrm{drf},i}$；
+$N_{\mathrm{row},i}$ 是实际参与采样的 logits 行数。四个量都以“行”或“token”为单位，是非负整数。
+注意 $N_{\mathrm{sch},i}$ 是按调度上限预留的 logits 行数，**不等于**第 04 章里请求本步被调度的 token 数 $N_{\mathrm{scheduled}}$。
+未启用自适应验证时 $N_{\mathrm{acc},i}=N_{\mathrm{drf},i}$，公式退化为 $N_{\mathrm{row},i}=N_{\mathrm{sch},i}$。
 
-[源码] `vllm/v1/worker/gpu/sample/batch_shard.py` - `BatchSharder.__init__`、`BatchSharder.shard_sampler_inputs`（`batch_shard.py:209-224`、`:262-273`、`:338-351` @ `05caae03`）
+**怎么算出来：**
+
+1. 调度时一个请求要采样的 logits 行数是“它的 draft token 数 + 每步新采样的位置数（通常为 1）”，即 $N_{\mathrm{sch},i}=N_{\mathrm{drf},i}+1$（源码 `num_logits = num_draft_tokens_per_req + num_bonus_tokens`）；
+2. 自适应验证只接纳其中 $N_{\mathrm{acc},i}$ 个 draft，其余 $N_{\mathrm{drf},i}-N_{\mathrm{acc},i}$ 个 draft 对应的行不再参与采样，要从预留的行数里扣掉；
+3. 所以 $N_{\mathrm{row},i}=N_{\mathrm{sch},i}-(N_{\mathrm{drf},i}-N_{\mathrm{acc},i})$，整理成上面的式子；代入第 1 步，$N_{\mathrm{row},i}=1+N_{\mathrm{acc},i}$。
+
+算例（教学数字）：batch 里 3 个请求，各带 $N_{\mathrm{drf},i}=3$ 个 draft，所以 $N_{\mathrm{sch},i}=3+1=4$；自适应验证实际接纳 $N_{\mathrm{acc},i}=3,1,0$。
+$N_{\mathrm{row},i}=4-3+3=4$、$4-3+1=2$、$4-3+0=1$，合计 $4+2+1=7$ 行，而按调度上限预留是 $3\times4=12$ 行。
+各 TP rank 按请求归属汇总自己要发送的行数：TP=2 时请求 0、1、2 的 owner 是 rank 0、1、0（见下面的归属规则），rank 0 发送 $4+1=5$ 行，rank 1 发送 $2$ 行，合计仍是 7。
+
+各 TP rank 按 batch 内位置 $i$ 决定请求归属（owner 是 $i\bmod\mathrm{TP}$，`shard_owners`；有 draft logits 缓存时按缓存里记录的 owner，`owners_of`），
+再用 $N_{\mathrm{row},i}$ 汇总出每个 owner 的发送行数，所以所有 rank 不经通信就算出同一份计划。
+（v0.33.0 的 #58466 当时按 `req_state_idx % TP` 归属；`05caae03` 已改为按 batch 位置，见本节末尾“main 上的变化”里的 #64356。）
+
+**核对：**`BatchSharder.shard_sampler_inputs` 里 `num_logits_per_req_np = np.diff(cu_num_logits_np)`，自适应验证开启时再减 `num_draft_tokens_per_req`、加 `num_admitted_draft_tokens_np`
+（`vllm/v1/worker/gpu/sample/batch_shard.py:262-274` @ `05caae03`），再用 `np.bincount(req_owner_np, weights=...)` 汇总每个 owner 的行数（`:278-280`）；
+$N_{\mathrm{sch},i}$ 的来源是 `num_logits = num_draft_tokens_per_req + num_bonus_tokens`（`vllm/v1/worker/gpu/model_runner.py:1502-1503`）；
+归属函数 `shard_owners`（`batch_shard.py:85-87`）。
+
+[源码] `vllm/v1/worker/gpu/sample/batch_shard.py` - `BatchSharder.__init__`、`BatchSharder.shard_sampler_inputs`（`batch_shard.py:209-228`、`:262-275`、`:336-351` @ `05caae03`）
 
 [源码] `vllm/v1/worker/gpu/spec_decode/adaptive_verification.py` - `AdaptiveVerificationManager` 的构造参数 `copy_admitted_drafts_to_host`（`adaptive_verification.py:234` 声明、`:269` 赋值，类定义在 `:227` @ `05caae03`）
 
@@ -712,6 +1019,7 @@ PP 里只有末 stage 能采样，其他 stage 必须拿到“上一步采样出
 
 - 采样结果的列数不再固定为 `max_sample_len = 投机步数 + 1`：当步 `num_draft_tokens > 0` 才用这个宽度，否则只广播 1 列
   （`PPHandler._sample_len`，`pp_utils.py:107-109`）。发送端 `broadcast` 与接收端 `receive` 用同一个函数，保证两端 `shape` 一致。
+  这个宽度的算法见本节下面“**算一算：广播宽度与字节数**”。
 - draft 的广播与接收必须成对：接收端 `receive(input_batch, recv_drafts=...)` 的 `recv_drafts` 要等于“末 stage 这一步是否调用
   `broadcast_drafts`”。模型运行器用 `num_spec_tokens > 0` 同时决定两端（`model_runner.py:2248-2249`、`:2410-2411`）；
   没有提出 draft 的一步（例如 `skip_drafts`）两端都不广播；collective 两端必须成对调用，否则无法配对。
@@ -749,6 +1057,27 @@ sequenceDiagram
 > 第二遍再看内层 `alt`：draft 是否广播由 `num_spec_tokens > 0` 同时决定两端，并且发送端还要求 `sampled_tokens_broadcast` 为真。
 > 读完后应记住：collective 两端的“是否参与”和“张量形状”必须由同一个条件推出。
 
+**算一算：广播宽度与字节数。**
+
+**白话：**一个请求每步最多产出“投机步数个 draft 被接受，再加 1 个新采样的 token”，所以采样结果最多需要“投机步数 + 1”列；
+这一步根本没有 draft 时，只要 1 列就够，广播也就窄了。
+
+**其中：**“投机步数”是配置的 speculative 步数（`num_speculative_steps`），这里记作 $k$ 只在本段使用；`max_sample_len` 是广播宽度的上限，
+`num_reqs` 是 batch 内的请求数。`sampled_tokens` 的 shape 是 `[num_reqs, 宽度]`（int64，8 byte/元素），`combined` 的 shape 是 `[2, num_reqs]`（int32，4 byte/元素）。
+
+**怎么算出来：**
+
+1. 宽度上限 `max_sample_len` $=k+1$：最多接受 $k$ 个 draft，再加 1 个新采样的 token；
+2. 当步宽度是 `max_sample_len`（`num_draft_tokens > 0`）或 1（没有 draft）；
+3. 字节数 $=$ 行数 $\times$ 宽度 $\times$ 每元素字节数，`combined` 另算。
+
+算例（教学数字）：$k=3$、`num_reqs` $=8$。有 draft 的一步：宽度 $3+1=4$，`sampled_tokens` 是 $8\times4\times8=256\ \mathrm{byte}$，`combined` 是 $2\times8\times4=64\ \mathrm{byte}$；
+没有 draft 的一步：宽度 1，`sampled_tokens` 是 $8\times1\times8=64\ \mathrm{byte}$，`combined` 不变。
+两端必须用同一个宽度：发送端的 `shape[-1]` 与接收端 `torch.empty(num_reqs, sample_len)` 对不上，collective 就会错位。
+
+**核对：**`self.max_sample_len = num_speculative_steps + 1`（`vllm/v1/worker/gpu/pp_utils.py:70` @ `05caae03`）；`_sample_len` 返回 `max_sample_len if input_batch.num_draft_tokens > 0 else 1`（`:107-109`）；
+接收端按 `[num_reqs, sample_len]` 与 `[2, num_reqs]` 分配（`:233-237`），发送端断言 `sampled_token_ids.shape[-1] == self._sample_len(input_batch)`（`:295`）。
+
 [源码] `vllm/v1/worker/gpu/pp_utils.py` - `PPHandler._sample_len`、`PPHandler.receive`、`PPHandler.broadcast_drafts`、`PPHandler.get_prev_sampled_outputs`
 
 [源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.sample_tokens`
@@ -760,6 +1089,27 @@ sequenceDiagram
 > - main 2026-10-27～10-28：[820be160ce](https://github.com/vllm-project/vllm/commit/820be160ce0dc9098deaa2a4c6b5fc534c43881d)（[#64151](https://github.com/vllm-project/vllm/pull/64151)） 在上述分片条件上增加 `prefill_context_parallel_size == 1`（`vllm/v1/worker/gpu/spec_decode/speculator.py` L282–L287 @ `0106c8abc`）。PCP 开启时关闭 batch-sharded draft logits，因为 `PCPManager.sync_drafts` 按 request state 整行索引 draft logits。详见 meta/main-tracking-2026-10-28.md。
 > - main 2026-10-28～10-29：[cdd2750cd5](https://github.com/vllm-project/vllm/commit/cdd2750cd5e7d90849282a16bc46c21bbc58bcbd)（[#61464](https://github.com/vllm-project/vllm/pull/61464)） DBO 可与 speculative decoding 及 decode CP 同开（prefill CP 仍禁；`vllm.py` L3247–L3270 @ `36d4ef654`）；[edad8b03c5](https://github.com/vllm-project/vllm/commit/edad8b03c5285a1c12e7e4f83c1af709b319a01b)（[#61294](https://github.com/vllm-project/vllm/pull/61294)） 跨 PP stage 合并 KV cache layout 支持集。详见 meta/main-tracking-2026-10-29.md。
 > - main 2026-10-29～10-30：[66875d312](https://github.com/vllm-project/vllm/commit/66875d3127534183b5ea723964fc7ec388e89722)（[#64356](https://github.com/vllm-project/vllm/pull/64356)）：新增 `DraftLogitsCache`（main 新增文件 `spec_decode/draft_logits.py` L80–L185 @ `2eae56c4b`）。分片 cache 每步 `assign` 按 in-batch 位置 i 分配 rank `i % tp`、行 `i // tp`（`batch_shard.py` L67–L78 现按 batch position，不再按 `req_state_idx`），owner 记入 `shard_mapping`，verification 用 `owners_of`；行每步复用，`stale_drafts` 标记行被改派的 draft。复制 cache（或无 draft logits）按 `shard_owners(num_reqs, tp)` 轮转；从未 draft 的请求仍按 slot 定 owner。
+
+**怎么算出来：分片 draft logits 缓存的 owner、行号与行数。**上面 #63554、#64356 两条里的 `i % tp`、`i // tp`、`cdiv(max_num_reqs, TP)` 是三个整数运算。
+
+**白话：**把 batch 里的请求按位置轮流分给 $\mathrm{TP}$ 个 rank（像发牌），每个 rank 在自己的缓存里按“收到的第几张”记行号；
+每个 rank 最多存几行，由最大请求数除以 rank 数向上取整决定。
+
+**其中：**$i$ 是请求在 batch 里的位置（从 0 起），TP 是 TP 路数；owner 是 $i\bmod\mathrm{TP}$，行号是 $\lfloor i/\mathrm{TP}\rfloor$；
+`cdiv` 是向上取整的除法，`max_num_reqs` 是一步最多容纳的请求数。
+
+**怎么算出来：**
+
+1. owner：位置 $0,1,\ldots,\mathrm{TP}-1$ 依次分给 rank $0,1,\ldots,\mathrm{TP}-1$，位置 $\mathrm{TP}$ 又回到 rank 0，所以 owner $=i\bmod\mathrm{TP}$；
+2. 行号：每个 rank 每收到 $\mathrm{TP}$ 个位置就多一行，所以位置 $i$ 在它的 owner 里排第 $\lfloor i/\mathrm{TP}\rfloor$ 行；
+3. 行数：位置最多时，rank 0 分到位置 $0,\mathrm{TP},2\mathrm{TP},\ldots$，个数是 `max_num_reqs` 除以 $\mathrm{TP}$ 向上取整，其他 rank 不会比它多，所以每个 rank 分配 `cdiv(max_num_reqs, TP)` 行。
+
+算例：TP=4、`max_num_reqs` $=10$。位置 $0$ 到 $9$ 的 owner 依次是 $0,1,2,3,0,1,2,3,0,1$，行号依次是 $0,0,0,0,1,1,1,1,2,2$；
+rank 0 持有位置 $0,4,8$，共 3 行，等于 $\lceil10/4\rceil=3$；rank 2 持有位置 $2,6$，只用 2 行，不超过 3。
+
+**核对：**`shard_owners` 返回 `np.arange(num_reqs) % num_shards`、`shard_rows` 返回 `np.arange(num_reqs) // num_shards`
+（`vllm/v1/worker/gpu/sample/batch_shard.py:85-87`、`:100-102` @ `05caae03`）；缓存分配 `num_rows = cdiv(max_num_reqs, self._num_shards)`
+（`vllm/v1/worker/gpu/spec_decode/draft_logits.py:117`），文档字符串写明“位置 i 给 rank i % tp、行 i // tp，没有 rank 缓存超过 cdiv(num_reqs, tp) 个请求”（`:85-90`）。
 
 [源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.sample`
 
@@ -773,6 +1123,19 @@ stage 0  [A0]  idle  idle
 stage 1  idle  [A1]  idle
 stage 2  idle  idle  [A2]
 ```
+
+**算一算：气泡占多大。**
+
+**白话：**画一张“stage × 时间槽”的格子表，忙的格子除以全部格子就是利用率，剩下的就是气泡。
+
+**其中：**这里取 3 个 stage，每个 batch 在每个 stage 上恰好占 1 个时间槽（教学假设：各 stage 耗时相同、不计 stage 间传输时间）。
+
+**怎么算出来：**只有 1 个 batch 时，A0、A1、A2 依次占用 stage 0、1、2，各 1 个时间槽，整张表是 $3\times3=9$ 格，忙的只有 3 格，
+利用率 $3/9=1/3$，气泡占 $6/9=2/3$。连续送入 4 个 batch：第 4 个 batch 在第 4 个时间槽进入 stage 0，之后还要再走 2 个时间槽才离开最后的 stage，
+总共 $4+2=6$ 个时间槽，表是 $3\times6=18$ 格，忙的有 $4\times3=12$ 格，利用率 $12/18=2/3$。
+batch 越多，利用率越高，上限是 1。
+
+**核对：**这是教学假设下的计数，不对应源码里的某个公式；真实的气泡取决于各 stage 的实际耗时和 stage 间传输，要用 profiler 的时间线测。
 
 增加 pipeline batch queue 可以让不同 batch 在 stages 间重叠，但会增加在途状态、KV
 确认边界和故障恢复复杂度。PP 的收益取决于 batch 流是否足以填满流水线。
@@ -818,17 +1181,54 @@ flowchart LR
 固定源码版本中，`DPLBAsyncMPClient` 的选择逻辑可近似写成：
 
 $$
-\mathrm{score}^{\mathrm{base}}_i=\max(CI_i,\;W_i+R_i)
+\mathrm{score}^{\mathrm{base}}_i=\max\bigl(n_{\mathrm{cli}}\times n_{\mathrm{fly},i},\;n_{\mathrm{wait},i}+n_{\mathrm{run},i}\bigr)
 $$
 
 若存在 waiting requests，还会加入高 KV 使用率惩罚：
 
 $$
-\mathrm{score}_i=\mathrm{score}^{\mathrm{base}}_i+6W_i\max(0,U_i-0.5)
+\mathrm{score}_i=\mathrm{score}^{\mathrm{base}}_i+6\,n_{\mathrm{wait},i}\max(0,\rho_{\mathrm{kv},i}-0.5)
 $$
 
-其中 `C` 是 client 数，`I` 是本 client 观察到的 in-flight 数，`W/R/U` 分别是 engine
-报告的 waiting、running 和 KV usage。选择最小 score，并用轮转起点缓解平局偏置。
+**白话：**给每个 engine 打一个“有多忙”的分数，分数越小越闲，新请求发给分数最小的 engine。
+基础分取两个估计里较大的一个：本 client 自己发出去、还没完成的请求数（乘上 client 数，粗略当作所有 client 都这样发），
+和 coordinator 最近汇报的 waiting 加 running；如果这个 engine 还在排队、而且 KV 已经偏满，再加一笔罚分。
+
+**其中：**$i$ 是 engine 序号；$n_{\mathrm{cli}}$ 是 client 数（`client_count`）；$n_{\mathrm{fly},i}$ 是本 client 发给 engine $i$、尚未完成的请求数（`engine_inflight`）；
+$n_{\mathrm{wait},i}$、$n_{\mathrm{run},i}$ 是 coordinator 最近一次汇报的 engine $i$ 的 waiting、running 请求数；$\rho_{\mathrm{kv},i}$ 是它的 KV 使用率（0 到 1）。
+分数的单位是“请求数”；$0.5$ 是不罚分的使用率阈值，$6$ 是源码里的系数；惩罚项只在 $n_{\mathrm{wait},i}>0$ 时才有（等于 0 时它本来就是 0，源码里写成 `if waiting`）。
+
+**怎么算出来：**
+
+1. 为什么乘 $n_{\mathrm{cli}}$：本 client 只看得见自己的 in-flight；若 $n_{\mathrm{cli}}$ 个 client 大致均匀地发，全局的在途数约是本地的 $n_{\mathrm{cli}}$ 倍。这个下限是精确计数，不会被 coordinator 的快照重置抹掉，所以一个突发会轮流分散到各 engine；
+2. 为什么取 $\max$：别的 client 或旧请求让 engine 更忙时，coordinator 的 $n_{\mathrm{wait},i}+n_{\mathrm{run},i}$ 会更大，取较大者就把这部分负载也算进来；
+3. 罚分：$6\times n_{\mathrm{wait},i}\times\max(0,\rho_{\mathrm{kv},i}-0.5)$。使用率不超过 0.5 时不罚，使用率到 1 时罚 $6\times0.5=3$ 倍的 $n_{\mathrm{wait},i}$（源码注释写作“3x waiting at 100%”）：KV 紧张的 engine 上排队的请求放得慢，新请求应强烈地避开。
+
+算例（教学数字，$n_{\mathrm{cli}}=1$，两个 engine）：engine 0：$n_{\mathrm{fly},0}=2$、$n_{\mathrm{wait},0}=0$、$n_{\mathrm{run},0}=4$、$\rho_{\mathrm{kv},0}=0.8$，
+基础分 $\max(1\times2,\ 0+4)=4$，没有 waiting，不罚，$\mathrm{score}_0=4$。engine 1：$n_{\mathrm{fly},1}=1$、$n_{\mathrm{wait},1}=2$、$n_{\mathrm{run},1}=1$，基础分 $\max(1\times1,\ 2+1)=3$。
+若 $\rho_{\mathrm{kv},1}=0.5$：罚分 $6\times2\times\max(0,0)=0$，$\mathrm{score}_1=3<4$，选 engine 1；
+若 $\rho_{\mathrm{kv},1}=0.9$：罚分 $6\times2\times0.4=4.8$，$\mathrm{score}_1=3+4.8=7.8>4$，改选 engine 0。
+
+**核对：**分数的计算在 `DPLBAsyncMPClient.get_core_engine_for_request`（`vllm/v1/engine/core_client.py:1855-1864` @ `05caae03`：`max(self.client_count * inflight, waiting + running)` 与 `score += waiting * 6.0 * max(0.0, kv_cache_usage - 0.5)`）；
+快照 `[waiting, running, kv_cache_usage]` 来自 coordinator（`core_client.py:1573-1577`），coordinator 有变化时最多每 100 ms 推送一次（`vllm/v1/engine/coordinator.py:152`、`:265-267`）；
+教学代码 `choose_dp_engine`（`examples/ch09_parallel_topology.py:412`）用同一个规则，对上面两组数字分别返回 engine 1 与 engine 0（engine 编号从 0 起）。
+
+```mermaid
+flowchart TD
+    A["从 eng_start_index 起，对每个 engine i 依次计算"] --> B["base = max(n_cli × n_fly,i，n_wait,i + n_run,i)"]
+    B --> C{"n_wait,i > 0 ？"}
+    C -- 是 --> D["score = base + 6 × n_wait,i × max(0, rho_kv,i − 0.5)"]
+    C -- 否 --> E["score = base"]
+    D --> F["score 严格小于当前最小值才替换候选"]
+    E --> F
+    F --> G{"一圈看完了吗？"}
+    G -- 否 --> B
+    G -- 是 --> H["发给候选 engine；它的本地 waiting 快照加 n_cli；eng_start_index 前移一位"]
+```
+
+> **读图方法：** 这张图只回答一个问题：一个新请求怎样选 DP engine。第一遍沿主线读：对每个 engine 先算基础分，再按是否在排队决定要不要罚分，最后在一圈里挑分数最小的；
+> “严格小于才替换”说明平局时保留先看到的那个。第二遍看最后一个方框的两处副作用：把候选的本地 waiting 快照加 $n_{\mathrm{cli}}$，让 coordinator 下一次更新之前的后续请求能看到这次选择；
+> `eng_start_index` 前移一位，让平局时不总是偏向同一个 engine。读完后应能手算两个 engine 的分数并说出选谁。
 
 这不是一个普适调度定理，而是当前版本的启发式。它试图避免仅依据本地 inflight 计数，
 也避免把新请求持续压到 KV 已接近紧张的 engine。
@@ -908,9 +1308,31 @@ sequenceDiagram
 - graph 或 microbatch 场景把各 rank padding 到最大 token 数；
 - graph mode 取组内最保守的共同模式。
 
+**算一算：padding 与 graph mode 怎样取值。**
+
+**白话：**各 DP rank 每步的 token 数不同，但进入同一组 collective 或同一种 graph 时形状必须一样：把大家补到最大的那个 token 数；
+graph mode 取最保守的，只要有一个 rank 不能用 graph，大家都不用。
+
+**其中：**每个 rank 上报四个数：原始 token 数、padding 后 token 数（已含 CUDA Graph、TP 等本地 padding）、是否计划 microbatch（0 或 1）、graph mode
+（0 表示不用 graph，1 是 piecewise，2 是 full）。同步之后只有“DP 补齐”这一步会改变各 rank 的 token 数。
+
+**怎么算出来：**
+
+1. 每个 rank 把自己那一项写进一个 $4\times\mathrm{DP}$ 的小张量里自己的那一列、其余填 0，再对整个张量做 SUM all-reduce，于是每个 rank 都拿到所有 rank 的四项；
+2. 同步后的 graph mode 是各 rank graph mode 的最小值 $\min$；microbatch 要所有 rank 都计划，并且不会出现空的第二个 microbatch，否则放弃；
+3. 只有同步后的 graph mode 不为 0，或者确定要 microbatch 时才补齐，补齐后每个 rank 的 token 数都是各 rank padding 后 token 数的最大值 $\max$；否则各 rank 保持自己的值。
+
+算例（教学数字）：3 个 DP rank，padding 后 token 数是 $48,32,64$。若各 rank 的 graph mode 是 $2,2,2$：$\min=2\ne0$，补齐，三个 rank 都跑 $\max(48,32,64)=64$ 个 token。
+若 graph mode 是 $2,2,0$：$\min=0$，且没有 microbatch，不补齐，三个 rank 仍是 $48,32,64$，并且都不用 graph。
+
+**核对：**四项的写入与 SUM all-reduce 见 `_run_ar`（`vllm/v1/worker/dp_utils.py:57-76` @ `05caae03`）；graph mode 取 `tensor[3, :].min()`（`:114-120`），
+补齐取 `tensor[1, :].max()`（`:99-111`），触发条件是 `synced_cudagraph_mode != 0 or should_ubatch`（`:181`）；microbatch 的一致性与空 microbatch 检查在 `_post_process_ubatch`（`:79-96`）。
+
 这是正常跨 DP 执行路径的 collective shape 一致性保障，不是普通 API 负载均衡。
 此版本另有 `skip_dp_coordination()` 上下文：启用时不做跨 rank 规约，而以本地
 padding 数构造结果、保留本地 graph mode；不能把正常路径的同步保证推广到该显式跳过路径。
+例如跳过路径上本地 padding 后是 48 个 token、DP=3，结果直接是 $48,48,48$，这只是本 rank 自己的假设，不是别的 rank 的真实值
+（`vllm/v1/worker/dp_utils.py:240-251` @ `05caae03`）。
 
 
 ### 9.7.7 DP 状态同步：每隔一段 step 做一次 CPU 小张量 all-reduce
@@ -921,55 +1343,95 @@ padding 数构造结果、保留本地 graph mode；不能把正常路径的同�
 以及第 1 步，调用 `ParallelConfig.sync_dp_state`，对每个 rank 的两个 0/1 标志做 SUM：
 
 $$
-S_0=\sum_{r=0}^{N-1}u_r,\qquad S_1=\sum_{r=0}^{N-1}p_r
+\Sigma_u=\sum_{r=0}^{\mathrm{DP}-1}u_r,\qquad \Sigma_f=\sum_{r=0}^{\mathrm{DP}-1}f_r
 $$
 
 $$
-\text{has\_unfinished}=[S_0>0]\ \lor\ [S_1\bmod N\neq 0],\qquad \text{pause\_consensus}=[S_1=N]
+\text{has\_unfinished}=[\Sigma_u>0]\ \lor\ [\Sigma_f\bmod \mathrm{DP}\neq 0],\qquad \text{pause\_consensus}=[\Sigma_f=\mathrm{DP}]
 $$
 
-**白话**：第一项是“逻辑或”——只要有一个 rank 还有未完成请求，大家就都继续跑；第二项是“全票通过”——所有 rank 都挂起了暂停请求才算
-达成暂停共识；如果只有一部分 rank 想暂停（$S_1$ 不是 $N$ 的倍数），其余 rank 仍要继续陪跑，否则 MoE 的 collective 会对不上。
+**白话：**第一项是“逻辑或”——只要有一个 rank 还有未完成请求，大家都继续跑；第二项是“全票通过”——所有 rank 都挂起了暂停请求才算
+达成暂停共识；如果只有一部分 rank 想暂停（$\Sigma_f$ 不是 $\mathrm{DP}$ 的倍数），其余 rank 仍要继续陪跑，否则 MoE 的 collective 会对不上。
 
-**符号说明**：$N$ 是 DP group 的大小（`dp_group.size()`）；$r$ 是 DP rank；$u_r\in\{0,1\}$ 表示该 rank 是否有未完成请求；
-$p_r\in\{0,1\}$ 表示该 rank 是否有待处理的暂停请求；$S_0,S_1$ 是 SUM 之后的计数，无单位；$[\cdot]$ 在条件为真时取 1，否则取 0。
+**其中：**$\mathrm{DP}$ 是 DP group 的大小（`dp_group.size()`）；$r$ 是 DP rank；$u_r\in\{0,1\}$ 表示该 rank 是否有未完成请求；
+$f_r\in\{0,1\}$ 表示该 rank 是否有待处理的暂停请求；$\Sigma_u,\Sigma_f$ 是 SUM 之后的计数，无单位；$[\cdot]$ 在条件为真时取 1，否则取 0。
+
+**怎么算出来：**
+
+1. 每个 rank 把自己的 $[u_r,f_r]$ 放进 2 元素张量，SUM all-reduce 之后所有 rank 都得到同一对 $[\Sigma_u,\Sigma_f]$；
+2. 每一项只取 0 或 1，所以 $\Sigma_u>0$ 等价于“至少有一个 $u_r=1$”，也就是逻辑或；
+3. 同样 $0\le\Sigma_f\le\mathrm{DP}$，$\Sigma_f=\mathrm{DP}$ 等价于每个 $f_r$ 都是 1，也就是全票通过；
+4. $\Sigma_f\bmod\mathrm{DP}\ne0$ 只在 $0<\Sigma_f<\mathrm{DP}$ 时成立：有人想暂停但没有全票，这些想暂停的 rank 也要继续 step。$\Sigma_f=0$ 或 $\Sigma_f=\mathrm{DP}$ 时余数是 0。
+
+算例（教学数字，$\mathrm{DP}=4$）：
+
+| $u$ | $f$ | $\Sigma_u$ | $\Sigma_f$ | has_unfinished | pause_consensus | 含义 |
+|---|---|---|---|---|---|---|
+| $[0,0,1,0]$ | $[0,0,0,0]$ | 1 | 0 | 真（$\Sigma_u>0$） | 假 | 只有 rank 2 有活，大家继续 |
+| $[0,0,0,0]$ | $[1,1,0,0]$ | 0 | 2 | 真（$2\bmod4=2\ne0$） | 假 | 两个 rank 想暂停，另外两个还没有，继续陪跑 |
+| $[0,0,0,0]$ | $[1,1,1,1]$ | 0 | 4 | 假（$4\bmod4=0$） | 真 | 全票暂停 |
+| $[0,0,0,0]$ | $[0,0,0,0]$ | 0 | 0 | 假 | 假 | 全部空闲，没有暂停请求，波次结束 |
+
+**核对：**`ParallelConfig.sync_dp_state` 里 `has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0`，返回 `(has_unfinished_global, pause_count == dp_size)`
+（`vllm/config/parallel.py:966-991` @ `05caae03`）；调用处 `DPEngineCoreProc._has_global_unfinished_reqs` 在第 1 步和每 `dp_sync_interval` 步同步一次（`vllm/v1/engine/core.py:2847-2851`）。
+表中四行的结果与这两行代码一致。
 
 **容错分支。** 若没有达成暂停共识，且启用了 fault tolerance 并且 sentinel 记录协调器已被禁用（`self.enable_fault_tolerance and self.ft_sentinel.coordinator_disabled`），
 函数不再返回 `has_unfinished`，而是直接返回 `True`：各 engine 保持继续 step，不做空闲暂停（`vllm/v1/engine/core.py:2864-2866` @ `05caae03`）。
 上面的公式描述的是没有走到这一分支时的结果。
 
 **怎么 all-reduce。** 这个张量很小，而且在 CPU（gloo）上，瓶颈是往返延迟而不是带宽；#61767 的标题就是“Low-latency CPU all-reduce for DP metadata syncs”，它引入
-`vllm.distributed.utils.cpu_all_reduce_`：先把 $N$ 拆成块大小 $B$（$N$ 的最大 2 的幂因子，源码写作 `world_size & -world_size`）和块数 $M=N/B$，
+`vllm.distributed.utils.cpu_all_reduce_`：先把 $\mathrm{DP}$ 拆成块大小 $G_2$（$\mathrm{DP}$ 的最大 2 的幂因子，源码写作 `world_size & -world_size`）和块数 $n_{\mathrm{grp}}=\mathrm{DP}/G_2$，
 块内做 recursive doubling（递归倍增），块间再做一次并发交换；#63016 让它把 `cpu_distributed_timeout` 传到每次点对点等待上。
 
-**recursive doubling 的白话**：一个块里有 $B$ 个 rank。第 1 轮每个 rank 与“编号异或 1”的伙伴互相发送并相加，各自手里的和就覆盖了 2 个 rank；
-第 2 轮改与“编号异或 2”的伙伴交换，覆盖 4 个 rank；第 3 轮异或 4，覆盖 8 个……每一轮覆盖的 rank 数翻倍，所以 $B$ 个 rank 只要 $\log_2 B$ 轮，
+**白话：**`world_size & -world_size` 是位运算技巧：它只保留二进制里最低位的那个 1，而最低位的 1 对应的值恰好就是 $\mathrm{DP}$ 的最大 2 的幂因子，
+所以 $G_2$ 是 $\mathrm{DP}$ 里“能整齐地两两配对”的最大块；$\mathrm{DP}$ 除以它就是块数。
+
+**其中：**$G_2$ 是块大小，是 2 的幂；$n_{\mathrm{grp}}$ 是块数；$\mathrm{DP}$ 是 2 的幂时 $G_2=\mathrm{DP}$、$n_{\mathrm{grp}}=1$。
+
+**怎么算出来：**把 $\mathrm{DP}$ 写成二进制，找到最低位的 1，这一位代表的数就是 $G_2$；再用 $\mathrm{DP}/G_2$ 得到 $n_{\mathrm{grp}}$，它一定是奇数。
+
+| $\mathrm{DP}$ | 二进制 | 最低位的 1 对应的值，即 $G_2$ | $n_{\mathrm{grp}}=\mathrm{DP}/G_2$ |
+|---:|---|---:|---:|
+| 6 | `110` | 2 | 3 |
+| 12 | `1100` | 4 | 3 |
+| 8 | `1000` | 8 | 1 |
+| 5 | `101` | 1 | 5 |
+
+**核对：**`block_size = world_size & -world_size`、`num_blocks = world_size // block_size`（`vllm/distributed/utils.py:91-92` @ `05caae03`）。
+
+**recursive doubling 的白话**：一个块里有 $G_2$ 个 rank。第 1 轮每个 rank 与“编号异或 1”的伙伴互相发送并相加，各自手里的和就覆盖了 2 个 rank；
+第 2 轮改与“编号异或 2”的伙伴交换，覆盖 4 个 rank；第 3 轮异或 4，覆盖 8 个……每一轮覆盖的 rank 数翻倍，所以 $G_2$ 个 rank 只要 $\log_2 G_2$ 轮，
 并且块里**每个** rank（不是只有某个根）最后都拿到整块的总和（源码里 `peer = rank ^ mask`，`mask` 依次为 1、2、4……，`utils.py:106-115`）。
 
-例如 $N=6$：$B=2$、$M=3$。
+例如 $\mathrm{DP}=6$：$G_2=2$、$n_{\mathrm{grp}}=3$。
 
 | 步骤 | 做什么 | 例子（$u=[1,0,0,0,0,1]$） |
 |---|---|---|
-| 块内（$\log_2 B=1$ 轮） | rank `2k` 与 `2k+1` 互换并相加 | 三个块的块和为 $(1,0,1)$ |
-| 块间（1 次并发交换） | 每个 rank 与其他块里同一位置的 rank 交换块和，按块序相加 | 每个 rank 得到 $S_0=1+0+1=2$ |
+| 块内（$\log_2 G_2=1$ 轮） | rank `2k` 与 `2k+1` 互换并相加 | 三个块的块和为 $(1,0,1)$ |
+| 块间（1 次并发交换） | 每个 rank 与其他块里同一位置的 rank 交换块和，按块序相加 | 每个 rank 得到 $\Sigma_u=1+0+1=2$ |
 
 所有 rank 都按相同顺序相加，所以各 rank 得到的结果逐 bit 一致（源码文档字符串的承诺）。点对点轮数为
-$\log_2 B+\mathbf{1}[M>1]$，$N$ 为 2 的幂时只有 $\log_2 N$ 轮。
+$\log_2 G_2+\mathbf{1}[n_{\mathrm{grp}}>1]$，$\mathrm{DP}$ 为 2 的幂时只有 $\log_2 \mathrm{DP}$ 轮。
+
+**轮数怎么算：**块内每轮覆盖的 rank 数翻倍，覆盖 $G_2$ 个需要 $\log_2G_2$ 轮；块间只有当 $n_{\mathrm{grp}}>1$ 时才多 1 次并发交换，指示函数 $\mathbf{1}[n_{\mathrm{grp}}>1]$ 就是这一次。
+$\mathrm{DP}=6$：$\log_22+1=2$ 轮；$\mathrm{DP}=8$：$\log_28+0=3$ 轮；$\mathrm{DP}=5$：$G_2=1$，没有块内阶段，$\log_21+1=1$ 轮（每个 rank 直接与其余 4 个 rank 并发交换）；$\mathrm{DP}=12$：$\log_24+1=3$ 轮。
+核对：块内循环 `while mask < block_size`（`utils.py:106-115`），块间交换 `if num_blocks > 1`（`utils.py:117-139`）。
 
 ```mermaid
 flowchart TD
-    A[每个 DP rank 的 2 元素 CPU 张量 u, p] --> B{world_size == 1?}
+    A[每个 DP rank 的 2 元素 CPU 张量 u, f] --> B{world_size == 1?}
     B -->|是| Z[直接返回]
     B -->|否| C{CPU 且 contiguous?}
     C -->|否| F[回退 torch.distributed.all_reduce]
-    C -->|是| D[块内 recursive doubling，块大小 B = N 的最大 2 的幂因子]
-    D --> E{块数 M > 1?}
+    C -->|是| D[块内 recursive doubling，块大小 G_2 = DP 的最大 2 的幂因子]
+    D --> E{块数 n_grp > 1?}
     E -->|否| Z
     E -->|是| G[与其他块同位置 rank 并发交换块和，按块序求和]
     G --> Z
 ```
 
-> **读图方法：** 这是 `cpu_all_reduce_` 的流程图。第一遍沿“否→是→是”的主路径走到底，对应 $N$ 非 2 的幂且是 CPU 张量；
+> **读图方法：** 这是 `cpu_all_reduce_` 的流程图。第一遍沿“否→是→是”的主路径走到底，对应 $\mathrm{DP}$ 非 2 的幂且是 CPU 张量；
 > 第二遍再看两个旁路：单 rank 直接返回，非 CPU 或非连续张量回退通用 `all_reduce`。读完后应知道：它只是 gloo 上的小张量 SUM，
 > 不替代 NCCL 数据面通信。
 
