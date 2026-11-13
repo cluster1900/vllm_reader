@@ -45,7 +45,7 @@ flowchart TD
 > **读图方法：** 阅读“本章定位”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
 这一段调用链看起来只是“跑模型”，实际上同时跨越五类边界：编排、进程、设备、并行和状态。
-本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；2026-11-10 核对源码引用与行号），继续使用以下标签：
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09，美国太平洋时间；2026-11-10 核对源码引用与行号），继续使用以下标签：
 
 - **源码事实**：当前 revision 可直接定位的行为。
 - **设计意图**：源码注释或同 revision 设计文档表达的目标。
@@ -56,7 +56,7 @@ flowchart TD
 > 与 v0.33.0 的 merge-base 是 `fe341a53`，所以只有 `fe341a53..4ba787ec` 里真正在 v0.33.0 祖先链内的
 > 提交才写入正文，逐条用 `git merge-base --is-ancestor <commit> 4ba787ec` 核验，清单见 7.32。
 > 2026-11-10 已按这个 revision 对本章涉及的源码文件做静态复核（读代码与 diff，没有运行 GPU 或上游测试）。
-> v0.33.0 之后、已是 `05caae03` 祖先的 main 变化，以“已在本书基线中、正文尚未展开的变化”注记保留；不是 `05caae03` 祖先的才会标为“未发版”（目前没有这样的条目）。
+> v0.33.0 之后、已是 `05caae03` 祖先的 main 变化，以“已在本书基线中、未在正文展开的变化”注记保留；不是 `05caae03` 祖先的才会标为“未发版”（目前没有这样的条目）。
 
 ## 阅读目标
 
@@ -753,7 +753,7 @@ Executor 取回各 Worker 对齐后的 CPU offload block 数（`get_simple_cpu_o
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.compile_or_warm_up_model`
 
-> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。（#62330 这些已在 v0.33.0 中并入上文）区间为 vLLM main 2026-10-25～10-28（`a7407ab44`..`0106c8abc`）。
+> **已在本书基线中、未在正文展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。（#62330 这些已在 v0.33.0 中并入上文）区间为 vLLM main 2026-10-25～10-28（UTC，`a7407ab44..0106c8abc`，不含起点）。
 > - main 2026-10-27～10-28：[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：Worker/EngineCore 子进程可通过 `numa_utils.configure_subprocess` 做 best-effort NUMA 绑定（默认 `numa_bind=None`）。
 
 ## 7.11 SchedulerOutput 到长期请求状态
@@ -855,7 +855,7 @@ UVA（统一虚拟寻址）帮助设备访问映射后的地址，不表示主�
 数据搬运边界：写入内容仍走 H2D，索引/起点/长度仍走 UVA 缓冲。较长的一段写入（例如 block table 一行里的一大段 block ID）
 因此不再被一个 program 串行写完。
 
-> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。（#62698 这些已在 v0.33.0 中并入下文）区间为 vLLM main 2026-10-25～10-27（`a7407ab44`..`ed1a73079`）。
+> **已在本书基线中、未在正文展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。（#62698 这些已在 v0.33.0 中并入下文）区间为 vLLM main 2026-10-25～10-27（UTC，`a7407ab44..ed1a73079`，不含起点）。
 > - main 2026-10-25～10-27：[78e2f7960](https://github.com/vllm-project/vllm/commit/78e2f796019384b07c9f9b6d8a371e3ea958b33a)（[#63633](https://github.com/vllm-project/vllm/pull/63633)） 删除写入内容的 `async_tensor_h2d` 分支，默认 GPU-base 路径的写入内容也经 `UvaBufferPool.copy_chunks_to_uva` 进入 UVA 缓冲；上文“把实际写入内容通过 H2D 复制”与下图 `non-blocking H2D` 节点在 main 上不再成立。暂存改用 `array.array`，1-D ndarray/array 按引用保留到 `apply_write`，期间不得修改。
 
 ```mermaid
@@ -1192,7 +1192,7 @@ sequenceDiagram
 
 > **读图方法：** 这是“Grammar mask 的汇合点”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
-> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-29～10-30（`36d4ef654`..`2eae56c4b`）。
+> **已在本书基线中、未在正文展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-29～10-30（UTC，`36d4ef654..2eae56c4b`，不含起点）。
 > - [322f90a2a](https://github.com/vllm-project/vllm/commit/322f90a2a356a83276bc07236e0e620a4e4fc93a)（[#63219](https://github.com/vllm-project/vllm/pull/63219)）：`GrammarOutput` 删除 `num_acceptable_drafts`（`output.py` L341–L346）；`DraftTokensHandler` 按 req_id 保留 draft（`spec_decode/utils.py` L51–L131），`execute_model` 开头 `begin_step`（`model_runner.py` L1794–L1795），移除时 `discard`（L1198–L1199）。删除 `grammar_invalid_drafts`。PP + structured output 不再依赖当前 batch 整表 draft。
 
 ## 7.20 MRV2 sample_tokens 时间线
@@ -1360,7 +1360,7 @@ flowchart TD
 旧的 fallback 测试 `test_v2_model_runner_heterogeneous_vocab_draft_falls_back_to_v1`、
 `test_watermarking_forces_model_runner_v2` 在 `05caae03` 的 `tests/test_config.py` 里已不存在。
 
-> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-28～10-29（`0106c8abc`..`36d4ef654`）。
+> **已在本书基线中、未在正文展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-28～10-29（UTC，`0106c8abc..36d4ef654`，不含起点）。
 > - [d7f68d4c7d](https://github.com/vllm-project/vllm/commit/d7f68d4c7d31004e257b7b2ff142b4edd83e0d8c)（[#62748](https://github.com/vllm-project/vllm/pull/62748)）：`sampler.apply_staged_writes()` 仅在本步有 `scheduled_new_reqs` 时调用（`model_runner.py` L1298–L1302 @ `36d4ef654`）。
 > - [06e172b5cf](https://github.com/vllm-project/vllm/commit/06e172b5cf8845c80c40a6eaaecbcbde3e38e8df)（[#59341](https://github.com/vllm-project/vllm/pull/59341)）：MRV2 lm_head LoRA 的 `prompt_lora_mapping` 按 `num_logits`（每请求 1+drafts 行）展开（`lora_utils.py` L99–L104；调用处 L1913）。
 > - [65faf4efa0](https://github.com/vllm-project/vllm/commit/65faf4efa0281fc2e04096a28cd35fb8dc7d3218)（[#63237](https://github.com/vllm-project/vllm/pull/63237)）：routed experts capturer 在 `profile_run` 中、KV cache profiling 之前初始化。

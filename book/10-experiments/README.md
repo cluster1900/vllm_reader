@@ -49,7 +49,7 @@ flowchart TD
 
 > **读图方法：** 阅读“本章定位”这张流程图时，先把方框看成对象或状态，把箭头看成数据或控制的移动。第一遍从上向下建立顺序，第二遍再核对分支发生的条件。
 
-本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；2026-11-10 核对源码引用与行号）。
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09，美国太平洋时间；2026-11-10 核对源码引用与行号）。
 
 ## 阅读目标
 
@@ -2085,7 +2085,7 @@ throughput、goodput、p99 TTFT/TPOT、client queue、server queue。
     `benchmarks/attention_benchmarks/`：组件与 kernel 层实例。
 16. `tests/benchmarks/`：CLI、dataset adapter、sweep 和参数稳定性测试。
 
-本章源码基线为 vLLM main commit `05caae03c20f69436ff7ec23ded339ea104f1a01`，源码引用与行号按此 revision 核对，指标教学代码的 CPU 测试通过。
+指标教学代码的 CPU 测试通过。
 当前机器没有可用的 NVIDIA GPU vLLM
 运行环境，因此 profiler、NCCL 与真实服务性能数据仍标记为 `runtime_verified: false`。
 本章给出的数值曲线均为教学示意，不能冒充实测结果。

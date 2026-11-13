@@ -34,7 +34,7 @@ prerequisites:
 寻址与执行契约。FlashAttention、FlashInfer、Triton 和平台专用实现都可能消费分页 KV；
 仓库中的 `vllm/v1/attention/ops/paged_attn.py` 也不是所有当前 GPU 路径的统一入口。
 
-本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；2026-11-10 核对源码引用与行号），继续使用三种证据标签：
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09，美国太平洋时间；2026-11-10 核对源码引用与行号），继续使用三种证据标签：
 
 - **源码事实**：能在固定 revision 的实现或测试中直接定位。
 - **设计含义**：由多个源码事实共同推出的系统解释。
@@ -532,7 +532,7 @@ UVA 不是所有数据都免拷贝的保证；须同时检查平台能力和 ten
 
 [源码] `vllm/v1/worker/gpu/buffer_utils.py` - `StagedWriteTensor.apply_write`、`FusedStagedWriter.apply`
 
-> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-25～10-27（`a7407ab44`..`ed1a73079`）。
+> **已在本书基线中、未在正文展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-25～10-27（UTC，`a7407ab44..ed1a73079`，不含起点）。
 > - [78e2f7960](https://github.com/vllm-project/vllm/commit/78e2f796019384b07c9f9b6d8a371e3ea958b33a)（[#63633](https://github.com/vllm-project/vllm/pull/63633)）：main 删除了写入内容的 `async_tensor_h2d` 分支。`StagedWriteTensor.apply_write` 与 `FusedStagedWriter.apply` 都用 `UvaBufferPool.copy_chunks_to_uva` 把暂存内容拼入轮转 UVA 缓冲，kernel 经 UVA 读取；上文“写入内容通过 H2D 复制到设备”“内容不总是单独 H2D”在 main 上应改为“内容与元数据都经 UVA 缓冲（无 UVA 时由 `NonUvaBuffer` 拷贝）”。
 
 [源码] `vllm/v1/worker/gpu/block_table.py` - `BlockTables.apply_staged_writes`、`gather_block_tables`
@@ -1261,7 +1261,7 @@ backend `forward_includes_kv_cache_update=False` 且 `supports_kv_cache_update_b
 - sliding window、non-causal、sink、MLA、sparse、PCP/DCP 等能力；
 - cache spec/layout 偏好与组合校验。
 
-> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-29～10-30（`36d4ef654`..`2eae56c4b`）。
+> **已在本书基线中、未在正文展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-29～10-30（UTC，`36d4ef654..2eae56c4b`，不含起点）。
 > - [a6c3635e3](https://github.com/vllm-project/vllm/commit/a6c3635e3660f6343c14e2158c7ab44c62be88b9)（[#64064](https://github.com/vllm-project/vllm/pull/64064)）：新增 `AttentionBackend.supports_head_size_v`，默认要求 V=K（`vllm/v1/attention/backend.py` L109–L112）；`RocmAiterUnifiedAttentionBackend` 允许 `head_size_v <= head_size`（`rocm_aiter_unified_attn.py` L90–L94），从而 MiMo-V2.6 可用 ROCm AITER unified attention。`csrc/cache_kernels.cu` 新增 `reshape_and_cache_flash_kernel_asym`（L428），仅当 `v_head_size != head_size` 时由 `reshape_and_cache_flash` 使用（dispatch L993–L1014）；K/V 须共享 head stride / page stride / block geometry，对称 kernel 路径不变。
 
 ### 6.14.2 `AttentionMetadataBuilder`

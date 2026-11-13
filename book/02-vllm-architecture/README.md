@@ -40,7 +40,7 @@ prerequisites:
 structured output、speculative decoding 和分离式 prefill/decode 只在它们改变主链边界时
 指出，不展开内部算法。
 
-本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；2026-11-10 核对源码引用与行号）。
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09，美国太平洋时间；2026-11-10 核对源码引用与行号）。
 
 ## 阅读目标
 
@@ -344,7 +344,7 @@ flowchart LR
 
 [源码] `vllm/v1/engine/async_llm.py` - `AsyncLLM.generate`
 
-> **相对 v0.33.0、已进入本书基线、但尚未写进本章主叙述的变化：** 下面几条都是 pin `05caae03` 的祖先，且不在 v0.33.0 `4ba787ec` 中。本章主叙述仍按 v0.33.0 时代的写法（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。这些条目来自 vLLM main 2026-10-28～10-30。
+> **已在本书基线中、未在正文展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。这些条目来自 vLLM main 2026-10-28～10-30（UTC）。
 > - [9fc019a749](https://github.com/vllm-project/vllm/commit/9fc019a749cbf3235cc06aa5357b17fd37cb648a)（[#64097](https://github.com/vllm-project/vllm/pull/64097)）：`run_batch` 支持 `/v1/completions`（`entrypoints/launchers/run_batch.py` L182–L197、L828–L829 @ `36d4ef654`），不再仅限 chat completions。
 > - [f60edccd00](https://github.com/vllm-project/vllm/commit/f60edccd0079428503f9e9f66e3b651aa4da73db)（[#64177](https://github.com/vllm-project/vllm/pull/64177)）：chat completions 序列化省略 null 的 `annotations` 与 `usage.prompt_tokens_details`（`exclude_none`）。
 > - main 2026-10-29～10-30：[5c1939140](https://github.com/vllm-project/vllm/commit/5c19391400c58ae10feca2483f55c547df211715)（[#63896](https://github.com/vllm-project/vllm/pull/63896)）：`ResponsesRequest.thinking_token_budget` 写入 `SamplingParams`（`vllm/entrypoints/openai/responses/protocol.py` L452、L650 @ `2eae56c4b`），与 chat completions 对齐。Python 前端的 `/v1/responses` 会把该字段写入 `SamplingParams`；Rust 前端在本书基线里已经提供 `/v1/responses`（#63902，`eb409c9aa`），但转换时把 `thinking_token_budget` 固定为 `None`（`rust/src/server/src/routes/openai/responses/convert.rs:232`）。
@@ -1951,7 +1951,6 @@ OutputProcessor 生成用户完成输出，并把内部 ID 放入 `reqs_to_abort
 - [x] 覆盖 stop string、client cancel、final-step abort 和 output handler error。
 - [x] 提供可运行生命周期模拟器和 8 个单元测试。
 - [ ] 在真实 NVIDIA GPU 上采集 online/offline 运行 trace。
-- [ ] 由独立审阅者复核后将状态改为 `verified`。
 
 本章内容已经完整，`content_complete=true`。由于当前环境没有真实 vLLM GPU runtime，
 `runtime_verified=false`，按本项目规则保持 `draft`。

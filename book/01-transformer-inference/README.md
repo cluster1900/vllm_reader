@@ -54,7 +54,7 @@ prerequisites:
 > **本节先看：** 这一部分先划定结论成立的源码版本和讨论边界。超出范围的实现不能直接套用本章结论，需要重新核对源码。
 
 - 源码仓库：`vllm-project/vllm`
-- 源码 commit：`05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；2026-11-10 核对源码引用与行号）
+- 本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09，美国太平洋时间；2026-11-10 核对源码引用与行号）
 - 阅读主线：decoder-only 文本生成、vLLM V1 Engine、Llama 类模型。
 - 本章使用单层、单 attention head 的教学模型建立直觉；真实模型通常有多层、
   多个 query heads，并可能使用 GQA、量化、TP 和不同 attention backend。
@@ -2066,7 +2066,6 @@ sequence lengths、request ordering，以及用于 KV 寻址的 block tables 和
 - [x] 映射到固定 commit 的 Llama、Attention、LogitsProcessor 和 MRV2 Sampler。
 - [x] 包含异常路径、设计取舍、自检题、答案和源码追踪题。
 - [ ] 在真实 NVIDIA GPU 上执行预训练模型与 vLLM runtime trace。
-- [ ] 由独立审阅者复核后将状态从 `draft` 改为 `verified`。
 
 本章内容已经完整，`content_complete=true`。按照本项目规则，AI 生成内容不能仅因篇章
 完成就自行标记为 `verified`；当前 `runtime_verified=false`，等待 GPU 动态验证和独立

@@ -45,7 +45,7 @@ prerequisites:
 engine，控制面仍可能汇总各 engine 的队列和 KV 使用率；启用 MoE wide EP 后，不同 DP
 rank 还会进入同一专家通信域。
 
-本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；2026-11-10 核对源码引用与行号）。
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09，美国太平洋时间；2026-11-10 核对源码引用与行号）。
 
 ## 阅读目标
 
@@ -2243,7 +2243,7 @@ $S_{\mathrm{loc},r_{\mathrm{dcp}}}$ 是 §9.9.4 里 rank $r_{\mathrm{dcp}}$ 本�
    - 把 $S$ 拆成整轮和余数，$n_{\mathrm{rnd}}=\lfloor S/(I_{\mathrm{il}}\mathrm{DCP})\rfloor$ 是整轮数，$n_{\mathrm{rest}}=S\bmod(I_{\mathrm{il}}\mathrm{DCP})$ 是不足一轮的余数（两个都是本节的局部记号），于是 $S=n_{\mathrm{rnd}}I_{\mathrm{il}}\mathrm{DCP}+n_{\mathrm{rest}}$，$S/\mathrm{DCP}=n_{\mathrm{rnd}}I_{\mathrm{il}}+n_{\mathrm{rest}}/\mathrm{DCP}$；
    - 每个 rank 在每个整轮里恰好拿 $I_{\mathrm{il}}$ 个，余数部分它拿 $\operatorname{clamp}(n_{\mathrm{rest}}-r_{\mathrm{dcp}}I_{\mathrm{il}},0,I_{\mathrm{il}})$ 个，因为 $r_{\mathrm{dcp}}\ge0$，这一项至多是 $\min(I_{\mathrm{il}},n_{\mathrm{rest}})$；
    - 两式相减：$S_{\mathrm{loc},r_{\mathrm{dcp}}}-S/\mathrm{DCP}\le\min(I_{\mathrm{il}},n_{\mathrm{rest}})-n_{\mathrm{rest}}/\mathrm{DCP}$。若 $n_{\mathrm{rest}}\le I_{\mathrm{il}}$，右边是 $n_{\mathrm{rest}}(1-1/\mathrm{DCP})$，比 $n_{\mathrm{rest}}$ 小（$n_{\mathrm{rest}}=0$ 时为 0），所以小于 $I_{\mathrm{il}}$；若 $n_{\mathrm{rest}}>I_{\mathrm{il}}$，右边是 $I_{\mathrm{il}}-n_{\mathrm{rest}}/\mathrm{DCP}<I_{\mathrm{il}}$；
-   - 所以总有 $S_{\mathrm{loc},r_{\mathrm{dcp}}}<S/\mathrm{DCP}+I_{\mathrm{il}}\le\lceil S/\mathrm{DCP}\rceil+I_{\mathrm{il}}$。左边和 $\lceil S/\mathrm{DCP}\rceil+I_{\mathrm{il}}$ 都是整数，严格小于就意味着至多小 1，即 $S_{\mathrm{loc},r_{\mathrm{dcp}}}\le\lceil S/\mathrm{DCP}\rceil+I_{\mathrm{il}}-1$；
+   - 所以总有 $S_{\mathrm{loc},r_{\mathrm{dcp}}}<S/\mathrm{DCP}+I_{\mathrm{il}}\le\lceil S/\mathrm{DCP}\rceil+I_{\mathrm{il}}$。左边和 $\lceil S/\mathrm{DCP}\rceil+I_{\mathrm{il}}$ 都是整数，严格小于就意味着至少小 1，所以左边至多等于右边减 1，即 $S_{\mathrm{loc},r_{\mathrm{dcp}}}\le\lceil S/\mathrm{DCP}\rceil+I_{\mathrm{il}}-1$；
 3. 估算一个请求最坏占多少显存时，`max_memory_usage_bytes` 把 `max_model_len` 先除以 $\mathrm{DCP}$ 再向上取整、再按 block 数乘页字节数；它不含上面的 $I_{\mathrm{il}}-1$ 项，只是一个估算。
 
 算例：$S_{\max}=131072$、$B_{\mathrm{blk}}=64$、$\mathrm{DCP}=4$：$\lceil131072/(64\times4)\rceil=512$ 个 block；不开 DCP 是 $\lceil131072/64\rceil=2048$ 个。上界的算例取 §9.9.4 的 $S=10$、$\mathrm{DCP}=4$、$I_{\mathrm{il}}=2$：rank 0 存 4 个 token，$\lceil10/4\rceil+2-1=3+1=4$，刚好取到；只写 $\lceil10/4\rceil=3$ 就会低估。单位检查：token $\div$（token/block）得 block 数。
@@ -3176,7 +3176,6 @@ communication contract 重新建立理解。
 17. `vllm/distributed/elastic_ep/elastic_state.py`、`elastic_execute.py`、`external_elastic_ep.py`：扩缩容状态机、Worker 执行与外部 LB 协调。
 18. `vllm/v1/engine/async_llm.py`、`vllm/v1/engine/core.py`：`scale_elastic_ep`、`reinitialize_distributed`、`commit_prepared_elastic_ep`。
 
-本章源码基线为 vLLM main commit `05caae03c20f69436ff7ec23ded339ea104f1a01`，源码引用与行号按此 revision 核对。
 v0.32.0（`5df63a7203cdb9328d824a27b682e77c7b9928be`）到 v0.33.0 的变化在各节以“v0.33.0”标出。当前环境没有可用的 NVIDIA 多 GPU vLLM
 运行条件，因此真实 NCCL/Ray 多机实验仍标记为 `runtime_verified: false`，不能把静态源码
 核对和 CPU 教学测试表述成真实 GPU 验证。
