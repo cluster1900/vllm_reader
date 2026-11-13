@@ -106,7 +106,7 @@ class NotationGuideTest(unittest.TestCase):
     def test_has_every_required_section(self):
         for heading in ("## 1 全局符号表", "## 2 命名规则", "## 3 局部字母表", "## 4 改名对照表",
                         "## 5 写法规则", "## 6 公式讲解模板", "## 7 配图规则",
-                        "## 8 B1–B8 的优先清单", "## 9 共享文件与改动权限"):
+                        "## 8 共享文件与维护约定"):
             self.assertIn(heading, self.text)
 
     def test_template_requires_how_it_is_computed(self):
@@ -115,11 +115,6 @@ class NotationGuideTest(unittest.TestCase):
         self.assertIn("必写项", template)
         self.assertIn("推导", template)
         self.assertIn("算例", template)
-
-    def test_priority_list_names_all_27_groups(self):
-        section = self.text.split("## 8 B1–B8 的优先清单", 1)[1].split("## 9 ", 1)[0]
-        rows = [line for line in section.splitlines() if line.startswith("| B")]
-        self.assertEqual(len(rows), 27)
 
     def _registries(self):
         global_rows = _table_rows(_section(self.text, "## 1 全局符号表", "## 2 命名规则"))
@@ -173,9 +168,34 @@ class NotationGuideTest(unittest.TestCase):
 
     def test_diagram_rule_covers_required_and_optional(self):
         rule = self.text.split("## 7 配图规则", 1)[1].split("## 8 ", 1)[0]
-        self.assertIn("必配的 10 处", rule)
-        self.assertIn("review 提出的要求", rule)
-        self.assertIn("每个批次 PR 的正文必须列出做了哪些可选位置及原因", rule)
+        self.assertIn("必配图的 10 处", rule)
+        self.assertIn("**其他位置**只在**确实复杂**时才配图", rule)
+
+    def test_reader_text_has_no_process_talk(self):
+        """The notation guide and the chapters are reader text: no batches, review history or meta pointers."""
+        texts = {"glossary/notation.md": self.text}
+        for path in sorted((ROOT / "book").glob("*/README.md")) + [ROOT / "book/README.md", ROOT / "book/reading-guide.md"]:
+            texts[str(path.relative_to(ROOT))] = path.read_text(encoding="utf-8")
+        found = {}
+        for name, text in texts.items():
+            for needle in ("meta/", "后续批次", "批次 PR", "B1–B8", "5893426b", "review 提出", "applied_cudagraph_memory_estimate"):
+                if needle in text:
+                    found.setdefault(name, []).append(needle)
+        self.assertEqual(found, {})
+
+    def test_descriptive_subscript_families_used_in_chapters_are_registered(self):
+        """N_{..}, n_{..}, t_{..} and \\Delta t_{..} symbols that chapters use must be in section 1 or 3."""
+        def canon(key: str) -> str:
+            key = re.sub(r"\^\{[^}]*\}", "", key.replace("\\Delta", "").replace("\\overline", ""))  # superscripts do not name a new symbol
+            return re.sub(r",(i|j|r|k|t|l|[A-Z])\}$", "}", key)  # an index after the name: N_{rt,i} is N_{rt}
+
+        global_atoms, local_atoms = self._registries()
+        registered = {canon(atom) for atom in global_atoms + local_atoms}
+        math, _, _ = census(ROOT, include_code=False)
+        family = re.compile(r"^(?:\\overline\{)?(?:N|n|t)_\{[A-Za-z\\_,]{2,}\}")
+        missing = {key: sorted(chapters) for key, chapters in math.items()
+                   if family.match(canon(key)) and canon(key) not in registered}
+        self.assertEqual(missing, {}, "chapters use these symbols but section 1 or 3 does not register them")
 
 
 if __name__ == "__main__":
