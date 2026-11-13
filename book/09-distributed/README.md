@@ -153,7 +153,7 @@ PCP/DCP=多少、互联是什么、请求分布是什么`。
 | PP | 模型层段 | stage 间中间张量传输 | 每卡保留本段状态；在线与离线均可评估，需考虑气泡和负载平衡 |
 | DP | 请求 | 普通 dense 副本可较独立；跨 DP 的 EP 需要同步 | 每个逻辑副本可内部组合 TP/PP，不要求整个模型放入单卡 |
 | EP | MoE 专家 | dispatch/compute/combine 相关通信 | 非专家层仍有自己的布局；适用性取决于模型、后端和专家负载 |
-| PCP | prefill token/chunk | 收集与原序重排等 | 增加 worker 数；本版本 MRV2 有 MLA、PP、DCP 等组合限制 |
+| PCP | prefill token/chunk | 收集与原序重排等 | 增加 worker 数；本版本 MRV2 有 MLA、DCP、speculation 与 graph 等组合限制（见 §9.9.3） |
 | DCP | attention context/KV | Query 准备、局部 attention 和 LSE 合并 | 复用已有 ranks，不新增设备；实际 KV 分片与收益需看配置 |
 
 例如高速互联可能有利于 TP，但“有 NVLink”不能推出 TP 必然更快；“长上下文”
@@ -264,7 +264,7 @@ flowchart TB
 ```
 
 > **读图方法：** 这张图只回答一个问题：同一个 Worker 的 global rank、local rank 和“组内编号”各是多少。每个方框是一个 Worker，方框里从左到右依次是 global rank、local rank $\ell$、本机 `cuda:g`、它在 TP 组和 PP 组里的位置；
-> 大框是机器（也是一个 DP engine），中框是 PP stage，同一个中框里的两个方框属于同一个 TP 组。先找“global 6”：它在机器 1，$\ell=2$，$g=2+0\times4=2$，所以是 `cuda:2`，在 TP 组 $\{6,7\}$ 里排第 0、在 PP 组 $\{4,6\}$ 里排第 1，与 §9.3.2 的列表一致。
+> 大框是机器（也是一个 DP engine），中框是 PP stage，同一个中框里的两个方框属于同一个 TP 组。同一台机器里，图上的上下顺序与 stage 编号相反：stage 1 在上、stage 0 在下，编号以框标题为准。先找“global 6”：它在机器 1，$\ell=2$，$g=2+0\times4=2$，所以是 `cuda:2`，在 TP 组 $\{6,7\}$ 里排第 0、在 PP 组 $\{4,6\}$ 里排第 1，与 §9.3.2 的列表一致。
 > 再对照机器 0 的“global 2”：它的 $\ell$、`cuda:g` 和 TP/PP 组内编号与 global 6 完全相同，只有 global rank 不同——这就是看日志时必须先问“哪个编号”的原因。
 > 如果两个 engine 改放在同一台 8 卡机上，机器 1 的偏移变成 $1\times4=4$，global 6 就绑定 `cuda:6`，图中其余编号不变。
 
@@ -619,7 +619,7 @@ $A_i$ 是 $A$ 的第 $i$ 份列块，$b_i$ 是偏置里对应这些列的那一�
 rank 0 算 $[11,14]+[1,1]=[12,15]$，rank 1 算 $[17,20]+[1,1]=[18,21]$，两块拼起来是 $[12,15,18,21]$，与完整计算相同。
 shape 检查：$Y_i$ 是 `[1,2]`，两块拼成 `[1,4]`。
 
-**核对：**`ColumnParallelLinear` 的文档字符串同样写 $Y=XA+b$、$A=[A_1,\ldots,A_p]$（`vllm/model_executor/layers/linear.py:439-443` @ `05caae03`，源码从 1 起数）；
+**核对：**`ColumnParallelLinear` 的文档字符串同样写 $Y=XA+b$、`A = [A_1, ..., A_p]`（`vllm/model_executor/layers/linear.py:439-443` @ `05caae03`，源码从 1 起数，其中 `p` 是源码对 TP 的记法）；
 偏置按 `output_size_per_partition` 建（`:550-551`）；`forward` 里 `skip_bias_add` 为假才把偏置交给本地矩阵乘（`:623`）；
 教学代码 `column_parallel_linear` 返回不含偏置的 $XA_i$（`examples/ch09_parallel_topology.py:184`），对上面的 $X,A$ 得到 `[[[11, 14]], [[17, 20]]]`。
 
@@ -695,7 +695,7 @@ $$
 加上偏置 $b=[1]$：只有 rank 0 把 $b$ 加进自己的部分和（$3+1=4$），all-reduce 之后 $4+8=12=11+1$；如果每个 rank 都加，会得到 $4+9=13$，偏置被加了两次。
 shape 检查：$[1,1]\cdot[1,1]=[1,1]$，$Y^{\mathrm{part}}_i$ 与 $Y$ 同为 `[1,1]`。
 
-**核对：**`RowParallelLinear` 的文档字符串同样把 $A$ 沿第一维、$X$ 沿第二维切成 $p$ 份（`vllm/model_executor/layers/linear.py:1686-1697` @ `05caae03`）；
+**核对：**`RowParallelLinear` 的文档字符串同样把 $A$ 沿第一维、$X$ 沿第二维切成 `p` 份（`p` 是源码对 TP 的记法；`vllm/model_executor/layers/linear.py:1686-1697` @ `05caae03`）；
 `forward` 里 `bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias`（`:1847`），保证偏置不被加多次；
 `reduce_results` 且 `tp_size > 1` 时对 `output_parallel` 做 all-reduce（`:1850-1851`）；
 教学代码 `row_parallel_linear` 与 `all_reduce_sum`（`examples/ch09_parallel_topology.py:202`、`:220`）对 $X=[1,2]$、$A=[[3],[4]]$ 分别给出 `[[[3]], [[8]]]` 与 `[[11]]`（不含偏置）。
@@ -775,7 +775,7 @@ $\Delta t_{\mathrm{imbalance}}$ 是各 rank 计算量或速度不均造成的等
 **怎么算出来：**
 
 1. 理想情况下，矩阵乘的计算量均分给 $\mathrm{TP}$ 个 rank，各自并行算，每个 rank 只花单卡的 $1/\mathrm{TP}$：$\Delta t_{\mathrm{compute}}(1)/\mathrm{TP}$；
-2. 但每个 RowParallel 端点都要做 collective（§9.5.3），它有固定的启动延迟，数据量也不随计算变小，不能被 $\mathrm{TP}$ 摊薄，所以直接加上 $\Delta t_{\mathrm{collective}}(\mathrm{TP})$；
+2. 但每个 RowParallel 端点都要做 collective（§9.5.3；这是 `reduce_results=True` 的默认路径），它有固定的启动延迟，数据量也不随计算变小，不能被 $\mathrm{TP}$ 摊薄，所以直接加上 $\Delta t_{\mathrm{collective}}(\mathrm{TP})$；
 3. collective 要等所有 rank 到齐，一层结束的时刻由最慢的 rank 决定，所以再加上等待 $\Delta t_{\mathrm{imbalance}}$。
 
 算例（教学数字）：大 batch，$\Delta t_{\mathrm{compute}}(1)=1.0\ \mathrm{ms}$、TP=2、$\Delta t_{\mathrm{collective}}(2)=0.1\ \mathrm{ms}$、$\Delta t_{\mathrm{imbalance}}=0.02\ \mathrm{ms}$：
@@ -991,7 +991,7 @@ $N_{\mathrm{row},i}$ 是实际参与采样的 logits 行数。四个量都以“
 
 **怎么算出来：**
 
-1. 调度时一个请求要采样的 logits 行数是“它的 draft token 数 + 每步新采样的位置数（通常为 1）”，即 $N_{\mathrm{sch},i}=N_{\mathrm{drf},i}+1$（源码 `num_logits = num_draft_tokens_per_req + num_bonus_tokens`）；
+1. 调度时一个请求要采样的 logits 行数是“它的 draft token 数 + 每步新采样的位置数（通常为 1）”，即通常 $N_{\mathrm{sch},i}=N_{\mathrm{drf},i}+1$（源码 `num_logits = num_draft_tokens_per_req + num_bonus_tokens`，其中 `num_bonus_tokens` 默认是 1，来自 `num_new_sampled_tokens_per_step`）；
 2. 自适应验证只接纳其中 $N_{\mathrm{acc},i}$ 个 draft，其余 $N_{\mathrm{drf},i}-N_{\mathrm{acc},i}$ 个 draft 对应的行不再参与采样，要从预留的行数里扣掉；
 3. 所以 $N_{\mathrm{row},i}=N_{\mathrm{sch},i}-(N_{\mathrm{drf},i}-N_{\mathrm{acc},i})$，整理成上面的式子；代入第 1 步，$N_{\mathrm{row},i}=1+N_{\mathrm{acc},i}$。
 
@@ -1429,10 +1429,11 @@ flowchart TD
     E -->|否| Z
     E -->|是| G[与其他块同位置 rank 并发交换块和，按块序求和]
     G --> Z
+    F --> Z
 ```
 
 > **读图方法：** 这是 `cpu_all_reduce_` 的流程图。第一遍沿“否→是→是”的主路径走到底，对应 $\mathrm{DP}$ 非 2 的幂且是 CPU 张量；
-> 第二遍再看两个旁路：单 rank 直接返回，非 CPU 或非连续张量回退通用 `all_reduce`。读完后应知道：它只是 gloo 上的小张量 SUM，
+> 第二遍再看两个旁路：单 rank 直接返回；非 CPU 或非连续张量先回退通用 `all_reduce`，再沿箭头回到“直接返回”（源码在 `torch.distributed.all_reduce` 之后 `return tensor`）。读完后应知道：它只是 gloo 上的小张量 SUM，
 > 不替代 NCCL 数据面通信。
 
 `GroupCoordinator.cpu_all_reduce_` 是对应的 group 级封装（使用该 group 的 `cpu_group` 与 `cpu_timeout`）。
