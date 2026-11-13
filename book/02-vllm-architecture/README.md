@@ -473,6 +473,48 @@ v0.33.0 在在线 Renderer 里有三处会改变 chat prompt 的行为：
   （[d74f4180c](https://github.com/vllm-project/vllm/commit/d74f4180c)，
   [#61876](https://github.com/vllm-project/vllm/pull/61876)）。
 
+下图把上面的骨架展开成一次渲染里的真实分支，回答一个问题：同一批 prompt 在 Renderer 里依次经过哪些关口，哪些只在特定条件下才发生。
+
+```mermaid
+flowchart TB
+    IN["render_cmpl: prompts<br/>render_chat: conversations"] --> AT["记 arrival_time<br/>函数入口取一次，整批共用"]
+    AT --> KIND{"入口"}
+    KIND -- "render_cmpl" --> RP["render_prompts<br/>空列表抛 VLLMValidationError"]
+    KIND -- "render_chat" --> RM["render_messages<br/>chat template 渲染 role、content、tools"]
+    RP --> TK
+    RM --> TK
+    subgraph TK["tokenize_prompts: 逐个 prompt"]
+        T0{"已有 token ids<br/>或 embeds?"}
+        T0 -- "否，是文本" --> T1["pre-tokenization 截断<br/>tokenizer 编码"]
+        T1 --> T2["按字符偏移修正"]
+        T0 -- "是" --> T3
+        T2 --> T3["post-tokenization 截断"]
+        T3 --> T4{"needs_detokenization<br/>且还没有文本?"}
+        T4 -- "是" --> T5["截断后的 token 反解为文本"]
+        T4 -- "否" --> T6["保持原样"]
+    end
+    TK --> EX["_apply_prompt_extras<br/>render_chat 额外并入 media_io_kwargs"]
+    EX --> PE{"process_for_engine<br/>有 encoder_prompt?"}
+    PE -- "是" --> ED["_process_enc_dec<br/>分别处理 encoder 与 decoder 输入"]
+    PE -- "否" --> SG{"带 embeds?"}
+    SG -- "是" --> EM["_process_embeds"]
+    SG -- "否" --> TM["_process_tokens<br/>有多模态数据则走 multimodal processor"]
+    TM --> TR["_truncate_expanded_prompt<br/>placeholder 展开后再校一次截断"]
+    ED --> OUT["EngineInput<br/>附 arrival_time"]
+    EM --> OUT
+    TR --> OUT
+```
+
+> **读图方法：** 第一遍只看最左的主干：入口取时间、进入 `render_prompts` 或 `render_messages`、逐个 tokenize、并入额外字段、`process_for_engine`、得到 `EngineInput`。
+> 第二遍再看分支：`render_chat` 比 `render_cmpl` 多一步 `render_messages`，并多并入一个 `media_io_kwargs`；tokenize 框里，已经是 token ids 的输入跳过编码，
+> 只有 echo 之类需要文本回显时才会在截断之后反解；最后一段按输入类型分三路，多模态输入还要在 placeholder 展开后再校一次截断，因为一个 placeholder 可能展开成很多 token。
+
+图中每个框都对应固定 commit 里的真实函数（`vllm/renderers/base.py` @ `05caae03`）：`render_cmpl` `:1290`（入口取 `arrival_time` `:1298`）、`render_chat` `:1342`、
+`render_prompts` `:553`（空列表检查 `:556-559`）、`render_messages` `:590`、`tokenize_prompts` `:835`、
+`_tokenize_singleton_prompt` `:711-738`（编码前截断与偏移修正 `:722-727`，编码后截断 `:729`，截断后反解 `:733-738`）、`_apply_prompt_extras` `:862`
+（`render_chat` 并入 `media_io_kwargs` 在 `:1369-1371`）、`process_for_engine` `:1246`（`encoder_prompt` 分支 `:1255`，`arrival_time` 写入 `:1262`）、
+`_process_singleton` `:1154`（embeds 分支、`_truncate_expanded_prompt` `:1168`）、`_process_enc_dec` `:1197`。
+
 渲染阶段的客户端错误也统一了类型：空 prompt、`multi_modal_uuids` 缺项或长度不符、
 `prompt_embeds` 开关/形状错误，原先抛 `ValueError`，现在抛带 `parameter` 字段的
 `VLLMValidationError`（[1cc332ee8](https://github.com/vllm-project/vllm/commit/1cc332ee8)，
@@ -699,10 +741,29 @@ message queue 等机制广播 `SchedulerOutput`、收集执行结果。此时才
 ```text
 API process
   + EngineCore process
-  + N worker processes
+  + W_engine worker processes
 ```
 
-N 通常由当前 DP rank 内的 TP、PP、PCP 等并行维度决定，完整公式放到第 09 章。
+这里的 worker 进程数就是这个引擎的 world size：
+
+$$
+W_{\mathrm{engine}}=\mathrm{TP}\times\mathrm{PP}\times\mathrm{PCP}
+$$
+
+**白话：**一个 DP rank 里的模型被切成 TP、PP、PCP 三个方向，每个切片落在一个 worker 进程上，所以进程数是三个方向路数的乘积。
+
+**其中：**$\mathrm{TP}$、$\mathrm{PP}$、$\mathrm{PCP}$ 分别是 tensor parallel、pipeline parallel、prefill context parallel 的路数，都是无单位正整数；
+$W_{\mathrm{engine}}$ 是一个 DP rank 的 world size（个 worker）；它不含 API 进程和 EngineCore 进程；DCP 不增加进程，所以不在乘积里。
+
+**怎么算出来：**三个方向相互独立：先沿 TP 切成 $\mathrm{TP}$ 份，每一份再沿 PP 切成 $\mathrm{PP}$ 个 stage，每个 stage 再沿 PCP 切成 $\mathrm{PCP}$ 份，所以总份数是连乘，每份一个 rank、一个 worker 进程。
+算例（教学数字）：$\mathrm{TP}=4$、$\mathrm{PP}=2$、$\mathrm{PCP}=1$ 时 $W_{\mathrm{engine}}=4\times2\times1=8$，
+单节点上这个引擎就是 1 个 EngineCore 进程加 8 个 worker 进程；若还有 $\mathrm{DP}=2$，就是 2 个这样的引擎（各有自己的 EngineCore 和 executor），
+全部 worker 是 $W_{\mathrm{engine}}\times\mathrm{DP}=16$ 个。多节点时一个 DP rank 的 worker 分布在 `nnodes_within_dp` 个节点上，每个节点只起 $W_{\mathrm{engine}}/\mathrm{nnodes\_within\_dp}$ 个（`local_world_size`）。
+
+**核对：**`ParallelConfig.__post_init__` 把 `world_size` 赋为 `pipeline_parallel_size * tensor_parallel_size * prefill_context_parallel_size`
+（`vllm/config/parallel.py:1062-1066`）；`MultiprocExecutor._init_executor` 断言 `world_size == tp_size * pp_size * pcp_size`
+（`vllm/v1/executor/multiproc_executor.py:164`），每节点 worker 数是 `local_world_size = world_size // nnodes_within_dp`（`vllm/config/parallel.py:936-937`）。
+`external_launcher` 路径会把 DP 并入 `world_size`，这个特例和完整的 rank 推导放在第 09 章 §9.3.1。
 
 ### 离线 in-process 路径
 
@@ -1307,6 +1368,63 @@ sequenceDiagram
 | EngineCore `input_queue` | EngineCoreProc | Socket thread 向 busy loop 交接消息 |
 | EngineCore `output_queue` | EngineCoreProc | busy loop 向 output thread 交接结果 |
 | Scheduler waiting/running | EngineCore | 决定请求何时获得 token/KV 预算 |
+
+下图把这几处放到同一张拓扑里，回答一个问题：请求和输出在哪里排队、哪一处有容量上限、哪一处会拒绝、
+哪一处只是积压。
+
+```mermaid
+flowchart TB
+    subgraph API["API Server 进程 (asyncio)"]
+        H["generate 并发 task<br/>HTTP 请求"] --> ADM{"check_admission<br/>唯一的拒绝点"}
+        ADM -- "超限" --> REJ["QueueOverflowError<br/>MaxQueuedTokensError"]
+        ADM -- "通过" --> OP["OutputProcessor<br/>request_states"]
+        OP --> CL["AsyncMPClient<br/>add_request_async"]
+        CQ["client outputs_queue<br/>无 maxsize"] --> OH["output_handler task"]
+        OH --> OP
+        OP -- "put 并入" --> COL["RequestOutputCollector<br/>每请求单槽"]
+        COL --> H
+    end
+    subgraph CORE["EngineCore 进程"]
+        IT["input socket thread"] --> IQ["input_queue<br/>无 maxsize"]
+        IQ --> BL["busy loop<br/>step_fn"]
+        BL <--> SCH["Scheduler<br/>waiting / running"]
+        BL --> OQ["output_queue<br/>无 maxsize"]
+        OQ --> OT["output socket thread"]
+        BL -- "SchedulerOutput" --> RB["Executor 到 Worker<br/>ShmRingBuffer 10 槽"]
+    end
+    CL -. "ZMQ ROUTER/DEALER<br/>SNDHWM=0" .-> IT
+    OT -. "ZMQ PUSH/PULL<br/>HWM=0" .-> CQ
+    OP -. "读请求数与排队 token 数" .-> ADM
+    classDef gate fill:#ffe9e9,stroke:#c0392b;
+    classDef bounded fill:#fff6dd,stroke:#b9770e;
+    classDef unbounded fill:#e8f4fd,stroke:#2e86c1;
+    class ADM,REJ gate;
+    class SCH,RB,COL bounded;
+    class CQ,IQ,OQ unbounded;
+```
+
+> **读图方法：** 先沿实线走一遍“请求入口”：顶部的 `generate` task 进入 `check_admission`，超限就在这里被拒绝，通过后才登记
+> `OutputProcessor`、经虚线（跨进程 ZMQ）进入 EngineCore 的 `input_queue`，由 busy loop 交给 Scheduler。
+> 再沿回程看输出：左侧 EngineCore 里的 `output_queue` → ZMQ → 右下 client 的 `outputs_queue` → `output_handler` → 每请求的 `RequestOutputCollector` → 回到顶部的 `generate`。
+> 颜色只表示容量性质：红色是拒绝点；蓝色是没有容量上限的队列（只会积压，不会拒绝）；黄色是各自有约束的位置（Scheduler 由 token/KV 预算限制谁前进，
+> Collector 是单槽并入而不是队列，ShmRingBuffer 写满时写端等待读端）。从 `OP` 指向 `check_admission` 的那条点线表示：两个计数读的是前端 `OutputProcessor` 里的状态，不是 EngineCore 里的 waiting 数。
+
+图上的几个事实都能在固定 commit 里找到：
+
+- `check_admission` 在 `n=1` 时由 `AsyncLLM._add_request` 在登记 `OutputProcessor` 之前调用（`vllm/v1/engine/async_llm.py:592`），
+  `n>1` 时由 `AsyncLLM.add_request` 的扇出路径在登记所有 child 之前调用（`:565`）；超限抛出的两个异常对应 HTTP 503（`:326-396` 的 docstring）。
+- 本地回退用的请求数是 `OutputProcessor.request_states` 的个数（`vllm/v1/engine/output_processor.py:576-577`），排队 token 数是其中仍在 prefill 的请求的 `prompt_len` 之和（`:582-592`）。
+- `input_queue` 与 `output_queue` 都是不带 `maxsize` 的 `queue.Queue`（`vllm/v1/engine/core.py:1362-1363`）；
+  client 的 `outputs_queue` 是不带 `maxsize` 的 `asyncio.Queue`（`vllm/v1/engine/core_client.py:1209`，同步 client 在 `:1008` 是 `queue.Queue`）。
+- `make_zmq_socket` 给 `PULL`、`DEALER`、`ROUTER` 把 `RCVHWM` 设为 0，给 `PUSH`、`DEALER`、`ROUTER` 把 `SNDHWM` 设为 0（`vllm/utils/network_utils.py:371-377`），
+  0 表示 ZMQ 不设水位线，所以套接字这一层也不会因为队列长而丢弃或阻塞。
+- `RequestOutputCollector` 只有一个 `output` 槽：生产者领先时，`put` 把新输出并入已有的那一个（`RequestOutput.add`，`aggregate` 只在 delta 模式为真，
+  否则用新输出替换同序号的旧输出），消费者 `get` 取走并清空（`vllm/v1/engine/output_processor.py:54-100`，`vllm/outputs.py:211-255`）。
+- Engine→Worker 的广播走 `MessageQueue`；写端 `acquire_write` 发现下一个槽还没被所有 reader 读完就循环等待（`vllm/distributed/device_communicators/shm_broadcast.py:732-760`），
+  槽数默认是 10（`MessageQueue.__init__` 的 `max_chunks: int = 10`，`:507`）。这是整条路径上唯一会让写端真正等待的位置，细节见第 03 章。
+
+所以“满了怎么办”在不同位置的答案不一样：`check_admission` 满了是**拒绝**，没有上限的队列是**积压**（内存增长、延迟变长，但不报错），
+Collector 是**合并**，ring buffer 是**让写端等**。排查延迟时，先问请求卡在哪一类位置，再去看对应的指标。
 
 API 的 admission control 通过 `max_num_queued_reqs` 和
 `max_num_queued_tokens` 在进入 EngineCore 前拒绝过量请求，但两项指标的范围不同。
