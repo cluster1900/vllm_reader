@@ -425,7 +425,7 @@ flowchart LR
     V --> O
 ```
 
-> **读图方法：** 这是单个 head 的 attention 数据流，只表达“Q、K、V 从哪来、怎样变成输出”。先看左边三条并行的投影线：它们读同一个 $X$，所以 Q、K、V 的行数都等于 token 数；
+> **读图方法：** 这是单个 head 的 attention 数据流，只表达“Q、K、V 从哪来、怎样变成输出”。先看左边三条并行的投影线：它们读同一个 $X$，所以对本步的 token，Q、K、V 各有一行（prefill 时 $N_q=N_k=T$；decode 时 K、V 还要接上缓存里的历史行，所以 $N_k>N_q$）；
 > 再从 `scores` 往右走，依次是缩放、加 Mask、逐行 softmax、乘 V，每个方框的 shape 对应上面五步里的 shape。
 > 箭头是数据依赖，不是函数调用；图中省略了 Llama 在投影之后对 Q、K 做的 RoPE（见 1.4 节）和多个 head 的并行。
 
@@ -563,7 +563,7 @@ flowchart LR
 | Value | `[B,S,H_kv,d_v]` | `[T,H_kv,d_v]` |
 | Output | `[B,S,H_q,d_v]` | `[T,H_q*d_v]` |
 
-（表里的 $H_q$、$H_{\mathrm{kv}}$ 在 Tensor Parallel 下是每张卡上的 head 数；Llama 里 $d_v=d_h$。）
+（表中 vLLM 一列的 head 数在 Tensor Parallel 下是每张卡上的数量（KV 侧即 $H_{\mathrm{kv,local}}$），不是全模型的 $H_q$、$H_{\mathrm{kv}}$；Llama 里 $d_v=d_h$。）
 
 普通 Multi-Head Attention 中 $H_q=H_{\mathrm{kv}}$。Grouped-Query Attention（GQA）让多组
 query heads 共享较少的 KV heads，即 $H_{\mathrm{kv}}<H_q$。这样可以显著减少 KV Cache，
@@ -743,7 +743,7 @@ flowchart LR
     ROT --> CAT["concatenate o1 and o2: rotated vector, same shape"]
 ```
 
-> **读图方法：** 这是 RoPE 在一个 head 内部的坐标映射图（neox 风格，Llama 使用）。先看最上面一路：向量被切成前后两半，第 $j$ 对由前半的第 $j$ 个数和后半的第 $j$ 个数组成；
+> **读图方法：** 这是 RoPE 在一个 head 内部的坐标映射图（neox 风格，Llama 使用）。先看最上面一路：向量被切成前后两半，第 $j$ 对由前半的第 $j$ 个数和后半的第 $j$ 个数组成（图里 x1、x2 是前后两半，不是这一对分量）；
 > 再看左下的 position 一路：每一对按自己的频率算出一个角度；两路在 `rotate` 汇合，每一对各自旋转，最后把前后两半拼回原来的 shape。
 > 图里没有任何新增参数，也不改变向量长度；位置只通过角度进入。
 
@@ -775,8 +775,9 @@ $i_{\mathrm{next}}$ 是选中的 token ID，无单位。
 
 **核对：**随书 `sample_logits()` 在 `temperature == 0` 时直接 `max(range(len(logits)), key=logits.__getitem__)`（`examples/ch01_minimal_inference.py:94-95`），
 并列时取下标最小的；`tests/test_ch01_minimal_inference.py::test_temperature_zero_is_greedy` 检查这个分支。
-vLLM 的 `gumbel_noised_argmax` 在 `temp == 0` 时不加噪声，退化为普通 argmax（`vllm/v1/worker/gpu/sample/gumbel.py:172-212`）；
+vLLM 的 `gumbel_noised_argmax` 在 `temp == 0` 时不加噪声，退化为普通 argmax（`vllm/v1/worker/gpu/sample/gumbel.py:172-212`）（GPU Triton 路径；CPU runner 由 `vllm/v1/worker/cpu/gumbel.py` 的 `gumbel_sample`（`:9-40`）调用 `ops.gumbel_sample_cpu`，温度为 0 时同样不加噪声、退化为普通 argmax）；
 `SamplingParams.__post_init__` 在 temperature 小于 `_SAMPLING_EPS`（1e-5）时按 greedy 处理（`vllm/sampling_params.py:619-623`）。
+同一节后面「第七步：`SamplingParams` 在进入 Sampler 前做什么」的流程图读图方法写明：因为 $0<\tau<10^{-2}$ 会先被抬到 $10^{-2}$，实际走到 greedy 分支的只有 temperature 恰好为 0 的请求。
 
 给定完全相同的 logits 和并列值处理规则，它总会选择同一项；但不同硬件或 batch
 引起的浮点误差仍可能改变非常接近的分数，所以 `temperature=0` 不是跨环境逐字复现
@@ -807,7 +808,8 @@ $\tau=1$ 时 $z/\tau=[4,2,1,0]$，指数约 $54.60$、$7.389$、$2.718$、$1$，
 $\tau=2$ 时 $z/\tau=[2,1,0.5,0]$，指数约 $7.389$、$2.718$、$1.649$、$1$，总和约 $12.76$，A 为 $57.93\%$。下面的表就是这样一列列算出来的。
 
 **核对：**vLLM 的 `_temperature_kernel` 逐元素执行 `logits = logits / temperature`（`vllm/v1/worker/gpu/sample/gumbel.py:44`），
-temperature 为 0 或 1 时提前返回、不改 logits（`:34-36`）；`SamplingParams` 把落在 $(0,0.01)$ 的 temperature 提高到 0.01（`vllm/sampling_params.py:564-572`），
+temperature 为 0 或 1 时提前返回、不改 logits（`:34-36`）（GPU Triton 路径；CPU runner 由 `vllm/v1/worker/cpu/sampler.py` 的 `apply_temperature`（`:350-362`）实现：全部请求温度为 0 或 1 时同样提前返回（`:357-359`），否则对温度为 0 的行用 1 做除数从而跳过除以 0（`:361-362`）；采样入口在 `vllm/v1/worker/cpu/gumbel.py` 的 `gumbel_sample`）；
+`SamplingParams` 把落在 $(0,0.01)$ 的 temperature 提高到 0.01（`vllm/sampling_params.py:564-572`），
 并要求 temperature 有限、非负且不大于 2（`:660-676`）。随书表格由 `temperature_rows()`（`examples/ch01_numerical_walkthrough.py`）生成，
 `tests/test_ch01_numerical_walkthrough.py::test_temperature_distributions_sum_to_one` 检查每组概率之和为 1。
 
@@ -1229,7 +1231,6 @@ $q_{t+1}$，不需要读取历史 $q_t$。相反，历史 $k_t,v_t$ 会在未来
 **核对：**`LlamaAttention.forward` 只把当前 step 的 `q, k, v` 交给 `Attention`，由它把新的 K/V 写进缓存、从缓存读历史 K/V（下面两条 `[源码]`）；缓存的对象是 K 和 V，没有为历史 Q 设置缓存。
 
 [源码] `vllm/model_executor/models/llama.py` - `LlamaAttention.forward`
-[源码] `vllm/model_executor/models/llama.py` - `LlamaAttention.forward`
 
 [源码] `vllm/model_executor/layers/attention/attention.py` - `Attention.forward`、`unified_kv_cache_update`
 
@@ -1384,7 +1385,7 @@ $$
 算例一：8 个请求平均各缓存 2,048 token，$8\times256\,\mathrm{MiB}=2\,\mathrm{GiB}$。
 算例二：1.6 节的三个请求序列长度是 $S=[4,38,102]$，共 $144$ token，用 GQA 的 $128\,\mathrm{KiB/token}$ 得 $144\times128\,\mathrm{KiB}=18432\,\mathrm{KiB}=18\,\mathrm{MiB}$。
 
-**核对：**这是理论下限式的估算，没有 block 对齐和共享；真实的 KV block 数由第 05 章从 `KVCacheSpec` 反推。
+**核对：**这是没有计入 block 对齐和前缀共享的估算（对齐会让真实占用更大，前缀共享会让它更小）；真实的 KV block 数由第 05 章从 `KVCacheSpec` 反推。
 
 仅基础 K/V 数值就已经如此；如果请求继续生成，缓存还会逐 token 增长。
 
