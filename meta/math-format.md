@@ -26,6 +26,7 @@ $$
 
 - 函数名用 `\operatorname{softmax}`、`\operatorname{MLP}`，不是斜体字母连乘。
 - 描述性下标用 `B_{\mathrm{token}}`；多词说明可用 `\text{...}`。
+- `\text{...}` 里只放 ASCII（如 `\text{split}`），不要放中文：MathJax 渲染时会报 `formula contains a typesetting error or a font-dependent glyph`，EPUB 与公式预览都会构建失败；中文说明写在公式外面。CI 会构建 EPUB 和公式预览，这类错误会让 PR 变红。
 - 分式用 `\frac{a}{b}`，指数和下标用花括号明确作用范围。
 - 单位用正体，如 `128\,\mathrm{KiB/token}`，并说明量纲。
 - 多步推导用 `aligned`，矩阵用 `bmatrix`；把等号与相邻内容放在同一行，避免单独
