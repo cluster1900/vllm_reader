@@ -155,7 +155,7 @@ $$
 这 2.1 ms 正是后面几节想“藏到 GPU 工作后面”的部分：如果它们能完全被其余阶段的时间盖住，墙钟耗时最多降到 $9.0-2.1=6.9\ \mathrm{ms}$——这只是上限直觉，不是预测。
 单位检查：七项都是 ms，相加仍是 ms。
 
-**核对：** 这是教学模型，没有对应的源码公式；八个方框对应的真实阶段见 8.3 节和 8.5 节。数字可用 `python3` 复算（写在本批 PR 正文里）。
+**核对：** 这是教学模型，没有对应的源码公式；八个方框对应的真实阶段见 8.3 节和 8.5 节。七项相加即可复算。
 
 ### 8.1.2 为什么 decode 更容易暴露 launch 开销
 
@@ -390,15 +390,14 @@ $$
 **白话：** 第 0 步的准备躲不掉；之后每多一步，墙钟只多“两个阶段里较慢的那个”；最后一步的 GPU 要完整跑完。
 
 **怎么算出来：** 第 0 步开始时 GPU 无事可做，所以先付出一次 $\Delta t_{\mathrm{prepare}}=2\ \mathrm{ms}$（时序图里 S0 prepare 占 0–2 ms）。
-此后 CPU 和 GPU 同时干活：GPU 做第 $k$ 步的时候 CPU 在准备第 $k+1$ 步，下一步何时能开始取决于较慢的一方。这里 GPU（5 ms）比 CPU（2 ms）慢，
+此后 CPU 和 GPU 同时干活：GPU 做某一步的时候 CPU 在准备下一步，下一步何时能开始取决于较慢的一方。这里 GPU（5 ms）比 CPU（2 ms）慢，
 CPU 总能在 GPU 跑完之前准备好，GPU 一直满载，每多一步多 5 ms；最后一步 GPU 完整跑 5 ms。所以 $2+3\times5+5=22\ \mathrm{ms}$。
 GPU 更慢时可化简成 $\Delta t_{\mathrm{prepare}}+n_{\mathrm{step}}\Delta t_{\mathrm{forward}}=2+4\times5=22\ \mathrm{ms}$（S0 的 2 ms 加上 S0–S3 四段 GPU 执行，对应时序图里 GPU 从 2 ms 一直跑到 22 ms）。
 反过来，若 CPU 更慢（例如 prepare 5 ms、execute 2 ms），瓶颈换成 CPU，结果是 $n_{\mathrm{step}}\Delta t_{\mathrm{prepare}}+\Delta t_{\mathrm{forward}}=4\times5+2=22\ \mathrm{ms}$，数字相同但原因不同。
 对比同步的 28 ms，这个例子省下 6 ms，也就是 $3\times\Delta t_{\mathrm{prepare}}$：前 3 步之后的准备都被盖住了。
+单位检查：各项都是 ms，乘整数、取 $\max$ 都不改单位，结果仍是 ms。
 
-**核对：** `examples/ch08_async_compile_graph.py` 的 `synchronous_timeline`、`overlapped_timeline`、`makespan`，
-测试 `tests/test_ch08_async_compile_graph.py::TimelineTest.test_overlap_reduces_repeated_step_makespan` 断言的正是 28 与 22；
-另外用若干组 $(n_{\mathrm{step}},\Delta t_{\mathrm{prepare}},\Delta t_{\mathrm{forward}})$ 对照通式，结果写在本批 PR 正文里。
+**核对：** 把 $n_{\mathrm{step}}=4$、$\Delta t_{\mathrm{prepare}}=2$、$\Delta t_{\mathrm{forward}}=5$ 代入通式得 $2+3\times5+5=22$，与同步式 $4\times(2+5)=28$ 对照。把 $n_{\mathrm{step}}=1$ 代入通式得 $\Delta t_{\mathrm{prepare}}+\Delta t_{\mathrm{forward}}$，与同步式一致：单步没有流水收益。
 
 这只是说明重叠的上限直觉。真实 vLLM 还有 scheduler state、H2D/D2H stream、PP、DP 同步和 sampling
 依赖，不能直接用该公式预测生产收益。
@@ -441,9 +440,9 @@ N_{\mathrm{cacheable}}=N_{\mathrm{computed}}-N_{\mathrm{in\ flight}}
 $$
 
 **白话：** 第一个差值回答“输出序列里哪些位置已经确定”，可恢复的流式请求停止后就以它作为继续的安全起点
-（`Scheduler._handle_stopped_request` 中的 `safe_frontier`）；第二个差值回答“哪些 token 的 KV 已经不会再被在途
-step 改写，因此可以登记进 prefix cache”。decode step 里两者通常相等，prefill chunk 只计入 in-flight，所以
-缓存边界更保守。v0.32.0 的 `cache_blocks` 用的是第一个差值，v0.33.0 起改用第二个（`2fb320d83`，#61589，见 8.4.3）。
+（`Scheduler._handle_stopped_request` 中的 `safe_frontier`）；第二个差值回答“按 computed − in-flight 算，哪些 token 的 KV 已经不会再被在途
+step 改写”，源码在 `update_from_output` 里用它作为 `cache_blocks` 的边界（见 8.4.3）。它不是“此刻能否登记 prefix cache”的全部答案：prompt 的 block 另在 `allocate_slots` 调度时就会登记，见下。decode step 里两者通常相等，prefill chunk 只计入 in-flight，所以
+这条边界更保守。v0.32.0 的 `cache_blocks` 用的是第一个差值，v0.33.0 起改用第二个（`2fb320d83`，#61589，见 8.4.3）。
 
 **其中：** 单位都是 token。
 
@@ -453,7 +452,7 @@ step 改写，因此可以登记进 prefix cache”。decode step 里两者通�
   既含输出位置，也含 prefill chunk。
 
 **怎么算出来：** $N_{\mathrm{computed}}$ 在**调度时**就被加上去：`Scheduler._update_after_schedule` 对每个被调度的请求同时做
-`num_computed_tokens += n` 和 `num_in_flight_tokens += n`（`vllm/v1/core/sched/scheduler.py:1834-1835`，$n$ 是本步给它调度的 token 数）；
+`num_computed_tokens += num_scheduled_token` 和 `num_in_flight_tokens += num_scheduled_token`（`vllm/v1/core/sched/scheduler.py:1834-1835`，$N_{\mathrm{new}}$ 是本步给它调度的 token 数，源码循环变量是 `num_scheduled_token`）；
 `AsyncScheduler._update_after_schedule` 再给**非 prefill chunk** 的请求加 placeholder（`async_scheduler.py:31-47`）。所以两条边界的算法都是
 “先乐观加上去，再把还没落地的部分减掉”：
 
@@ -468,28 +467,28 @@ step 改写，因此可以登记进 prefix cache”。decode step 里两者通�
 | B. 100-token prompt 的第一个 prefill chunk（64 token）刚调度 | 64 | 0 | 64 | $64-0=64$ | $64-64=0$ |
 
 情形 A 里每个在途 step 带来 1 个输出位置，placeholder 数与 in-flight 数相等，两条边界重合。情形 B 的 chunk 在 `AsyncScheduler._update_after_schedule` 里被跳过
-（`is_prefill_chunk` 为真，`async_scheduler.py:31-32`），不加 placeholder，但整段 64 个 token 都在途，它们的 KV 还没算完，所以一个 token 也不能登记。
-B 行的 $N_{\mathrm{confirmed}}=64$ 只是代数结果：prefill 中途没有输出位置，源码只在请求停止后的 `_handle_stopped_request` 里使用它。
+（`is_prefill_chunk` 为真，`async_scheduler.py:31-32`），不加 placeholder，但整段 64 个 token 都在途，它们的 KV 还没算完，所以按 $N_{\mathrm{computed}}-N_{\mathrm{in\ flight}}$ 代数上得 0。注意表里是“刚调度完”的两个计数的代数快照：源码求 $N_{\mathrm{cacheable}}$ 的地方（`scheduler.py:2390-2393`）在 `update_from_output` 里，`:2286` 已先减去刚返回那一步的 `num_in_flight_tokens`，并且只在 8.4.3 的条件成立时才调用；prompt 的 block 另在 `allocate_slots` 调度时就按 `min(total_computed_tokens + num_new_tokens, request.num_tokens)` 登记（`kv_cache_manager.py:640-646`），不受这条边界限制。
+B 行的 $N_{\mathrm{confirmed}}=64$ 只是代数结果：prefill 中途没有输出位置，源码用 `num_computed_tokens - num_output_placeholders` 的地方包括请求停止后的 `_handle_stopped_request`（`scheduler.py:2781`）和 ec_connector 的缓存可用性检查（`:794`）。
 
 ```mermaid
 flowchart TB
     subgraph DEC["情形 A：稳态 decode，N_computed = 102"]
         direction LR
-        A1["位置 0 到 99\n已确认，KV 已落地\n可登记 prefix cache（100 个）"] --> A2["位置 100 到 101\n2 个在途 token\n= 2 个 placeholder"]
+        A1["位置 0 到 99\n已确认，KV 已落地\n按 computed − in-flight 算的边界：100"] --> A2["位置 100 到 101\n2 个在途 token\n= 2 个 placeholder"]
     end
     subgraph PRE["情形 B：prompt 100 token，第一个 chunk，N_computed = 64"]
         direction LR
-        B0["可登记 prefix cache：0 个"] --> B1["位置 0 到 63\n64 个在途 token\n没有 placeholder"] --> B2["位置 64 到 99\n尚未调度"]
+        B0["按 computed − in-flight 算的边界：0"] --> B1["位置 0 到 63\n64 个在途 token\n没有 placeholder"] --> B2["位置 64 到 99\n尚未调度"]
     end
     DEC ~~~ PRE
 ```
 
-> **读图方法：** 上下两个子图是上表的两行，每个方框是一段 token 位置区间。情形 A：在途 token 恰好是输出位置，所以“已确认”与“可登记”的边界重合在位置 100；情形 B：整段 chunk 都在途，可登记区间为空。
-> 阅读时只需比较两个子图里“可登记”那一块有多大。图中数字与表格一致，边界来自 `num_computed_tokens - num_in_flight_tokens`（`scheduler.py:2392`）。
+> **读图方法：** 上下两个子图是上表的两行，每个方框是一段 token 位置区间。情形 A：在途 token 恰好是输出位置，所以“已确认”与按 computed − in-flight 算的边界重合在位置 100；情形 B：整段 chunk 都在途，该边界为 0。
+> 阅读时只需比较两个子图里该边界落在何处。图中数字与表格一致，边界来自 `num_computed_tokens - num_in_flight_tokens`（`scheduler.py:2392`）。
 
 **核对：** `examples/ch08_async_compile_graph.py::AsyncRequestState.confirmed_tokens` 就是 $N_{\mathrm{confirmed}}$ 的教学实现，
 `tests/test_ch08_async_compile_graph.py::PlaceholderTest` 覆盖 $N_{\mathrm{computed}}$ 与 placeholder 同步增加、$N_{\mathrm{confirmed}}$ 不变；
-$N_{\mathrm{cacheable}}$ 在源码里是 `cache_blocks(request, request.num_computed_tokens - request.num_in_flight_tokens)`（`scheduler.py:2390-2393`）。情形 A、B 的数字用 `python3` 复算过。
+$N_{\mathrm{cacheable}}$ 在源码里是 `cache_blocks(request, request.num_computed_tokens - request.num_in_flight_tokens)`（`scheduler.py:2390-2393`）。
 
 这些差值是源码用于限制缓存/释放的边界，不能当作 GPU 完成事件。例如最后一段 prefill 刚提交时，computed 已增加，
 GPU 可能还没算完；第 05 章的本地 hash 登记也可能先于 forward。需释放在途 block 时，还要看适用的 step fence，
@@ -1796,12 +1795,12 @@ M_{\mathrm{KV}}=M_{\mathrm{req}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph}}
 $$
 
 **白话：** 这与第 07 章 7.9 是同一个式子：KV Cache 拿到的是“预算扣掉非 KV、再扣掉 graph 估算”之后剩下的，graph 多占一份，KV 就少一份，这就是“竞争关系”。
-本书两处原先分别写 $\approx$ 与 $=$，现统一成 $=$：源码里这是一次整数减法（`vllm/v1/worker/gpu_worker.py:789-793`），三项相减是精确相等；
+这个式子写 $=$：源码里它是一次整数减法（`vllm/v1/worker/gpu_worker.py:789-793`），三项相减精确相等；
 真正“近似”的是 $M_{\mathrm{graph}}$ 本身——它是一次临时捕获得到的估算，不等于运行时 graph 实际占用的每个 byte。
 
 **其中：** 各项单位均为 byte。$M_{\mathrm{KV}}$ 是可分给 KV Cache 的显存，$M_{\mathrm{req}}$ 是请求的显存预算（`requested_memory`），$M_{\mathrm{nonKV}}$ 是 profile 得到的非 KV 占用，
 $M_{\mathrm{graph}}$ 是实际应用的 graph 估算（源码变量 `cudagraph_memory_estimate`，`gpu_worker.py:755-760`、`:792`；$M_{\mathrm{KV}}$ 对应 `available_kv_cache_memory_bytes`，`:789-793`）。先按 `ceil(total_memory * gpu_memory_utilization)` 得到利用率预算。
-若 loader 报告外部进程持有权重，则 $M_{\mathrm{req}}$ 还要扣除该外部权重，余量必须为正且不超过 free memory；
+若 loader 报告外部进程持有权重，则 $M_{\mathrm{req}}$ 还要扣除该外部权重，余量必须为正；free memory 是否足以满足该余量的检查在开启 `enable_extensible_kv_cache` 时会跳过（`utils.py:819-822`）；
 普通进程内加载没有这项扣除。该式描述自动预算路径，
 不覆盖显式 `kv_cache_memory_bytes` 的手动容量分支。固定 revision 默认启用
 `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1`；禁用该项只改变估算是否扣除，不代表 graph
@@ -1818,10 +1817,10 @@ $M_{\mathrm{graph}}$ 是实际应用的 graph 估算（源码变量 `cudagraph_m
 | 3.0 GiB | $72-20-3.0=49.0$ GiB | $49.0\ \mathrm{GiB}\div128\ \mathrm{KiB/token}=401408$ token |
 
 $M_{\mathrm{graph}}$ 每多 1.5 GiB，$M_{\mathrm{KV}}$ 就少 1.5 GiB，折合 $1.5\ \mathrm{GiB}\div128\ \mathrm{KiB/token}=12288$ token（$413696-401408=12288$）。
-$M_{\mathrm{tok}}=128\ \mathrm{KiB/token}$ 取自 ch01 的 KV 字节数算例（$M_{\mathrm{tok}}=2LH_{\mathrm{kv}}d_hb_{\mathrm{elem}}$），这里的折算忽略 block 取整，只演示量级。
+$M_{\mathrm{tok}}$ 是每 token 的 KV 字节数：$2\times32\times8\times128\times2=131072\ \mathrm{byte}=128\ \mathrm{KiB}$（32 层、8 个 KV head、head 维 128、bf16 每元素 2 byte，与 ch01 的 GQA 算例同一组数）；这里的折算忽略 block 取整，只演示量级。
 单位检查：GiB 除以 KiB/token 得 token（$1\ \mathrm{GiB}=2^{20}\ \mathrm{KiB}$）。
 
-**核对：** 与 7.9 的算例、`gpu_worker.py:789-793` 一致；上表数字用 `python3` 复算（命令与输出写在本批 PR 正文里）。
+**核对：** 与 7.9 的算例、`gpu_worker.py:789-793` 一致；上表数字把 $M_{\mathrm{graph}}$ 代入式子、再除以 $M_{\mathrm{tok}}$ 即可复算。
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`
 

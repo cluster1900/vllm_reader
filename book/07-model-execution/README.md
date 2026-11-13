@@ -632,8 +632,8 @@ $$
 - $M_{\mathrm{KV}}$：可分给 KV Cache 的显存，源码里是 `Worker.available_kv_cache_memory_bytes`（`gpu_worker.py:789-793` 算出，`:810` 写入日志）；
 - $M_{\mathrm{req}}$：vLLM 申请的显存预算（`requested_memory`）。先取 `M_util = ceil(total_memory * gpu_memory_utilization)`，不是 free memory 乘利用率；
   普通进程内加载时 $M_{\mathrm{req}}$ 就是 `M_util`。若 loader 报告外部进程已持有权重
-  `M_external>0`，则 $M_{\mathrm{req}}$ 是 `M_util-M_external`，并检查余量为正且 free memory
-  足以满足这个余量。外部权重不能因为不归当前进程 allocator 所有就漏算；
+  `M_external>0`，则 $M_{\mathrm{req}}$ 是 `M_util-M_external`，并检查余量为正；free memory
+  是否足以满足该余量的检查在开启 `enable_extensible_kv_cache` 时会跳过（`utils.py:819-822`），因为此时预算只是上限，超出 free memory 只会多预留地址空间、不会立刻占满物理页。外部权重不能因为不归当前进程 allocator 所有就漏算；
 - $M_{\mathrm{nonKV}}$：profile 得到的非 KV 占用，包含权重及 profile 期间非 KV 消耗；
 - $M_{\mathrm{graph}}$：实际扣除的 CUDA Graph 内存估算，源码里是 `cudagraph_memory_estimate`（`gpu_worker.py:755` 先置 0，`:760` 在条件成立时由 `model_runner.profile_cudagraph_memory()` 赋值，`:787` 存成 `self.cudagraph_memory_estimate`，`:792` 从预算里扣掉）。环境变量
   `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` 默认值为 `1`，即默认应用估算；显式设为 `0`
@@ -658,16 +658,14 @@ $$
 
 | 情形 | $M_{\mathrm{req}}$ 的算法 | $M_{\mathrm{req}}$ | $M_{\mathrm{nonKV}}$ | $M_{\mathrm{graph}}$ | $M_{\mathrm{KV}}$ |
 |---|---|---:|---:|---:|---:|
-| (a) 普通进程内加载 | $\lceil 80\times0.9\rceil=72$ | 72 GiB | 20 GiB | 1.5 GiB | $72-20-1.5=50.5$ GiB |
+| (a) 普通进程内加载 | $80\times0.9=72$（源码对 byte 数取 ceil） | 72 GiB | 20 GiB | 1.5 GiB | $72-20-1.5=50.5$ GiB |
 | (b) 外部持有 8 GiB 权重（其余项取与 (a) 相同的数，只演示 $M_{\mathrm{req}}$ 的变化） | $72-8=64$ | 64 GiB | 20 GiB | 1.5 GiB | $64-20-1.5=42.5$ GiB |
 
 单位检查：四项都是 GiB（1 GiB = $2^{30}$ byte），加减不改单位，结果仍是 GiB；(b) 比 (a) 少的 8 GiB 恰好是外部权重，说明漏算它就会把别人占着的显存当成自己的 KV 空间。
 
-**核对：** 三处源码位置如上。这些变量名都在 `05caae03` 的 `gpu_worker.py` 里逐个确认过：`cudagraph_memory_estimate` 在 `:755`、`:760`、`:785`（加进 `peak_activation_memory`）、`:787`、`:792`、`:813-816`（日志里换算成等价的 `gpu_memory_utilization`）、`:1110-1119`（捕获完成后与实际 graph 池大小比较并打日志）使用；
+**核对：** 三处源码位置如上。`cudagraph_memory_estimate` 在 `gpu_worker.py` 的 `:755`、`:760`、`:785`（加进 `peak_activation_memory`）、`:787`、`:792`、`:813-816`（日志里换算成等价的 `gpu_memory_utilization`）、`:1110-1119`（捕获完成后与实际 graph 池大小比较并打日志）使用；
 `available_kv_cache_memory_bytes` 在 `:789` 赋值，`:810` 打日志，`:851` 作为 `reserve_mm_ipc_gpu_memory(...)` 的参数——`determine_available_memory` 最终返回的是它扣掉多模态 IPC 预留之后的值（`:850-854`；显式 `kv_cache_memory_bytes` 的分支同样经过这个函数，`:722`），`:1175` 再用于“Current kv cache memory in use”的提示。
-源码里没有 `applied_cudagraph_memory_estimate` 这个名字（`grep` 在 `05caae03` 的整个 `vllm/` 下无匹配）；“applied”只是文中“实际扣除的估算”的说法，生效与否取决于 `:758-760` 的条件。
-`M_util`、`M_external` 保持代码样式，因为它们是代码里的中间量，不是全书符号。算例的数字可用
-`python3 -c` 复算（命令与输出写在本批 PR 正文里）。
+是否扣除该估算取决于 `:756-760` 的平台与环境变量条件。算例只涉及加减，把上表数字代入式子即可复算。
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`（整段 L747–L760，其中是否估算的判断在 L755–L760 @ `05caae03`）
 
@@ -1168,7 +1166,7 @@ $\tau$ 从 1 降到 0.5，最大项的概率从 0.665 升到 0.867，前两名�
 而是随后的 `gumbel_sample` 给每个 logit 加 Gumbel 噪声再取 argmax，这等价于从上面的 softmax 分布里抽样（Gumbel-max 技巧，`gumbel_noised_argmax`，`gumbel.py:172-210`）。
 $\tau=0$ 时不加噪声，直接取 argmax。temperature kernel 对 $\tau=0$ 与 $\tau=1$ 都直接返回、不改 logits（除以 1 本来就不变，`gumbel.py:34`）。
 
-**核对：** 上表用 `python3` 复算（命令与输出写在本批 PR 正文里）；源码位置如上。
+**核对：** 把 $z=(2,1,0)$ 与 $\tau$ 代入上式逐项复算即可；源码位置如上。
 
 Top-k 按分数边界筛选，边界并列处理依实现；top-p 按累计概率阈值筛选。即使 temperature 为零，
 grammar、allowed tokens、bad words、bias 和 penalties 也可能先改变 argmax。
@@ -1442,9 +1440,9 @@ $\mathcal H(x)$ 无量纲，单位与 $\log$ 的底一致（实现用自然对�
   取前 3 个得 $p\approx(0.644,\ 0.237,\ 0.087)$，$\mathcal H\approx0.644\times0.440+0.237\times1.440+0.087\times2.440\approx0.837$；
   完整的 4 项熵是 0.948，差的 0.110 就是没有计入的第 4 项。
 
-**核对：** 与 `fly.py:12-38` 逐行一致；上面三个数字用 `python3` 复算（命令与输出写在本批 PR 正文里）。
+**核对：** 与 `fly.py:12-38` 逐行一致；三个数字可把 $p_i$ 与 $\mathrm{LSE}$ 代入式子复算（例 3：$\mathrm{LSE}=\ln(e^3+e^2+e^1+e^0)\approx3.440$）。
 
-若当前步按 native 规则本该拒绝，且 $\mathcal H$ 不低于 `fly_entropy_threshold`（默认 0.3），并且后面还留得下一个完整窗口，内核就记下 `pending_rejection`、**推迟**这次截断（`_rejection_kernel` 中 `FLY_WINDOW_SIZE>0` 分支，约 `:726-744`）。窗口内后续每一步都必须被 native 接受；走到 `i - pending_rejection == FLY_WINDOW_SIZE` 时，把这一段（含当初被推迟的那一步）算成接受。中途有一步不被 native 接受，验证就此停下，推迟作废。官方文档写明：这是**有意有损**的策略，**不保持** target 分布，可能改变输出。换来的是在 draft 大体正确、只在 top-$k$ 内几个候选都占了可观概率因而差点被掐断的位置，少做一次昂贵的重启。
+若当前步按 native 规则本该拒绝，且 $\mathcal H$ 不低于 `fly_entropy_threshold`（默认 0.3），并且后面还留得下一个完整窗口，内核就记下 `pending_rejection`、**推迟**这次截断（`_rejection_kernel` 中 `FLY_WINDOW_SIZE>0` 分支，约 `:726-744`）。推迟还要求 `can_defer` 成立：draft 必须是有效 token（`is_valid_draft`，token id $\ge 0$，不是 $-1$ 占位），且相关 logit / logprob 有限（greedy 路径要求 target logit 不是 $-\infty$，`rejection_sampler_utils.py:636-644`；非 greedy 路径要求 target 与 draft 的 logprob 都不是 $-\infty$，`:717-723`）。窗口内后续每一步都必须被 native 接受；走到 `i - pending_rejection == FLY_WINDOW_SIZE` 时，把这一段（含当初被推迟的那一步）算成接受。中途有一步不被 native 接受，验证就此停下，推迟作废。官方文档写明：这是**有意有损**的策略，**不保持** target 分布，可能改变输出。换来的是在 draft 大体正确、只在 top-$k$ 内几个候选都占了可观概率因而差点被掐断的位置，少做一次昂贵的重启。
 
 **窗口怎么数（算例，教学数字）：** 设 `fly_window_size=2`，这一轮验证 4 个 draft token，位置编号 0–3，`accepted_length` 初值为 0。
 
@@ -1454,7 +1452,7 @@ $\mathcal H(x)$ 无量纲，单位与 $\log$ 的底一致（实现用自然对�
 - 位置 3 被 native 接受：`3 - 1 == 2`，窗口走完，`accepted_length = 3 + 1 = 4`，被推迟的位置 1 也算接受。
 
 对照：不开 FLy 时在位置 1 就截断，`accepted_length=1`；若位置 3 没有被 native 接受，推迟作废，仍是 1；若位置 1 的熵只有 0.1，低于阈值，同样在位置 1 截断；
-若本该拒绝的是位置 2，则 `2 + 2 < 4` 不成立，后面放不下一个完整窗口，在位置 2 截断（`accepted_length=2`）。对应 `rejection_sampler_utils.py:730`（`i - pending_rejection == FLY_WINDOW_SIZE`）、`:740`（`i + FLY_WINDOW_SIZE < num_draft_tokens`）和 `:744`（`pending_rejection = i`）；上面四种结局用 Python 复刻这段分支逻辑复算过。
+若本该拒绝的是位置 2，则 `2 + 2 < 4` 不成立，后面放不下一个完整窗口，在位置 2 截断（`accepted_length=2`）。对应 `rejection_sampler_utils.py:730`（`i - pending_rejection == FLY_WINDOW_SIZE`）、`:740`（`i + FLY_WINDOW_SIZE < num_draft_tokens`）和 `:744`（`pending_rejection = i`）。
 
 ```mermaid
 flowchart TB
