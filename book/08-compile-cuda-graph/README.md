@@ -52,7 +52,7 @@ flowchart LR
 **核心结论：** 三者可以协同，但它们不是同一个开关，也不是严格的先后版本。定位性能
 问题时，必须先确认收益来自哪一层。
 
-本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，2026-11-10 重新钉扎到此 revision：源码引用与行号已逐条核对，Model Runner V1 删除已重新绑定；其余行为未在 05caae03 上全面重核，清单见 `meta/upgrade-main-05caae03-2026-11-10/`），沿用以下标签：
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09）。源码引用与行号已按此 revision 核对，Model Runner V1 删除已重新绑定；正文其余部分最初按 v0.33.0 `4ba787ec` 写成，其中未在 `05caae03` 上全面重核的行为，仍按当时的 v0.33.0 叙述。文中沿用以下标签：
 
 - **源码事实**：该 revision 下可直接定位的行为。
 - **设计意图**：源码注释或同 revision 设计文档给出的目标。
@@ -63,7 +63,7 @@ flowchart LR
 > 与 v0.33.0 的 merge-base 是 `fe341a53`，所以只有 `fe341a53..4ba787ec` 里真正在 v0.33.0 祖先链内的
 > 提交才写入正文，逐条用 `git merge-base --is-ancestor <commit> 4ba787ec` 核验，清单见 8.26。
 > 2026-11-10 已按这个 revision 对本章涉及的源码文件做静态复核（读代码与 diff，没有运行 GPU 或上游测试）。
-> v0.33.0 之后、已是 `05caae03` 祖先的 main 变化，以“main 上的变化（已包含在本书基线中，正文尚未展开）”注记保留，后续批次补写；不是 `05caae03` 祖先的才会标为“未发版”（目前没有这样的条目）。
+> v0.33.0 之后、已是 `05caae03` 祖先的 main 变化，以“已在本书基线中、正文尚未展开的变化”注记保留；不是 `05caae03` 祖先的才会标为“未发版”（目前没有这样的条目）。
 
 ## 阅读目标
 
@@ -579,7 +579,7 @@ flowchart TD
 
 这说明异步不是“无视依赖”。它把没有依赖的工作提前，把有依赖的工作明确延迟。
 
-> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。详见 meta/main-tracking-2026-10-30.md。
+> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-29～10-30（`36d4ef654`..`2eae56c4b`）。
 > - 同 #63219：deferred grammar 取的是逐请求保留的 draft（`begin_step` 在 `pending_structured_output_tokens` 时只收集 `scheduled_spec_decode_tokens` 的 req_id，`utils.py` L67–L74）。
 
 ## 8.4 stale output、抢占与确认边界
@@ -963,7 +963,7 @@ flowchart LR
 
 `split_graph()` 特别保留原始 node 顺序，因为带 mutation 的图若被重排，语义可能改变。
 
-> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。详见 meta/main-tracking-2026-10-30.md。
+> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-29～10-30（`36d4ef654`..`2eae56c4b`）。
 > - [d1ad431de](https://github.com/vllm-project/vllm/commit/d1ad431de60f995585e75d66bb5bea55f313ca96)（[#64279](https://github.com/vllm-project/vllm/pull/64279)）：撤销 #42129 的 `_VllmFallbackAllowList`（把所有 `vllm::*` / `vllm_aiter::*` 当作 Inductor `FALLBACK_ALLOW_LIST`）。allow-list 内 custom op 的 fallback 不带默认 layout 约束，整图编译时 `vllm::unified_kv_cache_update` 会收到 head-major key，`reshape_and_cache_flash` 只读 `key.stride(0)` 并假设 head 紧排，KV cache 被写乱。默认 mode 3 在 attention / KV-cache op 处切图，二者不在同一 Inductor graph，不受影响；`splitting_ops: []` 或 compile mode 1/2（Transformers backend）把 attention 与 KV 写入编进同一张图才会触发。v0.33.0（`4ba787ec`）的 `vllm/env_override.py` 同样仍带该 allow-list（`_VllmFallbackAllowList`）。
 
 ### 8.8.2 piecewise compilation 不是“attention 不编译”的唯一含义
@@ -1220,7 +1220,7 @@ flowchart TB
 “已编译但无 CUDA Graph（compiled but no CUDA Graph）”是合法组合；“全图 CUDA Graph 但不开启 torch.compile”也可以成立。默认
 piecewise 路径通常依赖 vLLM compile，当前还有 breakable CUDA Graph 的替代路径。
 
-> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。详见 meta/main-tracking-2026-10-30.md。
+> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-29～10-30（`36d4ef654`..`2eae56c4b`）。
 > - [d6fbd9478](https://github.com/vllm-project/vllm/commit/d6fbd947824959eabc6165751f8b9cd4aa83f546)（[#51012](https://github.com/vllm-project/vllm/pull/51012)）：CUDA 上 Qwen3.5 六个 architecture 并入 `default_breakable_cudagraph_architectures()`（`vllm/config/vllm.py` L76–L84、L140–L143）；非 CUDA 仍走旧 `torch.compile` 实现。不是删除 `torch.compile` 机制。
 
 ## 8.11 MRV1 `CudagraphDispatcher` 已删除：它的职责现在在哪里
