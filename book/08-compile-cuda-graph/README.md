@@ -1538,14 +1538,14 @@ Runner 在 dispatch 之前先给批分类，得到 $N_{\mathrm{uni}}$：
 $$
 N_{\mathrm{uni}}=
 \begin{cases}
-\max_r N_{q,r}, & \text{批可走 decode graph，且 } T=R\cdot\max_r N_{q,r}\\
-\varnothing, & \text{否则}
+\max_r N_{q,r}, & \text{if } \mathtt{decode\_graph\_eligible}\ \text{and}\ T=R\cdot\max_r N_{q,r}\\
+\varnothing, & \text{otherwise}
 \end{cases}
 $$
 
 **白话：** 所有请求这一步的 query 一样长（比如都只算 1 个 token，或都是“1 个新 token 加 2 个 draft token”共 3 个），才叫均匀 decode；只要有一个请求长度不同，或者批里混着真正的 prefill，就不是。
 
-**其中：** $N_{q,r}$ 是请求 $r$ 本步的 query token 数（token），$T=\sum_rN_{q,r}$ 是批的 token 数，$R$ 是请求数；$\varnothing$ 表示空。“可走 decode graph”是源码的 `decode_graph_eligible`：批里没有 prefill，或者每个 prefill 请求这一步只算 1 个新 token 且前面已有上下文（`one_token_ext`，这样的请求在运行时和 decode 一样）。开启自适应验证时 $T$ 由 `adaptive_verification.get_num_tokens` 给出。
+**其中：** $N_{q,r}$ 是请求 $r$ 本步的 query token 数（token），$T=\sum_rN_{q,r}$ 是批的 token 数，$R$ 是请求数；$\varnothing$ 表示空；公式里的 $\mathtt{decode\_graph\_eligible}$ 是源码的同名布尔值，意思是“可走 decode graph”：批里没有 prefill，或者每个 prefill 请求这一步只算 1 个新 token 且前面已有上下文（`one_token_ext`，这样的请求在运行时和 decode 一样）。开启自适应验证时 $T$ 由 `adaptive_verification.get_num_tokens` 给出。
 
 **怎么算出来：**
 
@@ -1607,12 +1607,12 @@ $t=20$ 查到 $N_{\mathrm{pick}}=32$，$N_{\mathrm{pad}}=32-20=12$。
 
 $$
 R_{\mathrm{key}}=\left\lceil\frac{T}{N_{\mathrm{uni}}}\right\rceil,\qquad
-\mathrm{tbl}[j]=\text{该组里 }R_{\mathrm{graph}}\ge j\text{ 的最小者}
+\mathrm{tbl}[j]=\operatorname{arg\,min}\bigl\{R_{\mathrm{graph}}\ :\ R_{\mathrm{graph}}\ge j\bigr\}
 $$
 
 **白话：** 先把批的 token 数折算回“相当于多少个请求”，再查表里“能装下这么多请求的最小 graph”。
 
-**其中：** $R_{\mathrm{key}}$ 是查表用的请求数（请求；源码变量 `n`），$N_{\mathrm{uni}}$ 是 8.14.3 开头得到的每请求 token 数；$\mathrm{tbl}$ 是 `_decode_descs[(uniform_token_count, LoRA 情形, num_ubatches)]` 这一组的列表，$j=0,1,2,\dots$ 是下标；“最小者”按 $R_{\mathrm{graph}}$ 比较。
+**其中：** $R_{\mathrm{key}}$ 是查表用的请求数（请求；源码变量 `n`），$N_{\mathrm{uni}}$ 是 8.14.3 开头得到的每请求 token 数；$\mathrm{tbl}$ 是 `_decode_descs[(uniform_token_count, LoRA 情形, num_ubatches)]` 这一组的列表，$j=0,1,2,\dots$ 是下标；$\operatorname{arg\,min}$ 取的是使 $R_{\mathrm{graph}}$ 最小且仍不小于 $j$ 的那个 descriptor（按 $R_{\mathrm{graph}}$ 比较）。
 
 **怎么算出来：**
 
