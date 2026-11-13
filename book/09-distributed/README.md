@@ -2558,9 +2558,9 @@ communication contract 重新建立理解。
 17. `vllm/distributed/elastic_ep/elastic_state.py`、`elastic_execute.py`、`external_elastic_ep.py`：扩缩容状态机、Worker 执行与外部 LB 协调。
 18. `vllm/v1/engine/async_llm.py`、`vllm/v1/engine/core.py`：`scale_elastic_ep`、`reinitialize_distributed`、`commit_prepared_elastic_ep`。
 
-本章源码基线为 vLLM main commit `05caae03c20f69436ff7ec23ded339ea104f1a01`（前一发布基线 v0.33.0 为
-`4ba787ec9959e566d3b587a796dff07673324da5`）。正文已按该基线核对源码引用与行号，并反映 Model Runner V1 删除；
-除此之外，未在该基线上将其余运行时行为逐一重新核实。
+本章源码基线为 vLLM main commit `05caae03c20f69436ff7ec23ded339ea104f1a01`（2026-11-10 重新钉扎；前一基线 v0.33.0 为
+`4ba787ec9959e566d3b587a796dff07673324da5`）。这次重新钉扎核对了源码引用与行号，并重新绑定了 Model Runner V1 删除带来的变化；
+其余行为没有在 `05caae03` 上逐一重新核实。
 v0.32.0（`5df63a7203cdb9328d824a27b682e77c7b9928be`）到 v0.33.0 的变化在各节以“v0.33.0”标出。当前环境没有可用的 NVIDIA 多 GPU vLLM
 运行条件，因此真实 NCCL/Ray 多机实验仍标记为 `runtime_verified: false`，不能把静态源码
 核对和 CPU 教学测试表述成真实 GPU 验证。
