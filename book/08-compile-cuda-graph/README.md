@@ -63,7 +63,7 @@ flowchart LR
 > 与 v0.33.0 的 merge-base 是 `fe341a53`，所以只有 `fe341a53..4ba787ec` 里真正在 v0.33.0 祖先链内的
 > 提交才写入正文，逐条用 `git merge-base --is-ancestor <commit> 4ba787ec` 核验，清单见 8.26。
 > 2026-11-10 已按这个 revision 对本章涉及的源码文件做静态复核（读代码与 diff，没有运行 GPU 或上游测试）。
-> v0.33.0 之后、已是 `05caae03` 祖先的 main 变化，以“main 上的变化（已包含在本书基线中，正文尚未展开）”注记保留，后续批次补写；不是 `05caae03` 祖先的才会标为“未发版”（目前没有这样的条目）。
+> v0.33.0 之后、已是 `05caae03` 祖先的 main 变化，以“已在本书基线中、正文尚未展开的变化”注记保留；不是 `05caae03` 祖先的才会标为“未发版”（目前没有这样的条目）。
 
 ## 阅读目标
 
@@ -125,18 +125,37 @@ flowchart TD
 
 > **读图方法：** 这张图用于压缩“GPU utilization 低不只说明算子慢”的整体关系。先从上向下找到起点、关键转换和终点，再问每条跨层箭头是否意味着函数调用、消息传递、内存访问或状态更新。
 
-先构造完全串行、不重叠的教学模型。以下所有 `T` 都是耗时，单位统一为毫秒，
+先构造完全串行、不重叠的教学模型。以下所有 $\Delta t$ 都是耗时，单位统一为毫秒，
 下标分别代表调度、准备、主机到设备拷贝、前向、采样、设备到主机拷贝和结算：
 
 $$
 \begin{aligned}
-T_{\mathrm{step}}={}&T_{\mathrm{sched}}+T_{\mathrm{prepare}}+T_{\mathrm{H2D}}\\
-&+T_{\mathrm{forward}}+T_{\mathrm{sample}}+T_{\mathrm{D2H}}+T_{\mathrm{update}}.
+\Delta t_{\mathrm{step}}={}&\Delta t_{\mathrm{sched}}+\Delta t_{\mathrm{prepare}}+\Delta t_{\mathrm{H2D}}\\
+&+\Delta t_{\mathrm{forward}}+\Delta t_{\mathrm{sample}}+\Delta t_{\mathrm{D2H}}+\Delta t_{\mathrm{update}}.
 \end{aligned}
 $$
 
 只有阶段互不重叠时才能直接相加；实际 trace 中不能把重叠区间重复计入墙钟耗时。
 异步执行的目标不是把右侧每一项都变为零，而是在依赖允许时让它们重叠。
+
+**白话：** 完全串行时，一个 step 花的时间就是上图每个方框耗时的总和，因为每一段都要等前一段做完才开始。
+
+**其中：** $\Delta t_{\mathrm{step}}$ 是一个 step 的总耗时；右边七项依次是 scheduler 调度、准备 input 与 metadata（含上图“更新持久状态”那一框）、H2D 拷贝、model forward、logits 与采样、D2H 拷贝、scheduler 结算，单位都是 ms。
+
+**怎么算出来：** 上图的箭头把八个方框串成一条线，每一段紧接上一段开始、互不重叠，所以总耗时就是逐段相加；
+“更新持久状态”和“准备 input / metadata”都是 CPU 在 forward 之前做的准备工作，公式里合并成 $\Delta t_{\mathrm{prepare}}$。
+
+算例（教学数字，不是实测）：
+
+$$
+\Delta t_{\mathrm{step}}=0.5+1.0+0.3+6.0+0.4+0.2+0.6=9.0\ \mathrm{ms}
+$$
+
+其中 forward 占 $6.0/9.0\approx67\%$；调度、准备、结算这三段 CPU 侧工作合计 $0.5+1.0+0.6=2.1\ \mathrm{ms}$，约占 23%。
+这 2.1 ms 正是后面几节想“藏到 GPU 工作后面”的部分：如果它们能完全被其余阶段的时间盖住，墙钟耗时最多降到 $9.0-2.1=6.9\ \mathrm{ms}$——这只是上限直觉，不是预测。
+单位检查：七项都是 ms，相加仍是 ms。
+
+**核对：** 这是教学模型，没有对应的源码公式；八个方框对应的真实阶段见 8.3 节和 8.5 节。七项相加即可复算。
 
 ### 8.1.2 为什么 decode 更容易暴露 launch 开销
 
@@ -265,7 +284,16 @@ flowchart TD
 - Pipeline Parallelism 需要 `pp_size` 个并发 batch 填充 pipeline，基础值就是 `pp_size`。
 - 只要 `scheduler_config.async_scheduling` 为真，再加 1，得到 `pp_size + 1`，让 CPU 调度与 GPU 执行重叠。
 
-没有别的分支。第一代 Runner（MRV1）曾让 async 窗口在 `pp_size <= 1` 时固定为 2，并在配置层拒绝 MRV1 + async + PP>1；
+没有别的分支。算例（$\mathrm{PP}$ 记 `pipeline_parallel_size`，结果是 `max_concurrent_batches`，对应 `vllm/config/vllm.py:562-565`）：
+
+| $\mathrm{PP}$ | async scheduling | `max_concurrent_batches` |
+|---:|---|---:|
+| 1 | 关闭 | 1 |
+| 1 | 开启 | 2（一个 batch 在 GPU 上跑，下一个在 CPU 上准备，就是 8.2.4 的两级流水） |
+| 4 | 关闭 | 4 |
+| 4 | 开启 | 5 |
+
+第一代 Runner（MRV1）曾让 async 窗口在 `pp_size <= 1` 时固定为 2，并在配置层拒绝 MRV1 + async + PP>1；
 MRV1 随 #63373 删除后，这些条件、以及只在 MRV1 下才计算的 `v1_async_sched_incompat`（#62521 曾用它把“投机解码方法不被支持”和
 `disable_padded_drafter_batch=True` 两条限制挡在 MRV1 之外）都不存在了。因此这两条旧限制已无处可查，MRV2 下它们本来就不生效。
 
@@ -277,14 +305,14 @@ pooling 模型、executor 不支持、ROCm DeepEP-HT+DBO 这三种情况自动�
 
 ```mermaid
 flowchart LR
-    PP["pipeline_parallel_size = P"] --> Q["基础 queue size = P"]
+    PP["pipeline_parallel_size = PP"] --> Q["基础 queue size = PP"]
     AS{"async scheduling 开启?"}
     Q --> AS
-    AS -- 是 --> Q2["queue size = P + 1"]
-    AS -- 否 --> Q3["queue size = P"]
+    AS -- 是 --> Q2["queue size = PP + 1"]
+    AS -- 否 --> Q3["queue size = PP"]
 ```
 
-> **读图方法：** 从左向右先读 `P` 如何形成基础队列长度，再看唯一的判断“async scheduling 是否开启”：开启就多 1，关闭保持 `P`。图里没有 Runner 版本的分支，这正是 MRV1 被删除后的结果。
+> **读图方法：** 从左向右先读 PP（`pipeline_parallel_size`）如何形成基础队列长度，再看唯一的判断“async scheduling 是否开启”：开启就多 1，关闭保持 PP。图里没有 Runner 版本的分支，这正是 MRV1 被删除后的结果。
 
 **纠正：** batch queue 不等于 `AsyncScheduler`。PP 即使不启用 async scheduler，也可能因为填充
 pipeline 而拥有并发 batch 队列；`AsyncScheduler` 进一步改变 request progress 的表示，使同一请求在
@@ -292,11 +320,19 @@ pipeline 而拥有并发 batch 队列；`AsyncScheduler` 进一步改变 request
 
 ### 8.2.4 一个两级流水教学模型
 
-若 CPU prepare 为 2 ms，GPU execute 为 5 ms，4 个同步 step 需要：
+设每个 step 的 CPU prepare 为 $\Delta t_{\mathrm{prepare}}=2\ \mathrm{ms}$，GPU execute 为 $\Delta t_{\mathrm{forward}}=5\ \mathrm{ms}$
+（这个两级模型把 GPU 上要做的事统称为 $\Delta t_{\mathrm{forward}}$），共 $n_{\mathrm{step}}=4$ 个同步 step，需要：
 
 $$
-4\times(2+5)=28\text{ ms}
+n_{\mathrm{step}}\,(\Delta t_{\mathrm{prepare}}+\Delta t_{\mathrm{forward}})=4\times(2+5)=28\ \mathrm{ms}
 $$
+
+**白话：** 同步执行时每一步都是“先准备、再等 GPU 跑完”，4 步就是把“准备 + 执行”重复 4 次。
+
+**其中：** $n_{\mathrm{step}}$ 是这个例子里连续跑的 step 数（4）；$\Delta t_{\mathrm{prepare}}$、$\Delta t_{\mathrm{forward}}$ 的单位是 ms。
+
+**怎么算出来：** 一步是 $2+5=7\ \mathrm{ms}$；每一步开始准备之前都要等上一步的 GPU 完成，所以 4 步首尾相接，$4\times7=28\ \mathrm{ms}$。
+单位检查：ms 乘以无量纲的步数，仍是 ms。结果与下面第一张时序图一致：S3 的 run 结束在 28 ms。
 
 若 CPU 能准备下一步并与上一轮 GPU 重叠，则教学模型得到 22 ms：
 
@@ -345,6 +381,24 @@ sequenceDiagram
 
 > **读图方法：** 这是“一个两级流水教学模型”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
+重叠之后的耗时也可以一步步推出来：
+
+$$
+\Delta t_{\mathrm{prepare}}+(n_{\mathrm{step}}-1)\max(\Delta t_{\mathrm{prepare}},\Delta t_{\mathrm{forward}})+\Delta t_{\mathrm{forward}}=2+3\times5+5=22\ \mathrm{ms}
+$$
+
+**白话：** 第 0 步的准备躲不掉；之后每多一步，墙钟只多“两个阶段里较慢的那个”；最后一步的 GPU 要完整跑完。
+
+**怎么算出来：** 第 0 步开始时 GPU 无事可做，所以先付出一次 $\Delta t_{\mathrm{prepare}}=2\ \mathrm{ms}$（时序图里 S0 prepare 占 0–2 ms）。
+此后 CPU 和 GPU 同时干活：GPU 做某一步的时候 CPU 在准备下一步，下一步何时能开始取决于较慢的一方。这里 GPU（5 ms）比 CPU（2 ms）慢，
+CPU 总能在 GPU 跑完之前准备好，GPU 一直满载，每多一步多 5 ms；最后一步 GPU 完整跑 5 ms。所以 $2+3\times5+5=22\ \mathrm{ms}$。
+GPU 更慢时可化简成 $\Delta t_{\mathrm{prepare}}+n_{\mathrm{step}}\Delta t_{\mathrm{forward}}=2+4\times5=22\ \mathrm{ms}$（S0 的 2 ms 加上 S0–S3 四段 GPU 执行，对应时序图里 GPU 从 2 ms 一直跑到 22 ms）。
+反过来，若 CPU 更慢（例如 prepare 5 ms、execute 2 ms），瓶颈换成 CPU，结果是 $n_{\mathrm{step}}\Delta t_{\mathrm{prepare}}+\Delta t_{\mathrm{forward}}=4\times5+2=22\ \mathrm{ms}$，数字相同但原因不同。
+对比同步的 28 ms，这个例子省下 6 ms，也就是 $3\times\Delta t_{\mathrm{prepare}}$：S1、S2、S3 三次准备都被 GPU 执行盖住了（只有 S0 的准备躲不掉）。
+单位检查：各项都是 ms，乘整数、取 $\max$ 都不改单位，结果仍是 ms。
+
+**核对：** 把 $n_{\mathrm{step}}=4$、$\Delta t_{\mathrm{prepare}}=2$、$\Delta t_{\mathrm{forward}}=5$ 代入通式得 $2+3\times5+5=22$，与同步式 $4\times(2+5)=28$ 对照。把 $n_{\mathrm{step}}=1$ 代入通式得 $\Delta t_{\mathrm{prepare}}+\Delta t_{\mathrm{forward}}$，与同步式一致：单步没有流水收益。
+
 这只是说明重叠的上限直觉。真实 vLLM 还有 scheduler state、H2D/D2H stream、PP、DP 同步和 sampling
 依赖，不能直接用该公式预测生产收益。
 
@@ -385,17 +439,56 @@ $$
 N_{\mathrm{cacheable}}=N_{\mathrm{computed}}-N_{\mathrm{in\ flight}}
 $$
 
-符号说明（单位都是 token）：
+**白话：** 第一个差值回答“输出序列里哪些位置已经确定”，可恢复的流式请求停止后就以它作为继续的安全起点
+（`Scheduler._handle_stopped_request` 中的 `safe_frontier`）；第二个差值回答“按 computed − in-flight 算，哪些 token 的 KV 已经不会再被在途
+step 改写”，源码在 `update_from_output` 里用它作为 `cache_blocks` 的边界（见 8.4.3）。它不是“此刻能否登记 prefix cache”的全部答案：prompt 的 block 另在 `allocate_slots` 调度时就会登记，见下。decode step 里两者通常相等，prefill chunk 只计入 in-flight，所以
+这条边界更保守。v0.32.0 的 `cache_blocks` 用的是第一个差值，v0.33.0 起改用第二个（`2fb320d83`，#61589，见 8.4.3）。
+
+**其中：** 单位都是 token。
 
 - $N_{\mathrm{computed}}$：`request.num_computed_tokens`，scheduler 已经乐观推进的位置，不是 GPU 已算完的位置；
 - $N_{\mathrm{placeholders}}$：`request.num_output_placeholders`，已排进在途 step、但输出位置还没确认的 token 数；
 - $N_{\mathrm{in\ flight}}$：`request.num_in_flight_tokens`，已经调度、但对应 step 的输出还没回到 scheduler 的全部 token，
   既含输出位置，也含 prefill chunk。
 
-白话解释：第一个差值回答“输出序列里哪些位置已经确定”，可恢复的流式请求停止后就以它作为继续的安全起点
-（`Scheduler._handle_stopped_request` 中的 `safe_frontier`）；第二个差值回答“哪些 token 的 KV 已经不会再被在途
-step 改写，因此可以登记进 prefix cache”。decode step 里两者通常相等，prefill chunk 只计入 in-flight，所以
-缓存边界更保守。v0.32.0 的 `cache_blocks` 用的是第一个差值，v0.33.0 起改用第二个（`2fb320d83`，#61589，见 8.4.3）。
+**怎么算出来：** $N_{\mathrm{computed}}$ 在**调度时**就被加上去：`Scheduler._update_after_schedule` 对每个被调度的请求同时做
+`num_computed_tokens += num_scheduled_token` 和 `num_in_flight_tokens += num_scheduled_token`（`vllm/v1/core/sched/scheduler.py:1834-1835`，$N_{\mathrm{new}}$ 是本步给它调度的 token 数，源码循环变量是 `num_scheduled_token`）；
+`AsyncScheduler._update_after_schedule` 再给**非 prefill chunk** 的请求加 placeholder（`async_scheduler.py:31-47`）。所以两条边界的算法都是
+“先乐观加上去，再把还没落地的部分减掉”：
+
+1. $N_{\mathrm{confirmed}}$：乐观位置减去还没确认的输出位置数；
+2. $N_{\mathrm{cacheable}}$：乐观位置减去所有在途 token（输出位置加 prefill chunk）。
+
+算例（教学数字）：
+
+| 情形 | $N_{\mathrm{computed}}$ | $N_{\mathrm{placeholders}}$ | $N_{\mathrm{in\ flight}}$ | $N_{\mathrm{confirmed}}$ | $N_{\mathrm{cacheable}}$ |
+|---|---:|---:|---:|---:|---:|
+| A. 稳态 decode：已确认 100 个，2 个 decode step 在途 | 102 | 2 | 2 | $102-2=100$ | $102-2=100$ |
+| B. 100-token prompt 的第一个 prefill chunk（64 token）刚调度 | 64 | 0 | 64 | $64-0=64$ | $64-64=0$ |
+
+情形 A 里每个在途 step 带来 1 个输出位置，placeholder 数与 in-flight 数相等，两条边界重合。情形 B 的 chunk 在 `AsyncScheduler._update_after_schedule` 里被跳过
+（`is_prefill_chunk` 为真，`async_scheduler.py:31-32`），不加 placeholder，但整段 64 个 token 都在途，它们的 KV 还没算完，所以按 $N_{\mathrm{computed}}-N_{\mathrm{in\ flight}}$ 代数上得 0。注意表里是“刚调度完”的两个计数的代数快照：源码求 $N_{\mathrm{cacheable}}$ 的地方（`scheduler.py:2390-2393`）在 `update_from_output` 里，`:2286` 已先减去刚返回那一步的 `num_in_flight_tokens`，并且只在 8.4.3 的条件成立时才调用；prompt 的 block 另在 `allocate_slots` 调度时就按 `min(total_computed_tokens + num_new_tokens, request.num_tokens)` 登记（`kv_cache_manager.py:640-646`），不受这条边界限制。
+B 行的 $N_{\mathrm{confirmed}}=64$ 只是代数结果：prefill 中途没有输出位置，源码用 `num_computed_tokens - num_output_placeholders` 的地方包括请求停止后的 `_handle_stopped_request`（`scheduler.py:2781`）和 ec_connector 的缓存可用性检查（`:794`）。
+
+```mermaid
+flowchart TB
+    subgraph DEC["情形 A：稳态 decode，N_computed = 102"]
+        direction LR
+        A1["位置 0 到 99\n已确认，KV 已落地\n按 computed − in-flight 算的边界：100"] --> A2["位置 100 到 101\n2 个在途 token\n= 2 个 placeholder"]
+    end
+    subgraph PRE["情形 B：prompt 100 token，第一个 chunk，N_computed = 64"]
+        direction LR
+        B0["按 computed − in-flight 算的边界：0"] --> B1["位置 0 到 63\n64 个在途 token\n没有 placeholder"] --> B2["位置 64 到 99\n尚未调度"]
+    end
+    DEC ~~~ PRE
+```
+
+> **读图方法：** 上下两个子图是上表的两行，每个方框是一段 token 位置区间。情形 A：在途 token 恰好是输出位置，所以“已确认”与按 computed − in-flight 算的边界重合在位置 100；情形 B：整段 chunk 都在途，该边界为 0。
+> 阅读时只需比较两个子图里该边界落在何处。图中数字与表格一致，边界来自 `num_computed_tokens - num_in_flight_tokens`（`scheduler.py:2392`）。
+
+**核对：** `examples/ch08_async_compile_graph.py::AsyncRequestState.confirmed_tokens` 就是 $N_{\mathrm{confirmed}}$ 的教学实现，
+`tests/test_ch08_async_compile_graph.py::PlaceholderTest` 覆盖 $N_{\mathrm{computed}}$ 与 placeholder 同步增加、$N_{\mathrm{confirmed}}$ 不变；
+$N_{\mathrm{cacheable}}$ 在源码里是 `cache_blocks(request, request.num_computed_tokens - request.num_in_flight_tokens)`（`scheduler.py:2390-2393`）。
 
 这些差值是源码用于限制缓存/释放的边界，不能当作 GPU 完成事件。例如最后一段 prefill 刚提交时，computed 已增加，
 GPU 可能还没算完；第 05 章的本地 hash 登记也可能先于 forward。需释放在途 block 时，还要看适用的 step fence，
@@ -403,11 +496,24 @@ GPU 可能还没算完；第 05 章的本地 hash 登记也可能先于 forward�
 
 ### 8.3.2 schedule 后 placeholder 如何增加
 
-对于非 prefill chunk，请求本轮预计产生：
+对于非 prefill chunk，请求本轮调度之后的 placeholder 数是：
 
 $$
-N_{\mathrm{new\ placeholders}}=N_{\mathrm{sampled\ per\ step}}+N_{\mathrm{scheduled\ spec}}
+N_{\mathrm{placeholders}}'=N_{\mathrm{placeholders}}+N_{\mathrm{sampled}}+N_{\mathrm{spec}}
 $$
+
+**白话：** 一步 decode 会多出一个正常采样的输出位置，外加每个 draft token 一个位置；这些位置的值都要等 worker 返回才知道，所以每个位置先占一个 placeholder。
+
+**其中：** 单位都是 token。$N_{\mathrm{placeholders}}$、$N_{\mathrm{placeholders}}'$ 是调度前、后的 `num_output_placeholders`（撇号表示更新后的值）；
+$N_{\mathrm{sampled}}$ 是每步正常采样产生的 token 数，即 `num_sampled_tokens_per_step`（自回归为 1，没有 AR bonus token 的 diffusion 路径为 0）；
+$N_{\mathrm{spec}}$ 是这一步随该请求一起调度的 speculative token 数，即 `len(spec_decode_tokens.get(req_id, ()))`。
+
+**怎么算出来：** 源码就是一次加法：`request.num_output_placeholders += self.num_sampled_tokens_per_step + cur_num_spec_tokens`（`async_scheduler.py:45-47`）。
+算例（与 `PlaceholderTest` 同一组数）：调度前 $N_{\mathrm{computed}}=10$、$N_{\mathrm{placeholders}}=0$，本步 $N_{\mathrm{sampled}}=1$、$N_{\mathrm{spec}}=3$：
+$N_{\mathrm{placeholders}}'=0+1+3=4$；同时 $N_{\mathrm{computed}}$ 也被加上本步调度的 $1+3=4$ 个 token，变成 14，所以
+$N_{\mathrm{confirmed}}=14-4=10$ 不变——乐观位置前移了，已确认位置没动。这正是下面 8.3.3 的图里 `num_output_placeholders = 4` 的来历。
+
+**核对：** `examples/ch08_async_compile_graph.py::AsyncRequestState.schedule_decode` 与测试 `test_schedule_moves_optimistic_not_confirmed_boundary`（14、4、10）一致。
 
 随后：
 
@@ -473,7 +579,7 @@ flowchart TD
 
 这说明异步不是“无视依赖”。它把没有依赖的工作提前，把有依赖的工作明确延迟。
 
-> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。详见 meta/main-tracking-2026-10-30.md。
+> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-29～10-30（`36d4ef654`..`2eae56c4b`）。
 > - 同 #63219：deferred grammar 取的是逐请求保留的 draft（`begin_step` 在 `pending_structured_output_tokens` 时只收集 `scheduled_spec_decode_tokens` 的 req_id，`utils.py` L67–L74）。
 
 ## 8.4 stale output、抢占与确认边界
@@ -857,7 +963,7 @@ flowchart LR
 
 `split_graph()` 特别保留原始 node 顺序，因为带 mutation 的图若被重排，语义可能改变。
 
-> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。详见 meta/main-tracking-2026-10-30.md。
+> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-29～10-30（`36d4ef654`..`2eae56c4b`）。
 > - [d1ad431de](https://github.com/vllm-project/vllm/commit/d1ad431de60f995585e75d66bb5bea55f313ca96)（[#64279](https://github.com/vllm-project/vllm/pull/64279)）：撤销 #42129 的 `_VllmFallbackAllowList`（把所有 `vllm::*` / `vllm_aiter::*` 当作 Inductor `FALLBACK_ALLOW_LIST`）。allow-list 内 custom op 的 fallback 不带默认 layout 约束，整图编译时 `vllm::unified_kv_cache_update` 会收到 head-major key，`reshape_and_cache_flash` 只读 `key.stride(0)` 并假设 head 紧排，KV cache 被写乱。默认 mode 3 在 attention / KV-cache op 处切图，二者不在同一 Inductor graph，不受影响；`splitting_ops: []` 或 compile mode 1/2（Transformers backend）把 attention 与 KV 写入编进同一张图才会触发。v0.33.0（`4ba787ec`）的 `vllm/env_override.py` 同样仍带该 allow-list（`_VllmFallbackAllowList`）。
 
 ### 8.8.2 piecewise compilation 不是“attention 不编译”的唯一含义
@@ -1114,7 +1220,7 @@ flowchart TB
 “已编译但无 CUDA Graph（compiled but no CUDA Graph）”是合法组合；“全图 CUDA Graph 但不开启 torch.compile”也可以成立。默认
 piecewise 路径通常依赖 vLLM compile，当前还有 breakable CUDA Graph 的替代路径。
 
-> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。详见 meta/main-tracking-2026-10-30.md。
+> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-29～10-30（`36d4ef654`..`2eae56c4b`）。
 > - [d6fbd9478](https://github.com/vllm-project/vllm/commit/d6fbd947824959eabc6165751f8b9cd4aa83f546)（[#51012](https://github.com/vllm-project/vllm/pull/51012)）：CUDA 上 Qwen3.5 六个 architecture 并入 `default_breakable_cudagraph_architectures()`（`vllm/config/vllm.py` L76–L84、L140–L143）；非 CUDA 仍走旧 `torch.compile` 实现。不是删除 `torch.compile` 机制。
 
 ## 8.11 MRV1 `CudagraphDispatcher` 已删除：它的职责现在在哪里
@@ -1130,6 +1236,11 @@ piecewise 路径通常依赖 vLLM compile，当前还有 breakable CUDA Graph �
 | `valid_modes` / `invalid_modes` 禁用 FULL | 不再存在；是否可用由 `_is_compatible`（`:115`）按 descriptor 字段判断，见 8.14.2 |
 | FULL 要精确的 padded `num_reqs`，PIECEWISE 把它放宽为 `None` | 保留：`BatchExecutionDescriptor.num_reqs` 的注释写明 `None` 表示 PIECEWISE 不需要 request padding（`:81`）；混合 FULL graph 的 `num_reqs = min(num_tokens, max_num_reqs)`（`:372`） |
 | `get_capture_descs()` | `CudaGraphManager.capture` 读 `_capture_descs`（`:456`），见 8.13.1 |
+
+表里的 `num_reqs = min(num_tokens, max_num_reqs)` 可以这样读：捕获一个有 `num_tokens` 个 token 的 FULL graph 时，要先定下它“按多少个请求”来捕获。
+每个请求至少占 1 个 token，所以请求数不会超过 token 数；同时不能超过 runner 的上限 `max_num_reqs`（来自 `scheduler_config.max_num_seqs`，`cudagraph_utils.py:180`），取两者较小值
+（`:372`；`:315` 对 varlen decode graph 的注释给的是同一个上界：最坏情况每请求 1 个 token，或 `max_num_reqs`）。例如 `max_num_reqs=256`：捕获 8 个 token 的 graph 得 `num_reqs=8`，捕获 512 个 token 的得 256。
+PIECEWISE 回放时请求数没有限制，不需要 request padding，所以 `num_reqs=None`（`:370`）。更完整的 descriptor 构造见 8.14。
 
 [源码] `vllm/v1/worker/gpu/cudagraph_utils.py` - `CudaGraphManager._init_candidates`、`CudaGraphManager.dispatch`
 
@@ -1680,19 +1791,36 @@ profiling 使用 throwaway pool 并恢复原 global pool 与 wrapper pool，不�
 > **本节先看：** 下面用公式表达关系。先确认每个量的含义和单位，再沿等号或运算符检查推导。
 
 $$
-M_{\mathrm{available\ KV}}\approx M_{\mathrm{requested}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph\ reserve}}
+M_{\mathrm{KV}}=M_{\mathrm{req}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph}}
 $$
 
-各项单位均为 byte；先按 `ceil(total_memory * gpu_memory_utilization)` 得到利用率预算。
-若 loader 报告外部进程持有权重，则 `requested` 还要扣除该外部权重，余量必须为正且不超过 free memory；
-普通进程内加载没有这项扣除。`nonKV` 是
-profile 得到的非 KV 占用，`graph reserve` 是实际应用的 graph 估算。该式描述自动预算路径，
+**白话：** 这与第 07 章 7.9 是同一个式子：KV Cache 拿到的是“预算扣掉非 KV、再扣掉 graph 估算”之后剩下的，graph 多占一份，KV 就少一份，这就是“竞争关系”。
+这个式子写 $=$：源码里它是一次整数减法（`vllm/v1/worker/gpu_worker.py:789-793`），三项相减精确相等；
+真正“近似”的是 $M_{\mathrm{graph}}$ 本身——它是一次临时捕获得到的估算，不等于运行时 graph 实际占用的每个 byte。
+
+**其中：** 各项单位均为 byte。$M_{\mathrm{KV}}$ 是可分给 KV Cache 的显存，$M_{\mathrm{req}}$ 是请求的显存预算（`requested_memory`），$M_{\mathrm{nonKV}}$ 是 profile 得到的非 KV 占用，
+$M_{\mathrm{graph}}$ 是实际应用的 graph 估算（源码变量 `cudagraph_memory_estimate`，`gpu_worker.py:755-760`、`:792`；$M_{\mathrm{KV}}$ 对应 `available_kv_cache_memory_bytes`，`:789-793`）。先按 `ceil(total_memory * gpu_memory_utilization)` 得到利用率预算。
+若 loader 报告外部进程持有权重，则 $M_{\mathrm{req}}$ 还要扣除该外部权重，余量必须为正；free memory 是否足以满足该余量的检查在开启 `enable_extensible_kv_cache` 时会跳过（`utils.py:819-822`）；
+普通进程内加载没有这项扣除。该式描述自动预算路径，
 不覆盖显式 `kv_cache_memory_bytes` 的手动容量分支。固定 revision 默认启用
 `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1`；禁用该项只改变估算是否扣除，不代表 graph
 运行时不占显存。Worker 侧的估算资格只检查平台是 CUDA-like 或 XPU，并且该环境变量为真（`gpu_worker.py:756-760`）；
 是否真有 graph 要捕获由 Runner 自己判断：`profile_cudagraph_memory`（`vllm/v1/worker/gpu/cudagraph_utils.py:994`）只在
 `cudagraph_mode == NONE` 且 `needs_cudagraph_capture()` 也为假时返回 0，所以只剩 encoder graph（`cudagraph_mm_encoder` 且没有 `enforce_eager`）
 的配置也会预留显存（`7128f568a`，#58243；#63778 `dc4d977d97` 把原先 Worker 里的 `cudagraph_mode != NONE` 前提去掉，`use_v2_model_runner` 条件随 MRV1 删除一并消失）。
+
+**怎么算出来：** 算法与 7.9 完全相同（从 $M_{\mathrm{req}}$ 起逐项扣减），这里只看 graph 一项的影响。沿用 7.9 的教学数字：$M_{\mathrm{req}}=72\ \mathrm{GiB}$、$M_{\mathrm{nonKV}}=20\ \mathrm{GiB}$：
+
+| $M_{\mathrm{graph}}$ | $M_{\mathrm{KV}}$ | 按 $M_{\mathrm{tok}}=128\ \mathrm{KiB/token}$ 折算 |
+|---:|---:|---:|
+| 1.5 GiB | $72-20-1.5=50.5$ GiB | $50.5\ \mathrm{GiB}\div128\ \mathrm{KiB/token}=413696$ token |
+| 3.0 GiB | $72-20-3.0=49.0$ GiB | $49.0\ \mathrm{GiB}\div128\ \mathrm{KiB/token}=401408$ token |
+
+$M_{\mathrm{graph}}$ 每多 1.5 GiB，$M_{\mathrm{KV}}$ 就少 1.5 GiB，折合 $1.5\ \mathrm{GiB}\div128\ \mathrm{KiB/token}=12288$ token（$413696-401408=12288$）。
+$M_{\mathrm{tok}}$ 是每 token 的 KV 字节数：$2\times32\times8\times128\times2=131072\ \mathrm{byte}=128\ \mathrm{KiB}$（32 层、8 个 KV head、head 维 128、bf16 每元素 2 byte，与 ch01 的 GQA 算例同一组数）；这里的折算忽略 block 取整，只演示量级。
+单位检查：GiB 除以 KiB/token 得 token（$1\ \mathrm{GiB}=2^{20}\ \mathrm{KiB}$）。
+
+**核对：** 与 7.9 的算例、`gpu_worker.py:789-793` 一致；上表数字把 $M_{\mathrm{graph}}$ 代入式子、再除以 $M_{\mathrm{tok}}$ 即可复算。
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`
 

@@ -56,7 +56,7 @@ flowchart TD
 > 与 v0.33.0 的 merge-base 是 `fe341a53`，所以只有 `fe341a53..4ba787ec` 里真正在 v0.33.0 祖先链内的
 > 提交才写入正文，逐条用 `git merge-base --is-ancestor <commit> 4ba787ec` 核验，清单见 7.32。
 > 2026-11-10 已按这个 revision 对本章涉及的源码文件做静态复核（读代码与 diff，没有运行 GPU 或上游测试）。
-> v0.33.0 之后、已是 `05caae03` 祖先的 main 变化，以“main 上的变化（已包含在本书基线中，正文尚未展开）”注记保留，后续批次补写；不是 `05caae03` 祖先的才会标为“未发版”（目前没有这样的条目）。
+> v0.33.0 之后、已是 `05caae03` 祖先的 main 变化，以“已在本书基线中、正文尚未展开的变化”注记保留；不是 `05caae03` 祖先的才会标为“未发版”（目前没有这样的条目）。
 
 ## 阅读目标
 
@@ -268,6 +268,19 @@ sequenceDiagram
 全部 Worker。配置解析会把 `VLLM_ENABLE_V1_MULTIPROCESSING` 设为 `0`，Executor 初始化时也会
 再次断言 multiprocessing 已关闭；这不是可选调优，而是该执行方式保持各 Engine 调度一致的
 运行条件。源码测试通过 `torchrun` 检查各 rank 的 KV 配置与生成结果一致。
+
+```mermaid
+flowchart TB
+    L["外部启动器（torchrun 等）\n设置 RANK / LOCAL_RANK / MASTER_ADDR / MASTER_PORT"] --> P0["进程 rank 0\nEngine + ExecutorWithExternalLauncher + 1 个 Worker"]
+    L --> P1["进程 rank 1\nEngine + ExecutorWithExternalLauncher + 1 个 Worker"]
+    P0 -. "Engine 之间不同步调度状态\n靠确定性调度得到相同输出" .- P1
+    P0 --- G["torch.distributed（env://）\nTP 集合通信；显存探测对各 rank 取 MIN"]
+    P1 --- G
+```
+
+> **读图方法：** 先看上半部分：外部启动器一次拉起多个进程，每个进程各有一套 Engine、Executor 和**一个** Worker，这与 `mp` 里“一个 Executor 管全部 Worker”相反。再看两进程之间的虚线和下方的节点：下方节点连出的实线是真实的 `torch.distributed` 通信（`rank`、`local_rank` 从环境变量来，初始化方式是 `env://`；`determine_available_memory` 还会对各 rank 的可用显存做一次 `MIN` all-reduce，让所有 rank 得到同一个 KV 容量）；两进程之间的虚线是一条**反面**说明：Engine 之间没有状态同步，所以才要求 multiprocessing 关闭、调度具有确定性。
+
+[源码] `vllm/v1/executor/uniproc_executor.py` - `ExecutorWithExternalLauncher._init_executor`、`_distributed_args`、`determine_available_memory`（`:161`、`:180`、`:186`、`:199-206` @ `05caae03`）
 
 [测试] `tests/distributed/test_torchrun_example.py` - external launcher offline inference
 
@@ -609,16 +622,20 @@ offload 会改变 I/O 和搬运方式；可靠结论是**最终本地参数由�
 用户未显式指定 `kv_cache_memory_bytes` 时，Worker profile 非 KV 峰值并计算：
 
 $$
-M_{\mathrm{KV}}=M_{\mathrm{requested}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph},\mathrm{applied}}
+M_{\mathrm{KV}}=M_{\mathrm{req}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph}}
 $$
 
-- 所有 `M` 的单位都是 byte（换成 GiB 时所有项一起换）；
-- 先取 `M_util = ceil(total_memory * gpu_memory_utilization)`，不是 free memory 乘利用率；
-  普通进程内加载时 `M_requested=M_util`。若 loader 报告外部进程已持有权重
-  `M_external>0`，则 `M_requested=M_util-M_external`，并检查余量为正且 free memory
-  足以满足这个余量。外部权重不能因为不归当前进程 allocator 所有就漏算；
-- `M_nonKV` 包含权重及 profile 期间非 KV 消耗；
-- `M_graph,applied` 是实际扣除的 CUDA Graph 内存估算。环境变量
+**白话：** 先按 `gpu_memory_utilization` 从整张卡里划出“vLLM 最多可以用多少”，再扣掉必须先占住的部分——权重和激活峰值、CUDA Graph——剩下的才分给 KV Cache。KV Cache 只能拿“剩下的”：非 KV 的部分越大，能缓存的 token 越少。
+
+**其中：** 所有 $M$ 的单位都是 byte（换成 GiB 时所有项一起换）；
+
+- $M_{\mathrm{KV}}$：可分给 KV Cache 的显存，源码里是 `Worker.available_kv_cache_memory_bytes`（`gpu_worker.py:789-793` 算出，`:810` 写入日志）；
+- $M_{\mathrm{req}}$：vLLM 申请的显存预算（`requested_memory`）。先取 `M_util = ceil(total_memory * gpu_memory_utilization)`，不是 free memory 乘利用率；
+  普通进程内加载时 $M_{\mathrm{req}}$ 就是 `M_util`。若 loader 报告外部进程已持有权重
+  `M_external>0`，则 $M_{\mathrm{req}}$ 是 `M_util-M_external`，并检查余量为正；free memory
+  是否足以满足该余量的检查在开启 `enable_extensible_kv_cache` 时会跳过（`utils.py:819-822`），因为此时预算只是上限，超出 free memory 只会多预留地址空间、不会立刻占满物理页。外部权重不能因为不归当前进程 allocator 所有就漏算；
+- $M_{\mathrm{nonKV}}$：profile 得到的非 KV 占用，包含权重及 profile 期间非 KV 消耗；
+- $M_{\mathrm{graph}}$：实际扣除的 CUDA Graph 内存估算，源码里是 `cudagraph_memory_estimate`（`gpu_worker.py:755` 先置 0，`:760` 在条件成立时由 `model_runner.profile_cudagraph_memory()` 赋值，`:787` 存成 `self.cudagraph_memory_estimate`，`:792` 从预算里扣掉）。环境变量
   `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` 默认值为 `1`，即默认应用估算；显式设为 `0`
   才不扣此项。在 `05caae03` 上，Worker 只按两件事决定要不要去估算：平台是 CUDA-alike（含 ROCm）或 XPU，
   且这个环境变量为真（`gpu_worker.py` L755–L760）。`cudagraph_mode` 是否为 `NONE`、`cudagraph_mm_encoder`
@@ -628,6 +645,27 @@ $$
   `runner.needs_cudagraph_capture()` 也为假时返回 0（L1010–L1014）。`needs_cudagraph_capture()` 把 encoder graph
   也算进去（`gpu/model_runner.py` L1138–L1146），所以只剩 encoder graph 要捕获时仍会得到估算
   （`7128f568a`，#58243）。不能把开关开启等同于必有非零预留。
+
+**怎么算出来：** 从整张卡一步步走到 KV 预算：
+
+1. **取利用率预算。** `M_util = ceil(total_memory * gpu_memory_utilization)`（`vllm/v1/worker/utils.py:803`）：对整张卡的总显存取比例，再向上取整到 byte；
+2. **扣外部权重，得到 $M_{\mathrm{req}}$。** 普通加载时 $M_{\mathrm{req}}$ 就是 `M_util`；外部持有权重时是 `M_util - M_external`（`utils.py:805-806`），余量不为正会直接抛 `ValueError`（`:807-816`）；
+3. **扣非 KV 与 graph 估算。** $M_{\mathrm{KV}}=M_{\mathrm{req}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph}}$，即 `available_kv_cache_memory_bytes = requested_memory - profile_result.non_kv_cache_memory - cudagraph_memory_estimate`（`gpu_worker.py:789-793`）。其中 $M_{\mathrm{nonKV}}$ 在源码里是 `total_consumed + transient_peak_headroom`：
+   前者是 profile 前后设备 free memory 的差（持久占用，如权重），后者是 torch 分配器峰值与当前已分配量之差（瞬时峰值余量），
+   两者相加避免重复计数（`vllm/utils/mem_utils.py:327-336`）。
+
+算例（教学数字，不是实测）：一张 80 GiB 的卡，`gpu_memory_utilization=0.9`，非 KV 占用 20 GiB，graph 估算 1.5 GiB。
+
+| 情形 | $M_{\mathrm{req}}$ 的算法 | $M_{\mathrm{req}}$ | $M_{\mathrm{nonKV}}$ | $M_{\mathrm{graph}}$ | $M_{\mathrm{KV}}$ |
+|---|---|---:|---:|---:|---:|
+| (a) 普通进程内加载 | $80\times0.9=72$（源码对 byte 数取 ceil） | 72 GiB | 20 GiB | 1.5 GiB | $72-20-1.5=50.5$ GiB |
+| (b) 外部持有 8 GiB 权重（其余项取与 (a) 相同的数，只演示 $M_{\mathrm{req}}$ 的变化） | $72-8=64$ | 64 GiB | 20 GiB | 1.5 GiB | $64-20-1.5=42.5$ GiB |
+
+单位检查：四项都是 GiB（1 GiB = $2^{30}$ byte），加减不改单位，结果仍是 GiB；(b) 比 (a) 少的 8 GiB 恰好是外部权重，说明漏算它就会把别人占着的显存当成自己的 KV 空间。
+
+**核对：** 三处源码位置如上。`cudagraph_memory_estimate` 在 `gpu_worker.py` 的 `:755`、`:760`、`:785`（加进 `peak_activation_memory`）、`:787`、`:792`、`:813-816`（日志里换算成等价的 `gpu_memory_utilization`）、`:1110-1119`（捕获完成后与实际 graph 池大小比较并打日志）使用；
+`available_kv_cache_memory_bytes` 在 `:789` 赋值，`:810` 打日志，`:851` 作为 `reserve_mm_ipc_gpu_memory(...)` 的参数——`determine_available_memory` 最终返回的是它扣掉多模态 IPC 预留之后的值（`:850-854`；显式 `kv_cache_memory_bytes` 的分支同样经过这个函数，`:722`），`:1175` 再用于“Current kv cache memory in use”的提示。
+是否扣除该估算取决于 `:756-760` 的平台与环境变量条件。算例只涉及加减，把上表数字代入式子即可复算。
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`（整段 L747–L760，其中是否估算的判断在 L755–L760 @ `05caae03`）
 
@@ -652,7 +690,7 @@ flowchart TB
     REQ --> CHECK
     REQ --> W["weights and persistent state"]
     REQ --> A["activation/transient peak"]
-    REQ --> G["applied graph estimate"]
+    REQ --> G["graph memory estimate"]
     REQ --> K["remaining KV budget"]
 ```
 
@@ -715,8 +753,8 @@ Executor 取回各 Worker 对齐后的 CPU offload block 数（`get_simple_cpu_o
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.compile_or_warm_up_model`
 
-> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。（#62330 这些已在 v0.33.0 中并入上文）详见 meta/main-tracking-2026-10-27.md、meta/main-tracking-2026-10-28.md。
-> - main 2026-10-27～10-28：[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：Worker/EngineCore 子进程可通过 `numa_utils.configure_subprocess` 做 best-effort NUMA 绑定（默认 `numa_bind=None`）。详见 meta/main-tracking-2026-10-28.md。
+> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。（#62330 这些已在 v0.33.0 中并入上文）区间为 vLLM main 2026-10-25～10-28（`a7407ab44`..`0106c8abc`）。
+> - main 2026-10-27～10-28：[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：Worker/EngineCore 子进程可通过 `numa_utils.configure_subprocess` 做 best-effort NUMA 绑定（默认 `numa_bind=None`）。
 
 ## 7.11 SchedulerOutput 到长期请求状态
 
@@ -812,12 +850,12 @@ UVA（统一虚拟寻址）帮助设备访问映射后的地址，不表示主�
 **写入 kernel 的并行方式（v0.33.0）。** `fc2b6ab45`（#62698）把 staged write 的 Triton kernel 改成二维 grid：
 第一维是本次 staged 的写入条数（每条写入是“某一行里从某个起点开始的一段内容”），第二维是
 `ceil(最长一段 / 1024)` 个 chunk；每个 program（Triton 里 grid 上的一个并行实例，大致相当于 CUDA 的一个 thread block）只写一条写入里的一个 1024 元素 chunk，
-不再在单个 program 里循环写完这一整段。单 group 的 `StagedWriteTensor`（`buffer_utils.py` L169）与多 group 的
+不再在单个 program 里循环写完这一整段。例如最长一段有 2500 个元素，chunk 数是 $\lceil2500/1024\rceil=3$：前两个 chunk 各写 1024 个元素，第三个只写 $2500-2\times1024=452$ 个，越过这一条长度的位置被 mask 掉。单 group 的 `StagedWriteTensor`（`buffer_utils.py` L169）与多 group 的
 `FusedStagedWriter`（L301 @ `05caae03`）两条路径都是这样。这只改变 GPU 上的并行切分，不改变上面的
 数据搬运边界：写入内容仍走 H2D，索引/起点/长度仍走 UVA 缓冲。较长的一段写入（例如 block table 一行里的一大段 block ID）
 因此不再被一个 program 串行写完。
 
-> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。（#62698 这些已在 v0.33.0 中并入下文）详见 meta/main-tracking-2026-10-27.md。
+> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。（#62698 这些已在 v0.33.0 中并入下文）区间为 vLLM main 2026-10-25～10-27（`a7407ab44`..`ed1a73079`）。
 > - main 2026-10-25～10-27：[78e2f7960](https://github.com/vllm-project/vllm/commit/78e2f796019384b07c9f9b6d8a371e3ea958b33a)（[#63633](https://github.com/vllm-project/vllm/pull/63633)） 删除写入内容的 `async_tensor_h2d` 分支，默认 GPU-base 路径的写入内容也经 `UvaBufferPool.copy_chunks_to_uva` 进入 UVA 缓冲；上文“把实际写入内容通过 H2D 复制”与下图 `non-blocking H2D` 节点在 main 上不再成立。暂存改用 `array.array`，1-D ndarray/array 按引用保留到 `apply_write`，期间不得修改。
 
 ```mermaid
@@ -1053,9 +1091,12 @@ request count、scheduled token count、logits position count 与 generated toke
 
 `Sampler.__call__` 本身只做编排：统计 NaN（可选）→ `sample()` → 组装 logprobs → 计算 `num_sampled` / `num_rejected` →
 打包 `SamplerOutput`。真正“改 logits”的步骤在 `apply_sampling_params`（`:223`）：若本批没有任何请求需要 logits 处理
-（`needs_logits_processing`），在 `:235` 直接返回原 logits；否则先把 logits 拷成 FP32 新 tensor（`:238`），按固定顺序逐个应用
+（`needs_logits_processing`），在 `:235` 直接返回原 logits；否则先把 logits 拷成 FP32 新 tensor（`:239`），按固定顺序逐个应用
 `logits_processors`——logit bias（含 allowed token IDs 与 `min_tokens`）、penalties、bad words、custom processors——
-然后 thinking budget、temperature、min-p，最后（如果调用方没要求延后）top-k/top-p。bias 是加法、penalty 是倍率缩放，
+然后 thinking budget 强制（启用时）、temperature、min-p，最后（如果调用方没要求延后）top-k/top-p。thinking budget 的调用在 `:257`，位于 `:252-253` 的 processors 循环之后、`:260` 的 temperature 之前；
+它“启用”要同时满足两层条件：模型的 `reasoning_config` 里 `reasoning_start_token_ids`、`reasoning_end_token_ids`、`natural_reasoning_end_token_ids` 都非空（`thinking_budget.py:49` 的 `self.enabled`），
+并且这批请求里至少有一个设置了 `thinking_token_budget`（`add_request` 把 `use_thinking_budget` 记成“预算不为 None”，`:82-96`；`apply` 在 `not self.enabled` 或本批没有这样的请求时直接返回，`:115-116`）。
+源码注释写明它放在 processors 之后是因为“强制”（把 thinking 结束标记写进 logits）要最后运行，不能被前面的阶段覆盖或削弱（`sampler.py:255-256`）。bias 是加法、penalty 是倍率缩放，
 二者不可交换，所以列表顺序就是流水线顺序（源码注释原文）。
 
 混合 batch 里 greedy 与 random 请求**没有分成两条路径**：`sample()`（`:275`）把 `skip_top_k_top_p=True` 传给
@@ -1083,7 +1124,7 @@ flowchart TD
     BI --> PE["penalties"]
     PE --> BW["bad words"]
     BW --> CUSTOM["custom logits processors"]
-    CUSTOM --> TB["thinking budget"]
+    CUSTOM --> TB["thinking budget 强制（启用时）"]
     TB --> TE["temperature"]
     TE --> MP["min-p"]
     SK --> ELIG
@@ -1098,11 +1139,34 @@ flowchart TD
 随机路径常把 logits 除以温度：
 
 $$
-p_i=\frac{\exp(z_i/T)}{\sum_j\exp(z_j/T)}
+p_i=\frac{\exp(z_i/\tau)}{\sum_j\exp(z_j/\tau)}
 $$
 
-本式只适用于 `T>0`，`z`、`p` 的 shape 都是 `[vocab_size]`，概率无单位；`T=0`
-走 greedy 语义，不做除零（temperature kernel 对 `T=0` 与 `T=1` 都直接返回，不改 logits，`gumbel.py:34`）。
+**白话：** 温度 $\tau$ 是“把分数差拉开还是压平”的旋钮：$\tau<1$ 时 logit 之间的差被放大，概率更集中在最大的那一项；$\tau>1$ 时差被缩小，分布更平；$\tau$ 趋近 0 时只剩最大项，也就是 greedy。
+
+**其中：** $z_i$ 是候选 token $i$ 的 logit，$p_i$ 是它的概率（softmax 之后，总和为 1，无单位），`z`、`p` 的 shape 都是 `[vocab_size]`；$\tau$ 是温度，无单位；
+本式只适用于 $\tau>0$，$\tau=0$ 走 greedy 语义，不做除零。
+
+**怎么算出来：**
+
+1. 先把每个 logit 除以 $\tau$，得到 $z_i/\tau$；
+2. 再做普通 softmax：取指数后除以总和，保证 $p_i>0$ 且 $\sum_ip_i=1$；
+3. 为什么说“放大差距”：任意两个候选的概率比 $p_i/p_j=\exp\bigl((z_i-z_j)/\tau\bigr)$，$\tau$ 越小，指数里的差越大，比值越极端。
+
+算例（教学数字）：三个候选 $z=(2,1,0)$。
+
+| $\tau$ | $z/\tau$ | $\exp(z/\tau)$ | 总和 | $p$ | $p_1/p_2$ |
+|---:|---|---|---:|---|---:|
+| 1 | $(2,1,0)$ | $(7.389,\ 2.718,\ 1.000)$ | 11.107 | $(0.665,\ 0.245,\ 0.090)$ | $e^{1}\approx2.72$ |
+| 0.5 | $(4,2,0)$ | $(54.598,\ 7.389,\ 1.000)$ | 62.987 | $(0.867,\ 0.117,\ 0.016)$ | $e^{2}\approx7.39$ |
+
+$\tau$ 从 1 降到 0.5，最大项的概率从 0.665 升到 0.867，前两名的比值从 2.72 升到 7.39。
+
+源码里分成两步：温度步骤把 logits **就地除以 $\tau$**（`_temperature_kernel`，`vllm/v1/worker/gpu/sample/gumbel.py:23`，除法在 `:44`）；softmax 本身并不单独算，
+而是随后的 `gumbel_sample` 给每个 logit 加 Gumbel 噪声再取 argmax，这等价于从上面的 softmax 分布里抽样（Gumbel-max 技巧，`gumbel_noised_argmax`，`gumbel.py:172-210`）。
+$\tau=0$ 时不加噪声，直接取 argmax。temperature kernel 对 $\tau=0$ 与 $\tau=1$ 都直接返回、不改 logits（除以 1 本来就不变，`gumbel.py:34`）。
+
+**核对：** 把 $z=(2,1,0)$ 与 $\tau$ 代入上式逐项复算即可；源码位置如上。
 
 Top-k 按分数边界筛选，边界并列处理依实现；top-p 按累计概率阈值筛选。即使 temperature 为零，
 grammar、allowed tokens、bad words、bias 和 penalties 也可能先改变 argmax。
@@ -1128,7 +1192,7 @@ sequenceDiagram
 
 > **读图方法：** 这是“Grammar mask 的汇合点”的时序图。先从左到右确认参与者分别负责什么，再从上到下追踪消息；第一遍只看正常路径，第二遍再看返回、异步消息和失败分支。
 
-> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。详见 meta/main-tracking-2026-10-30.md。
+> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-29～10-30（`36d4ef654`..`2eae56c4b`）。
 > - [322f90a2a](https://github.com/vllm-project/vllm/commit/322f90a2a356a83276bc07236e0e620a4e4fc93a)（[#63219](https://github.com/vllm-project/vllm/pull/63219)）：`GrammarOutput` 删除 `num_acceptable_drafts`（`output.py` L341–L346）；`DraftTokensHandler` 按 req_id 保留 draft（`spec_decode/utils.py` L51–L131），`execute_model` 开头 `begin_step`（`model_runner.py` L1794–L1795），移除时 `discard`（L1198–L1199）。删除 `grammar_invalid_drafts`。PP + structured output 不再依赖当前 batch 整表 draft。
 
 ## 7.20 MRV2 sample_tokens 时间线
@@ -1276,7 +1340,7 @@ flowchart TD
    external launcher + `PP>1`（`pipeline parallelism with external_launcher`），以及启用 u-batching/DBO 时由
    `_get_dbo_unsupported_features`（`:3367`）给出的组合限制：LoRA、`PP>1`、`prefill_context_parallel_size > 1`、多模态/encoder-decoder、
    hybrid 模型、PIECEWISE CUDA graph、encoder-only。v0.33.0 的 “DBO 与 speculative decoding 不能同开”和 decode CP 限制已不在
-   这份清单里（#61464，见 `meta/main-tracking-2026-10-29.md`），只有 prefill CP 仍被禁止。任何不支持项都会让
+   这份清单里（#61464），只有 prefill CP 仍被禁止。任何不支持项都会让
    `_validate_model_runner` 抛出 `ValueError("The GPU model runner does not support: …")`。
 3. **standalone CPU runner：** 平台的 `uses_standalone_cpu_model_runner()`（无 Triton 的 CPU 路径）为真时，还要过
    `_get_standalone_cpu_model_runner_unsupported_features`（`:3135`）：多模态 encoder-only、投机解码、prompt embeddings、diffusion、
@@ -1296,7 +1360,7 @@ flowchart TD
 旧的 fallback 测试 `test_v2_model_runner_heterogeneous_vocab_draft_falls_back_to_v1`、
 `test_watermarking_forces_model_runner_v2` 在 `05caae03` 的 `tests/test_config.py` 里已不存在。
 
-> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。详见 meta/main-tracking-2026-10-29.md。
+> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-28～10-29（`0106c8abc`..`36d4ef654`）。
 > - [d7f68d4c7d](https://github.com/vllm-project/vllm/commit/d7f68d4c7d31004e257b7b2ff142b4edd83e0d8c)（[#62748](https://github.com/vllm-project/vllm/pull/62748)）：`sampler.apply_staged_writes()` 仅在本步有 `scheduled_new_reqs` 时调用（`model_runner.py` L1298–L1302 @ `36d4ef654`）。
 > - [06e172b5cf](https://github.com/vllm-project/vllm/commit/06e172b5cf8845c80c40a6eaaecbcbde3e38e8df)（[#59341](https://github.com/vllm-project/vllm/pull/59341)）：MRV2 lm_head LoRA 的 `prompt_lora_mapping` 按 `num_logits`（每请求 1+drafts 行）展开（`lora_utils.py` L99–L104；调用处 L1913）。
 > - [65faf4efa0](https://github.com/vllm-project/vllm/commit/65faf4efa0281fc2e04096a28cd35fb8dc7d3218)（[#63237](https://github.com/vllm-project/vllm/pull/63237)）：routed experts capturer 在 `profile_run` 中、KV cache profiling 之前初始化。
@@ -1351,14 +1415,44 @@ XPress 挂在 DFlash 族下：一次 query forward 覆盖「1 个已验证锚点
 把 `rejection_sample_method` 设为 `"fly"` 后，rejection 内核不再在「本步不会被 native 接受」处立刻截断。它先对 target 的 **processed logits** 算一个只覆盖 top-$k$ 的熵。实现是 `compute_fly_entropy`（`vllm/v1/worker/gpu/spec_decode/fly.py:12`）。`rejection_sample` 收到的是 `apply_sampling_params` 之后的 logits（已含 logits processors、温度、min_p、top-k/top-p（若设置），`sampler.py:223-276`、`rejection_sampler.py:273-284`）；在 `fly_window_size>0` 时以 `from_logits=True` 调用 `compute_fly_entropy`（`rejection_sampler_utils.py:1213-1218`）：先取这些 logits 的 top-$k$，再用**全词表**的 $\operatorname{logsumexp}$ 做 softmax 得到这些位置的 $\log p_i$ 和 $p_i$，然后
 
 $$
-H(x)=-\sum_{i\in\operatorname{TopK}(p(x))} p_i(x)\,\log p_i(x).
+\mathcal H(x)=-\sum_{i\in\operatorname{TopK}(p(x))} p_i(x)\,\log p_i(x).
 $$
 
-**白话：** 这不是把 top-$k$ 重新归一化后再算熵，而是只把概率最大的 $k$ 个词对香农熵的贡献加起来。softmax 是对处理后的 logits（经过 logits processors、温度、min_p、top-k/top-p（若设置））在**全词表**上归一化，所以 $H$ 大并不表示整个词表更“不确定”。词表很大且分布接近均匀时，头部 $k$ 项各自的概率都很小，它们的贡献加起来反而接近 0。例如默认 $k=3$、词表 $10^5$ 且完全均匀时，$H\approx 0.0003$；若头部三个候选的概率是 $0.5$、$0.3$、$0.2$，则 $H\approx 1.03$。因此 $H$ 大，表示 top-$k$ 里有若干个候选各自占了可观的概率。$k$ 由 `fly_entropy_top_k` 给出（默认 3），并与词表大小取较小值；某个 $p_i=0$ 的项不计入。
+**白话：** 这不是把 top-$k$ 重新归一化后再算熵，而是只把概率最大的 $k$ 个词对香农熵的贡献加起来。softmax 是对处理后的 logits（经过 logits processors、温度、min_p、top-k/top-p（若设置））在**全词表**上归一化，所以 $\mathcal H$ 大并不表示整个词表更“不确定”。词表很大且分布接近均匀时，头部 $k$ 项各自的概率都很小，它们的贡献加起来反而接近 0。因此 $\mathcal H$ 大，表示 top-$k$ 里有若干个候选各自占了可观的概率。
 
-**符号说明：** $p(x)$ 是 target 在该 draft 位置上、对处理后的 logits（经过 logits processors、温度、min_p、top-k/top-p（若设置））做全词表 softmax 得到的分布；$i$ 遍历其中概率最大的 $k$ 个词；$p_i(x)$ 是这些词在全词表分布里的真实概率（不是截断后再归一化的值）；$H(x)$ 无量纲，单位与 $\log$ 的底一致（实现用自然对数）。
+**其中：** $x$ 是该 draft 位置上的输入（上下文）；$p(x)$ 是 target 在该位置上、对处理后的 logits 做全词表 softmax 得到的分布；$i$ 遍历其中概率最大的 $k$ 个词；
+$p_i(x)$ 是这些词在全词表分布里的真实概率（不是截断后再归一化的值）；$k$ 是熵只取头部几项的个数，由 `fly_entropy_top_k` 给出（默认 3），并与词表大小取较小值（它不是采样用的 top-k，所以本章把它记作局部字母 $k$）；
+$\mathcal H(x)$ 无量纲，单位与 $\log$ 的底一致（实现用自然对数）；某个 $p_i=0$ 的项不计入。
 
-若当前步按 native 规则本该拒绝，且 $H$ 不低于 `fly_entropy_threshold`（默认 0.3），并且后面还留得下一个完整窗口，内核就记下 `pending_rejection`、**推迟**这次截断（`_rejection_kernel` 中 `FLY_WINDOW_SIZE>0` 分支，约 `:726-744`）。窗口内后续每一步都必须被 native 接受；走到 `i - pending_rejection == FLY_WINDOW_SIZE` 时，把这一段（含当初被推迟的那一步）算成接受。中途有一步不被 native 接受，验证就此停下，推迟作废。官方文档写明：这是**有意有损**的策略，**不保持** target 分布，可能改变输出。换来的是在 draft 大体正确、只在 top-$k$ 内几个候选都占了可观概率因而差点被掐断的位置，少做一次昂贵的重启。
+**怎么算出来：** 把香农熵 $-\sum_{i=1}^{\lvert\mathcal V\rvert}p_i\log p_i$（对全词表求和）里的求和范围缩到概率最大的 $k$ 项，源码 `compute_fly_entropy`（`fly.py:12-38`）分三步做：
+
+1. 取 logits 的 top-$k$ 值（`fly.py:25`，`torch.topk`）；
+2. 求每一项的 $\log p_i=z_i-\operatorname{LSE}$，其中 $\operatorname{LSE}$ 是**全词表**的 $\operatorname{logsumexp}$（`fly.py:27`），再取指数得到 $p_i$（`:28`）；
+3. 每项算 $p_i\log p_i$（$p_i=0$ 的项记 0，`:33-37`），求和取负（`:38`）。
+
+算例（教学数字，$k=3$，自然对数）。三个算例都假设没有设置 top-k、top-p、min_p：这些过滤会把被滤掉的词的 logit 写成 $-\infty$，
+全词表 softmax 实际只在留下的词上归一化，$p_i$ 会变大，算出来的 $\mathcal H$ 就不是下面的数字；本节的 $\mathcal H$ 始终是**处理后**分布上的 top-$k$ 熵。
+
+- 词表 $10^5$ 且完全均匀（全词表熵是 $\ln10^5\approx11.51$，很大）：每项 $p_i=10^{-5}$，但 $\mathcal H$ 只求和概率最大的 3 项，$\mathcal H=-3\times10^{-5}\ln10^{-5}\approx3\times10^{-5}\times11.51\approx0.0003$。
+  这里算的是**截断到 top-3 的熵**，不是整个分布的熵，所以全词表那么“不确定”，$\mathcal H$ 反而接近 0；
+- 头部三个候选的概率是 $0.5$、$0.3$、$0.2$：$\mathcal H=-(0.5\ln0.5+0.3\ln0.3+0.2\ln0.2)\approx0.347+0.361+0.322\approx1.03$；
+- 从 logits 出发：4 个词的 logits 为 $(3,2,1,0)$，$\operatorname{LSE}=\ln(e^3+e^2+e^1+e^0)\approx3.440$，
+  取前 3 个得 $p\approx(0.644,\ 0.237,\ 0.087)$，$\mathcal H\approx0.644\times0.440+0.237\times1.440+0.087\times2.440\approx0.837$；
+  完整的 4 项熵是 0.948，差的 0.110 就是没有计入的第 4 项。
+
+**核对：** 与 `fly.py:12-38` 逐行一致；三个数字可把 $p_i$ 与 $\operatorname{LSE}$ 代入式子复算（例 3：$\operatorname{LSE}=\ln(e^3+e^2+e^1+e^0)\approx3.440$）。
+
+若当前步按 native 规则本该拒绝，且 $\mathcal H$ 不低于 `fly_entropy_threshold`（默认 0.3），并且后面还留得下一个完整窗口，内核就记下 `pending_rejection`、**推迟**这次截断（`_rejection_kernel` 中 `FLY_WINDOW_SIZE>0` 分支，约 `:726-744`）。推迟还要求 `can_defer` 成立：draft 必须是有效 token（`is_valid_draft`，token id $\ge 0$，不是 $-1$ 占位），且相关 logit / logprob 有限（greedy 路径要求 target logit 不是 $-\infty$，`rejection_sampler_utils.py:636-644`；非 greedy 路径要求 target 与 draft 的 logprob 都不是 $-\infty$，`:717-723`）。窗口内后续每一步都必须被 native 接受；走到 `i - pending_rejection == FLY_WINDOW_SIZE` 时，把这一段（含当初被推迟的那一步）算成接受。中途有一步不被 native 接受，验证就此停下，推迟作废。官方文档写明：这是**有意有损**的策略，**不保持** target 分布，可能改变输出。换来的是在 draft 大体正确、只在 top-$k$ 内几个候选都占了可观概率因而差点被掐断的位置，少做一次昂贵的重启。
+
+**窗口怎么数（算例，教学数字）：** 设 `fly_window_size=2`，这一轮验证 4 个 draft token，位置编号 0–3，`accepted_length` 初值为 0。
+
+- 位置 0 被 native 接受：`accepted_length=1`；
+- 位置 1 按 native 规则本该被拒绝，熵 $\mathcal H=0.8\ge0.3$，且 `1 + 2 < 4`（后面还留得下一个完整窗口）：记 `pending_rejection=1`，`accepted_length` 仍是 1；
+- 位置 2 被 native 接受：`2 - 1 = 1`，不等于窗口大小 2，继续等；
+- 位置 3 被 native 接受：`3 - 1 == 2`，窗口走完，`accepted_length = 3 + 1 = 4`，被推迟的位置 1 也算接受。
+
+对照：不开 FLy 时在位置 1 就截断，`accepted_length=1`；若位置 3 没有被 native 接受，推迟作废，仍是 1；若位置 1 的熵只有 0.1，低于阈值，同样在位置 1 截断；
+若本该拒绝的是位置 2，则 `2 + 2 < 4` 不成立，后面放不下一个完整窗口，在位置 2 截断（`accepted_length=2`）。对应 `rejection_sampler_utils.py:730`（`i - pending_rejection == FLY_WINDOW_SIZE`）、`:740`（`i + FLY_WINDOW_SIZE < num_draft_tokens`）和 `:744`（`pending_rejection = i`）。
 
 ```mermaid
 flowchart TB
@@ -1367,7 +1461,7 @@ flowchart TB
     ENT --> RS
     RS --> N{本步会被 native 接受?}
     N -->|yes| ACC[延长 accepted_length]
-    N -->|no| G{H >= 阈值<br/>且后面还够一个窗口?}
+    N -->|no| G{熵 >= 阈值<br/>且后面还够一个窗口?}
     G -->|yes| DEF[记下 pending_rejection<br/>推迟截断]
     G -->|no| REJ[在此截断]
     DEF --> W{后续窗口内每步都 native 接受?}
@@ -1648,7 +1742,7 @@ D2H 分开测量。
 
 ## 7.32 v0.32.0 → v0.33.0 变更核验表
 
-下表列出本章正文为 v0.33.0 改写时依据的全部上游提交（`05caae03` 重新绑定新增的依据是 #63373 `aac1b2a4f3`，清单见 `meta/upgrade-main-05caae03-2026-11-10/`），目的是让读者能自己复核“这条改动确实在 v0.33.0 里”。
+下表列出本章正文为 v0.33.0 改写时依据的全部上游提交（`05caae03` 重新绑定新增的依据是 #63373 `aac1b2a4f3`，该提交是本书基线的祖先，但不在 v0.33.0 `4ba787ec` 中），目的是让读者能自己复核“这条改动确实在 v0.33.0 里”。
 核验方法是：在上游仓库里对每个提交运行 `git merge-base --is-ancestor <提交> 4ba787ec9959e566d3b587a796dff07673324da5`，
 下表“祖先链”一列全部为“是”（2026-11-10 运行）。v0.32.0（`5df63a72`）位于 release 分支，所以不能拿它的
 祖先关系判断；各提交对旧正文的影响，是对照 `git diff 5df63a72 4ba787ec` 与旧正文得到的结论。
