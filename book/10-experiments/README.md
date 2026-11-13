@@ -788,8 +788,8 @@ size 已经就绪。第 8 章说明 compile range 与 CUDA Graph descriptor 都�
 - container image 或依赖 lock；
 - power/clock policy 与同机干扰任务。
 
-记录环境时还要写明 `ParallelConfig.numa_bind` 的取值（`vllm/config/parallel.py:350`，字段说明紧随其后；该开关由
-[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）引入）。
+记录环境时还要写明 `ParallelConfig.numa_bind` 的取值（`vllm/config/parallel.py:350`，字段说明紧随其后；
+[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）把它的默认值从 `False` 改成 `None`（best-effort 自动绑定））。
 默认 `None` 是 best-effort 自动绑定：只有环境支持时才绑定（多个 NUMA 节点、安装了 `numactl`、CPU 亲和性不受限、默认 NUMA 内存策略、`spawn` 启动方式配合 mp/uni executor 与 mp DP），
 并且只是“优先用 GPU 本地内存、允许跨节点分配”的软偏好；显式 `True` 是严格绑定，缺少 `numactl` 或探测不到 GPU 到 NUMA 的拓扑时直接启动失败；`False` 关闭绑定。
 只写“NUMA 拓扑”而不写该开关的取值，就无法复现 Worker 子进程是否被绑核。
@@ -1832,7 +1832,7 @@ GPU 数可由显式字段或 $n_{\mathrm{GPU}}=\mathrm{TP}\times\mathrm{PP}\time
 
 **白话：**这条阈值只允许新结果比 baseline 低 1%；如果机器自己的波动就有 3%，那么什么都没改，一次测量也常常低于阈值，被判成“回归”。
 
-**其中：**“噪声 3%”指单次测量相对均值的标准差 $\sigma=3\%$，容差是 $1\%$；$\Phi(z)$ 是标准正态分布的累积概率（本节局部符号），$\Phi(z)$ 表示正态随机量不超过 $z$ 个标准差的概率。
+**其中：**“噪声 3%”指单次测量相对均值的标准差 $\sigma=3\%$（本节局部符号），容差是 $1\%$；$\Phi(z)$ 是标准正态分布的累积概率（本节局部符号），$\Phi(z)$ 表示正态随机量不超过 $z$ 个标准差的概率。
 下面的数字建立在两条教学假设上：测量误差服从均值为 0 的正态分布，各次测量相互独立；真实噪声未必如此。
 
 **怎么算出来：**“误报”指什么都没改、测量值却落到阈值以下。分两种情形：
