@@ -12,12 +12,20 @@ PROCESS_TALK = [
     r"\bmeta[-\s]+(?:file|note|doc|review|tracking)",
     r"\b[Rr]eview(?:er)?s?\b",              # does not match pedagogy_reviewed_at
     r"\bB9\b", r"B1[-–]B8", r"\bB\d+\s*批次", r"批次\s*(?:B\d|PR|开工|补写|改写)",
-    r"(?:后续|各|每个?|本|上一个?|下一个?|该|新|F/D\s*)批次",
+    # a batch is process talk only when a process word follows; 新批次的 token 数 or 下一个批次 is a batch of requests
+    r"(?:后续|各|每个?|本|上一个?|下一个?|该|新|按)批次\s*(?:补写|改写|PR|开工|负责|逐章|逐批)", r"F/D\s*批次",
     r"bot-hub", r"\btracker\b", r"本\s*PR\b", r"独立审阅",
     r"上一轮(?:审阅|评审|review|复核|改写|修订|批次|PR)", r"5893426b",
     r"applied_cudagraph_memory_estimate",
 ]
 PROCESS_PATTERN = re.compile("|".join(f"(?:{item})" for item in PROCESS_TALK))
+# Source text wraps lines inside a phrase ("独立\n审阅", "独立\n> 审阅"); join Chinese characters across such breaks.
+_CJK_BREAK = re.compile(r"(?<=[\u4e00-\u9fff])(?:\s|>)+(?=[\u4e00-\u9fff])")
+
+
+def process_hits(text: str) -> list[str]:
+    """Every process-talk phrase in `text`, found even when a line break or blockquote marker splits it."""
+    return sorted({m.group(0) for m in PROCESS_PATTERN.finditer(_CJK_BREAK.sub("", text))})
 
 
 def _section(text: str, start: str, end: str) -> str:
@@ -190,24 +198,27 @@ class NotationGuideTest(unittest.TestCase):
         Technical uses stay legal: 固定批次、局部批次、微批次、多批次 (a batch of requests), 上一轮 (the previous
         scheduling round), vLLM PR citations such as #63098, and the front-matter key pedagogy_reviewed_at.
         """
-        pattern = PROCESS_PATTERN
         paths = sorted((ROOT / "book").glob("*/README.md")) + [
             ROOT / "book/README.md", ROOT / "book/reading-guide.md", ROOT / "glossary/notation.md"]
         found = {}
         for path in paths:
             text = path.read_text(encoding="utf-8")
-            hits = sorted({m.group(0) for m in pattern.finditer(text)})
+            hits = process_hits(text)
             if hits:
                 found[str(path.relative_to(ROOT))] = hits
         self.assertEqual(found, {})
 
     def test_process_pattern_separates_process_from_technical_uses(self):
         for text in ("后续批次补写", "B9 收尾", "见 meta/notes.md", "bot-hub#128", "本 PR 只改符号", "由独立审阅者复核",
-                     "上一轮审阅提出", "the review comments", "每个批次负责一章"):
-            self.assertTrue(PROCESS_PATTERN.search(text), text)
+                     "上一轮审阅提出", "the review comments", "每个批次负责一章", "按批次开工", "各批次逐章改写",
+                     "下一个批次 PR 再补", "F/D 批次收尾",
+                     "由独立\n审阅者复核", "由独立\n> 审阅者复核", "后续批次\n补写", "按批次\n  逐章改写"):
+            self.assertTrue(process_hits(text), text)
         for text in ("固定批次完成时间", "局部批次携带全局信息", "双批次重叠微批次", "多批次在途", "上一轮 GPU 重叠",
-                     "pedagogy_reviewed_at: 2026-10-08", "见 vLLM #63098", "本轮批次行"):
-            self.assertIsNone(PROCESS_PATTERN.search(text), text)
+                     "pedagogy_reviewed_at: 2026-10-08", "见 vLLM #63098", "本轮批次行",
+                     "新批次的 token 数", "下一个批次", "本批次的请求数", "每个批次的 token 数", "该批次内的请求",
+                     "按批次统计 token 数", "上一批次已经完成", "下一个批次里\n的请求"):
+            self.assertEqual(process_hits(text), [], text)
 
     def test_descriptive_subscript_families_used_in_chapters_are_registered(self):
         """N_{..}, n_{..}, t_{..} and \\Delta t_{..} symbols that chapters use must be in section 1 or 3."""
