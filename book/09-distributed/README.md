@@ -1572,7 +1572,7 @@ rank 3: experts 3,7
 
 并不是所有 kernel 都能直接使用这张 `expert_map`：`ExpertMapManager` 的文档说明，kernel 不支持 `expert_map` 时 modular kernel method 会把它置为 `None`（`expert_map_manager.py:173-180`）。
 CPU 后端也一样：`CPUExpertsInt4`、`CPUExpertsInt8` 与 `ZenCPUExpertsInt8` 的 `supports_expert_map()` 返回 `False`（`vllm/model_executor/layers/fused_moe/experts/cpu_moe.py:933`、`:1120`、`:1605`），
-ARM、Power、Zen 的 INT8 实现只在 `not use_ep` 时可用（`:1262`、`:1416`、`:1574`），`cpu_int4_moe.py` 的实现要求 `ep_size == 1`（`cpu_int4_moe.py:117-122`）。
+ARM、Power、Zen 的 INT8 实现只在 `not use_ep` 时可用（`:1262`、`:1416`、`:1574`），`experts/cpu_int4_moe.py` 的实现要求 `ep_size == 1`（`vllm/model_executor/layers/fused_moe/experts/cpu_int4_moe.py:117-122`）。
 所以“CPU 上能不能开 EP”要看具体的量化 kernel，而不是只看 `enable_expert_parallel`。
 
 ### 9.8.3 route、dispatch、compute、combine
@@ -1636,7 +1636,7 @@ sequenceDiagram
 `moe_runner` 与 modular kernel 路径把 prepare、expert compute、finalize 分开；某些 all-to-all
 实现可以异步准备或完成通信，但依旧必须维护 token mapping 与 buffer 生命周期。
 具体分支是：`_prepare` 里，prepare/finalize 实现不支持 async 时走同步的 `prepare`，否则走 `prepare_async` 并拿到 `(hook, receiver)`，
-DBO 打开时把 `hook` 登记给 ubatch 上下文并 `dbo_yield()`（`modular_kernel.py:1334-1419` @ `05caae03`）；
+DBO（dual batch overlap，见 §9.12.1）打开时把 `hook` 登记给 ubatch 上下文并 `dbo_yield()`（`modular_kernel.py:1334-1419` @ `05caae03`）；
 `_finalize` 对称：同步分支调用 `finalize`，异步分支先 `finalize_async`，趁通信在飞时算 shared experts，最后才 `receiver()`（`:1514-1587`）。
 这就是 §9.12.1 讲的“异步提交、中间做无依赖的活、最后再等”的一个真实例子。
 CPU 后端没有这些 GPU all-to-all backend，它的 expert 计算用的是 `experts/cpu_moe.py` 里的 CPU kernel（见 §9.8.2 末尾的限制）。
@@ -1704,8 +1704,8 @@ flowchart LR
 
 是否需要 all2all，由 `ParallelConfig.use_all2all` 判断：`DP>1`，或者启用了 MoE 的序列并行，或者 `EP` 与 `PCP>1` 同开（`parallel.py:883-888`）。
 `use_sequence_parallel_moe` 要求 backend 在 `allgather_reducescatter`、`deepep_*`、`flashinfer_nvlink_one_sided`、`passthrough`、`mori*`、`nixl_ep` 之内，
-且 EP 开启、`TP>1`、`DP>1`（`:862-880`）。没有 all2all kernel 时，`MoERunner` 对 DP/序列并行走“naive”的 `dispatch_router_logits` / `combine`
-（`do_naive_dispatch_combine`，`runner/moe_runner.py:832-835`、`:846-853`、`:873-882`），PCP>1 时另外沿 token 维 all-gather 与 reduce-scatter（`:855-860`、`:884-893`）。
+且 EP 开启、`TP>1`、`DP>1`（`:862-880`）。尚未迁移到内部 modular kernel 的 quant method（`supports_internal_mk` 为假，即 `moe_kernel is None`，`vllm/model_executor/layers/fused_moe/fused_moe_method_base.py:36-40`）在 `DP>1` 或开了 MoE 序列并行时走“naive”的 `dispatch_router_logits` / `combine`
+（`do_naive_dispatch_combine`，`runner/moe_runner.py:832-835`、`:846-853`、`:873-882`）；`PCP>1` 且没有开 EP 时（`use_all2all_kernels` 要求 `use_ep`，`config.py:1066-1069`），再沿 token 维 all-gather 与 reduce-scatter（`:855-860`、`:884-893`）。
 
 ---
 
@@ -1822,27 +1822,27 @@ rank 2: [4,5]   + [10,11]
 rank 3: [6,7]   + [8,9]
 ```
 
-写成公式，一个请求这一步的 $N_q$ 个 query token 被切成 $2\,\mathrm{PCP}$ 段，每段 $c$ 个 token，rank $r$ 拿编号集合 $\mathcal C_r$ 里的两段，即第 $r$ 段和第 $2\,\mathrm{PCP}-1-r$ 段（$\mathcal C_r$ 与 $c$ 都是本节的局部记号）：
+写成公式，一个请求这一步的 $N_{q,r}$ 个 query token 被切成 $2\,\mathrm{PCP}$ 段，每段 $c$ 个 token，rank $i_{\mathrm{pcp}}$ 拿编号集合 $\mathcal C_{i_{\mathrm{pcp}}}$ 里的两段，即第 $i_{\mathrm{pcp}}$ 段和第 $2\,\mathrm{PCP}-1-i_{\mathrm{pcp}}$ 段（$\mathcal C_{i_{\mathrm{pcp}}}$ 与 $c$ 都是本节的局部记号）：
 
 $$
-c=\Big\lceil\frac{N_q}{2\,\mathrm{PCP}}\Big\rceil,\qquad
-\mathcal C_r=\big\{\,r,\ 2\,\mathrm{PCP}-1-r\,\big\}
+c=\Big\lceil\frac{N_{q,r}}{2\,\mathrm{PCP}}\Big\rceil,\qquad
+\mathcal C_{i_{\mathrm{pcp}}}=\big\{\,i_{\mathrm{pcp}},\ 2\,\mathrm{PCP}-1-i_{\mathrm{pcp}}\,\big\}
 $$
 
 **白话：**把一条长 prompt 切成 $2\times\mathrm{PCP}$ 个等长的块，头尾配对发给各个 rank：0 号拿最前一块和最后一块，1 号拿第二块和倒数第二块，依此类推。
 
-**其中：**$N_q$ 是这个请求本步要算的 query token 数（第 6 章的 $N_{q,r}$ 省去请求下标）；$c$ 是每个 chunk 的 token 数（代码里的 `chunk_size`，本节的局部记号）；
-$\mathrm{PCP}$ 是 PCP 路数；$r$ 是 PCP rank 序号，取 $0\ldots\mathrm{PCP}-1$。$N_q$ 与 $c$ 的单位是 token。最后一个 chunk 可能不满 $c$ 个，甚至为空（见下面的复制条件）。
+**其中：**$N_{q,r}$ 是请求 $r$ 本步要算的 query token 数（第 6 章的记号；本小节只讨论一个请求，$r$ 指请求序号，PCP rank 改写成 $i_{\mathrm{pcp}}$ 以免混淆）；$c$ 是每个 chunk 的 token 数（代码里的 `chunk_size`，本节的局部记号）；
+$\mathrm{PCP}$ 是 PCP 路数；$i_{\mathrm{pcp}}$ 是 PCP rank 序号，取 $0\ldots\mathrm{PCP}-1$。$N_{q,r}$ 与 $c$ 的单位是 token。最后一个 chunk 可能不满 $c$ 个，甚至为空（见下面的复制条件）。
 
 **怎么算出来：**causal attention 里第 $q$ 个 query 要看前 $q+1$ 个 key，所以越靠后的 token 越贵，如果只按连续段分，最后一个 rank 的工作量最大。
-下面假设 $N_q=2\,\mathrm{PCP}\cdot c$（刚好整除），用 (query, key) 对的个数 $\mathrm{work}$ 衡量工作量（$\mathrm{work}$ 是本节的局部记号）：
+下面假设 $N_{q,r}=2\,\mathrm{PCP}\cdot c$（刚好整除），用 (query, key) 对的个数 $\mathrm{work}$ 衡量工作量（$\mathrm{work}$ 是本节的局部记号）：
 
 1. 第 $j$ 个 chunk 覆盖 token $jc,\dots,jc+c-1$，它的 causal 工作量是 $\sum_{q=jc}^{jc+c-1}(q+1)=c^2j+\tfrac{c(c+1)}{2}$；
-2. rank $r$ 拿 $j=r$ 和 $j=2\,\mathrm{PCP}-1-r$ 两块，相加时 $r$ 被抵消：$\mathrm{work}_r=c^2\big(r+2\,\mathrm{PCP}-1-r\big)+c(c+1)=c^2(2\,\mathrm{PCP}-1)+c(c+1)$；
-3. 这个结果与 $r$ 无关，所以每个 rank 的 causal 工作量相同。
+2. rank $i_{\mathrm{pcp}}$ 拿 $j=i_{\mathrm{pcp}}$ 和 $j=2\,\mathrm{PCP}-1-i_{\mathrm{pcp}}$ 两块，相加时 $i_{\mathrm{pcp}}$ 被抵消：$\mathrm{work}_{i_{\mathrm{pcp}}}=c^2\big(i_{\mathrm{pcp}}+2\,\mathrm{PCP}-1-i_{\mathrm{pcp}}\big)+c(c+1)=c^2(2\,\mathrm{PCP}-1)+c(c+1)$；
+3. 这个结果与 $i_{\mathrm{pcp}}$ 无关，所以每个 rank 的 causal 工作量相同。
 
 算例（16 个 token、PCP=4）：$c=\lceil16/8\rceil=2$，每个 rank 的 $\mathrm{work}=2^2\times7+2\times3=34$。直接数也一样：rank 0 的 token 0、1、14、15 各自看 $1+2+15+16=34$ 个 key，rank 3 的 token 6、7、8、9 各看 $7+8+9+10=34$ 个。
-单位检查：$\mathrm{work}$ 的单位是 (query, key) 对，是无量纲的计数，不是 FLOPs；要换成 FLOPs 还要乘每对的 head 数和 head 宽度。当 $N_q$ 不能整除时，最后一个 chunk 较短，各 rank 的 $\mathrm{work}$ 只是近似相等。
+单位检查：$\mathrm{work}$ 的单位是 (query, key) 对，是无量纲的计数，不是 FLOPs；要换成 FLOPs 还要乘每对的 head 数和 head 宽度。当 $N_{q,r}$ 不能整除时，最后一个 chunk 较短，各 rank 的 $\mathrm{work}$ 只是近似相等。
 
 **核对：**`_iter_rank_chunks` 的文档字符串画的就是 PCP=4 的八个 chunk 与“rank 0 拿 0 和 7、rank 1 拿 1 和 6……”；代码里 `chunk_size = (query_len + num_chunks - 1) // num_chunks`，
 `chunk_indices = (rank, num_chunks - 1 - rank)`，每段长度 `min(chunk_size, query_len - chunk_offset)`，长度不超过 0 的段跳过
@@ -1868,7 +1868,7 @@ flowchart LR
     G --> O[Original logical order]
 ```
 
-> **读图方法：** 第一遍只走菱形 `K` 的 “no” 出口：原顺序的 token 被切成 $2\times\mathrm{PCP}$ 个 chunk，rank 0–3 各拿一前一后两块（图里 front $j$ + back $7-j$ 对应上面的 chunk $r$ 与 $2\,\mathrm{PCP}-1-r$），
+> **读图方法：** 第一遍只走菱形 `K` 的 “no” 出口：原顺序的 token 被切成 $2\times\mathrm{PCP}$ 个 chunk，rank 0–3 各拿一前一后两块（图里 front $j$ + back $7-j$ 对应上面的 chunk $i_{\mathrm{pcp}}$ 与 $2\,\mathrm{PCP}-1-i_{\mathrm{pcp}}$），
 > 算完以后 gather 并重排回原顺序。第二遍看 “yes” 出口：decode，或者在 `DCP>1` 时最后一个 chunk 为空的短 prefill，不做双 chunk 切分；
 > 此时再问 DCP 是否开启——开则每个参与的 rank 都拿完整 query，关则只有一个 owner rank 拿（只有 decode 会走到这里）。读完应能说出：哪类请求被切、哪类被复制、哪类只给一个 owner。
 
@@ -1883,14 +1883,14 @@ owner 不必跨 step 固定，hidden states/KV 的恢复保证后续 rank 可继
 用公式写，`DCP>1` 时一个 prefill 请求被复制的条件是最后一个 chunk 为空：
 
 $$
-(2\,\mathrm{PCP}-1)\,c\ \ge\ N_q,\qquad c=\Big\lceil\frac{N_q}{2\,\mathrm{PCP}}\Big\rceil
+(2\,\mathrm{PCP}-1)\,c\ \ge\ N_{q,r},\qquad c=\Big\lceil\frac{N_{q,r}}{2\,\mathrm{PCP}}\Big\rceil
 $$
 
 **白话：**前 $2\,\mathrm{PCP}-1$ 个 chunk 已经把整条 query 装完了，第 $2\,\mathrm{PCP}$ 个 chunk 就空了，这样总有一个 rank 少一块，所以改成每个 rank 都算完整 query。
 
-**其中：**符号同上；条件为真表示“复制”。**怎么算出来：**第 $j$ 个 chunk 从 token $jc$ 开始，最后一个 chunk（$j=2\,\mathrm{PCP}-1$）从 $(2\,\mathrm{PCP}-1)c$ 开始，起点不小于 $N_q$ 就没有 token 可放。
-算例（PCP=4，$2\,\mathrm{PCP}=8$）：$N_q=14$：$c=2$，$7\times2=14\ge14$，复制；$N_q=15$：$c=2$，$14<15$，不复制（最后一个 chunk 有 1 个 token）；$N_q=16$：$c=2$，$14<16$，不复制；
-$N_q=17$：$c=3$，$7\times3=21\ge17$，又复制。所以这个条件不随长度单调：短请求会被复制，长度一旦让 $c$ 进位又可能被复制。
+**其中：**符号同上；条件为真表示“复制”。**怎么算出来：**第 $j$ 个 chunk 从 token $jc$ 开始，最后一个 chunk（$j=2\,\mathrm{PCP}-1$）从 $(2\,\mathrm{PCP}-1)c$ 开始，起点不小于 $N_{q,r}$ 就没有 token 可放。
+算例（PCP=4，$2\,\mathrm{PCP}=8$）：$N_{q,r}=14$：$c=2$，$7\times2=14\ge14$，复制；$N_{q,r}=15$：$c=2$，$14<15$，不复制（最后一个 chunk 有 1 个 token）；$N_{q,r}=16$：$c=2$，$14<16$，不复制；
+$N_{q,r}=17$：$c=3$，$7\times3=21\ge17$，又复制。所以这个条件不随长度单调：短请求会被复制，长度一旦让 $c$ 进位又可能被复制。
 单位检查：两边都是 token 数。**核对：**`replicated_requests` 里 `drops_a_chunk = (num_chunks - 1) * chunk_sizes >= query_lens`，仅在 `self.dcp_world_size > 1` 时并入 `replicated`
 （`pcp_manager.py:244-255` @ `05caae03`）。
 执行结束后 gathered hidden states 还要按原 token 顺序恢复；当前局部行按 decode 在前、
@@ -1902,13 +1902,13 @@ prefill 在后，再按 request 与原片段起点排序。切片和正确重排
 
 - 仅支持 MLA；不与 encoder-decoder、multimodal 或 LoRA 同时使用。v0.32.0 不再禁止 PP 组合。
 - speculative decoding 不再由 `validate_config` 里写死的方法列表判断，而是问每种 speculator 配置类的
-  `pcp_unsupported_reason(parallel_config)`（调用点 `pcp_manager.py:177-183`；基类 `speculator_config.py:142`）。基类只放行
-  `supports_pcp = True` 的方法（类属性默认 `False`，`speculator_config.py:60`）；目前显式置 `True` 的是 DSpark（`dspark/config.py:29`）和
-  单模块 MTP（`mtp/config.py:24`），多模块 MTP 显式为 `False`（`multi_module_mtp/config.py:11`）。结果和以前一样：允许 DSpark 或单模块 MTP，
-  不支持其他方法或多模块 MTP。DSpark 在 draft model 使用 MLA 且 `DCP` 不在 `(1, PCP)` 内时拒绝，即要求 `DCP=1` 或 `DCP=PCP`（`dspark/config.py:132-143`）。
+  `pcp_unsupported_reason(parallel_config)`（调用点 `pcp_manager.py:177-183`；基类 `vllm/v1/worker/gpu/spec_decode/speculator_config.py:142`）。基类只放行
+  `supports_pcp = True` 的方法（类属性默认 `False`，同文件 `:60`）；目前显式置 `True` 的是 DSpark（`vllm/v1/worker/gpu/spec_decode/dspark/config.py:29`）和
+  单模块 MTP（`spec_decode/mtp/config.py:24`），多模块 MTP 显式为 `False`（`spec_decode/multi_module_mtp/config.py:11`）。结果和以前一样：允许 DSpark 或单模块 MTP，
+  不支持其他方法或多模块 MTP。DSpark 在 draft model 使用 MLA 且 `DCP` 不在 `(1, PCP)` 内时拒绝，即要求 `DCP=1` 或 `DCP=PCP`（`spec_decode/dspark/config.py:132-143`）。
 - 通用配置已不再禁止 PCP 与 DP 组合，但仍需通过其他配置和后端校验。
 - 不同硬件后端的支持范围也不同：运行 PCP 要有 PCP 的 attention 与 MoE 路径；DeepSeek-V4.1 的 PCP 目前只有 NVIDIA CUDA 实现，ROCm 实现直接抛 `NotImplementedError`（`vllm/models/deepseek_v41/amd/model.py:167-170`）；
-  没有 Triton 的非 x86 CPU 使用独立的 CPU model runner（`vllm/platforms/cpu.py:652-657`），它的不支持清单里包含 DCP 与 PCP（`vllm/config/vllm.py:3153-3156`，调用点 `:3452-3458`），启动时直接报错。
+  没有 Triton 的非 x86 CPU 使用独立的 CPU model runner（`vllm/platforms/cpu.py:652-657`），它的不支持清单里包含 DCP 与 PCP（`vllm/config/vllm.py:3153-3157`，调用点 `:3452-3458`），启动时直接报错。
 - PCP 与 `DCP>1` 同时使用时，仅支持 sparse MLA，且要求 `dcp_comm_backend="ag_rs"`。
 - sparse MLA 且 `DCP=1` 时，CUDA Graph 默认必须为 NONE；v0.33.0（#62377）只对 `deepseek_v32`（DeepSeek-V3.2）与 `glm_moe_dsa`（GLM-5.2/5.3）
   两类 `model_type` 放开，其他 sparse MLA 模型仍要设 `-cc.cudagraph_mode=NONE`（`pcp_manager.py:157-217` @ `05caae03`）。
@@ -1925,7 +1925,7 @@ prefill 在后，再按 request 与原片段起点排序。切片和正确重排
 **DeepSeek-V4.1 在 PCP 下的限制。**上面 `validate_config` 的限制是所有模型共用的；DeepSeek-V4.1 的模型类还有一层自己的校验。#61994（`af6665b5d`）之前，这一层在 PCP 下拒绝一切 speculative decoding；
 现在改为允许**固定长度的 DSpark**，其他 speculative 方法与 adaptive verification 仍然报错。固定版本里，PCP>1 的 DeepSeek-V4.1 要求：`DCP=1`；不开 microbatching（DBO）；不用 KV transfer；不用 MegaMoE 后端；
 开了 speculative decoding 时必须是固定长度 DSpark 且 `PP=1`；开了 prefix caching 时必须同时开 `swa_bounded_replay`
-（`vllm/models/deepseek_v41/nvidia/model.py:724-748` @ `05caae03`）。早先文字里“PP、DP、DCP 都必须为 1”的限制已经过时：PCP 与 PP、DP 的组合由 #63098（`2b009fc6d`）放开，
+（`vllm/models/deepseek_v41/nvidia/model.py:724-747` @ `05caae03`）。在 #63098（`2b009fc6d`）之前，这个检查要求 PP=DP=DCP=1；该提交放开了 PCP 与 PP、DP 的组合，
 现在只有开了 speculative decoding 才要求 `PP=1`。
 
 有 speculative decoding 时，两处实现保证各 PCP rank 对同一份提议做验证：
@@ -2033,20 +2033,20 @@ $$
 +\mathrm{pos}\bmod I_{\mathrm{il}}
 $$
 
-4. 一个长度为 $L$ 的序列，rank $r_{\mathrm{dcp}}$ 本地存的 token 数是：
+4. 一个长度为 $S$（该序列已有、需要存 KV 的 token 数）的序列，rank $r_{\mathrm{dcp}}$ 本地存的 token 数是：
 
 $$
-L_{r_{\mathrm{dcp}}}=\Big\lfloor\tfrac{L}{I_{\mathrm{il}}\,\mathrm{DCP}}\Big\rfloor I_{\mathrm{il}}
-+\operatorname{clamp}\big(L\bmod(I_{\mathrm{il}}\,\mathrm{DCP})-r_{\mathrm{dcp}}\,I_{\mathrm{il}},\ 0,\ I_{\mathrm{il}}\big)
+S_{\mathrm{loc},r_{\mathrm{dcp}}}=\Big\lfloor\tfrac{S}{I_{\mathrm{il}}\,\mathrm{DCP}}\Big\rfloor I_{\mathrm{il}}
++\operatorname{clamp}\big(S\bmod(I_{\mathrm{il}}\,\mathrm{DCP})-r_{\mathrm{dcp}}\,I_{\mathrm{il}},\ 0,\ I_{\mathrm{il}}\big)
 $$
 
-这里 $r_{\mathrm{dcp}}$ 是 DCP rank 序号，$B_{\mathrm{blk}}$ 是 `block_size`，$\operatorname{clamp}(x,0,I_{\mathrm{il}})$ 把 $x$ 夹到 $[0,I_{\mathrm{il}}]$；这两个式子里的 $\mathrm{local}$、$L_{r_{\mathrm{dcp}}}$ 是本节的局部记号。
+这里 $r_{\mathrm{dcp}}$ 是 DCP rank 序号，$B_{\mathrm{blk}}$ 是 `block_size`，$\operatorname{clamp}(x,0,I_{\mathrm{il}})$ 把 $x$ 夹到 $[0,I_{\mathrm{il}}]$；$S$ 是序列长度（token）；这两个式子里的 $\mathrm{local}$、$S_{\mathrm{loc},r_{\mathrm{dcp}}}$ 是本节的局部记号。
 因为 $B_{\mathrm{blk}}$ 能被 $I_{\mathrm{il}}$ 整除，前面的 owner 公式对 $\mathrm{pos}$ 或对它在虚拟 block 内的偏移 $\mathrm{pos}\bmod(B_{\mathrm{blk}}\mathrm{DCP})$ 算，结果一样。
 
 算例（$\mathrm{DCP}=2$、$I_{\mathrm{il}}=2$、$B_{\mathrm{blk}}=4$）：位置 $0,\dots,9$ 的 owner 依次是 $0,0,1,1,0,0,1,1,0,0$。位置 4 的 owner 是 0，
 $\mathrm{local}(4)=0\cdot4+\lfloor4/4\rfloor\cdot2+0=2$：它是 rank 0 本地的第 2 个 token。位置 8 开始进入第二个虚拟 block，$\mathrm{local}(8)=1\cdot4+0+0=4$，落在 rank 0 本地第二个物理 block 的开头。
-长度 $L=7$ 时 $L_0=1\cdot2+\operatorname{clamp}(3-0,0,2)=4$，$L_1=2+\operatorname{clamp}(3-2,0,2)=3$，合计 7。
-再看 $L=10$、$\mathrm{DCP}=4$：$I_{\mathrm{il}}=1$ 时各 rank 存 $[3,3,2,2]$；$I_{\mathrm{il}}=2$ 时存 $[4,2,2,2]$。单位检查：各 rank 本地 token 数之和等于 $L$。
+长度 $S=7$（$\mathrm{DCP}=2$、$I_{\mathrm{il}}=2$）时 $S_{\mathrm{loc},0}=1\cdot2+\operatorname{clamp}(3-0,0,2)=4$，$S_{\mathrm{loc},1}=2+\operatorname{clamp}(3-2,0,2)=3$，合计 7。
+再看 $S=10$、$\mathrm{DCP}=4$：$I_{\mathrm{il}}=1$ 时各 rank 存 $[3,3,2,2]$；$I_{\mathrm{il}}=2$ 时存 $[4,2,2,2]$。单位检查：各 rank 本地 token 数之和等于 $S$。
 
 **核对：**GPU 路径的 slot 计算在 Triton kernel 里：`virtual_block_size = kv_block_size * CP_SIZE`，
 `is_local = virtual_block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank`，`local_positions = virtual_block_indices * kv_block_size + rounds * CP_INTERLEAVE + remainder`
@@ -2152,7 +2152,7 @@ flowchart TB
         direction LR
         S0["rank 0：O_0, LSE_0"]
         S1["rank 1：O_1, LSE_1"]
-        SN["rank N-1：O_N-1, LSE_N-1"]
+        SN["rank DCP-1：O_DCP-1, LSE_DCP-1"]
     end
     S0 --> AG["all-gather：每个 rank 拿到全部 LSE_i"]
     S1 --> AG
@@ -2164,7 +2164,7 @@ flowchart TB
     S0 -. "O_i 留在本地" .-> SC
     SC --> RS["reduce-scatter：沿 head 维求和并切分"]
     SC --> AR["all-reduce：求和后每个 rank 都有完整结果"]
-    SHARDS -. "A2A 路径：O_i 与 LSE_i 打包，一次 all-to-all" .-> A2A["每个 rank 收齐 N 份 H/N 个 head，再本地合并"]
+    SHARDS -. "A2A 路径：O_i 与 LSE_i 打包，一次 all-to-all" .-> A2A["每个 rank 收齐 DCP 份、每份 H_q/DCP 个 head，再本地合并"]
     RS --> OUT["全局 attention 输出 O"]
     AR --> OUT
     A2A --> OUT
@@ -2205,12 +2205,12 @@ PCP 与 `DCP>1` 同开时 `validate_config` 要求 `dcp_comm_backend="ag_rs"`（
 非 MLA 的 attention backend 也各自接了这些路径：FlashAttention 在 `dcp_comm_backend == "a2a"` 时用 `dcp_a2a_lse_reduce`，否则 `cp_lse_ag_out_rs`
 （`vllm/v1/attention/backends/flash_attn.py:1113-1118`）；FlashInfer 同样二选一，并传 `is_lse_base_on_e=False`（`flashinfer.py:437-439`、`:2152-2154`）。
 
-A2A 的缓冲区大小可以用来练单位检查。设 DCP 路数 $N=4$，一批 $B=8$ 个 token，$H=128$ 个 head，head 宽度 $D=128$，输出 dtype 为 bf16（2 字节）。
-`dcp_a2a_lse_reduce` 把每个 rank 的输出重排成 $(N,B,H/N,D+n_{\mathrm{pack}})$ 一块发出，fp32 的 LSE 要塞进两个 16 位槽，所以 bf16 时 $n_{\mathrm{pack}}=2$（fp32 输出时是 1）：
-元素数 $4\times8\times32\times130=133{,}120$，字节数 $133{,}120\times2=266{,}240\ \mathrm{B}$，其中输出本身占 $8\times128\times128\times2=262{,}144\ \mathrm{B}$，打包的 LSE 占 $4{,}096\ \mathrm{B}$。
-作对照，AG 路径 all-gather 的是 fp32 LSE，一个 rank 贡献 $B\times H\times4=4{,}096\ \mathrm{B}$，收到 $N$ 份共 $16{,}384\ \mathrm{B}$，另外还要对 $B\times H\times D\times2=262{,}144\ \mathrm{B}$ 的输出做 reduce-scatter 或 all-reduce。
+A2A 的缓冲区大小可以用来练单位检查。设 $\mathrm{DCP}=4$，一批 $T=8$ 个 token，$H_q=128$ 个 query head，head 宽度 $d_h=128$，输出 dtype 为 bf16（2 字节）。
+`dcp_a2a_lse_reduce` 把每个 rank 的输出重排成 $(\mathrm{DCP},T,H_q/\mathrm{DCP},d_h+n_{\mathrm{pack}})$ 一块发出，fp32 的 LSE 要塞进两个 16 位槽，所以 bf16 时 $n_{\mathrm{pack}}=2$（fp32 输出时是 1）：
+元素数 $4\times8\times32\times130=133{,}120$，字节数 $133{,}120\times2=266{,}240\ \mathrm{B}$，其中输出本身占 $T\,H_q\,d_h\times2=8\times128\times128\times2=262{,}144\ \mathrm{B}$，打包的 LSE 占 $4{,}096\ \mathrm{B}$。
+作对照，AG 路径 all-gather 的是 fp32 LSE，一个 rank 贡献 $T\times H_q\times4=4{,}096\ \mathrm{B}$，收到 $\mathrm{DCP}$ 份共 $16{,}384\ \mathrm{B}$，另外还要对 $T\times H_q\times d_h\times2=262{,}144\ \mathrm{B}$ 的输出做 reduce-scatter 或 all-reduce。
 单位检查：元素数乘字节数得字节数。这些只是字节数的对照，不能据此判断谁更快（上面已说明）。
-对应实现：`_dcp_a2a_lse_pack_dim` 返回 16 位 dtype 为 2、32 位为 1（`dcp.py:607-613`），`dcp_a2a_lse_reduce` 的缓冲区形状与 `H` 须被 $N$ 整除的约束在 `:1021-1120`。
+对应实现：`_dcp_a2a_lse_pack_dim` 返回 16 位 dtype 为 2、32 位为 1（`dcp.py:607-613`），`dcp_a2a_lse_reduce` 的缓冲区形状与 $H_q$ 须被 $\mathrm{DCP}$ 整除的约束在 `:1021-1120`。
 
 ### 9.9.7 Context Parallel 与 KV Cache
 
@@ -2223,22 +2223,22 @@ $B_{\mathrm{blk}}\times\mathrm{DCP}$ 个连续 token 位置，而 Mamba/GDN 这�
 `kv_cache_utils.py:736-738` @ `05caae03`）。用公式写，一个请求最多需要的 block 数与每个 rank 要存的 token 数是：
 
 $$
-n_{\mathrm{blk}}^{\max}=\Big\lceil\frac{L_{\max}}{B_{\mathrm{blk}}\,\mathrm{DCP}}\Big\rceil,\qquad
-L_{r_{\mathrm{dcp}}}\le\Big\lceil\frac{L}{\mathrm{DCP}}\Big\rceil
+n_{\mathrm{blk}}^{\max}=\Big\lceil\frac{S_{\max}}{B_{\mathrm{blk}}\,\mathrm{DCP}}\Big\rceil,\qquad
+S_{\mathrm{loc},r_{\mathrm{dcp}}}\le\Big\lceil\frac{S}{\mathrm{DCP}}\Big\rceil+I_{\mathrm{il}}-1
 $$
 
 **白话：**同样的 block 大小，DCP 越大，一个 block 编号能覆盖的逻辑 token 越多，所以每个请求需要的 block 数、每张卡要存的 KV 也相应变少；代价是 decode 的每一层要多一次 LSE 合并通信（§9.9.5、§9.9.6）。
 
-**其中：**$n_{\mathrm{blk}}^{\max}$ 是一个请求最多占用的 block 数（每个 rank 上，代码里的 `max_num_blocks_per_req`，局部记号）；$L_{\max}$ 是 `max_model_len`；$B_{\mathrm{blk}}$ 是 `block_size`（token/block）；
-$L_{r_{\mathrm{dcp}}}$ 是 §9.9.4 里 rank $r_{\mathrm{dcp}}$ 本地存的 token 数。这条只对被 DCP 分片的注意力 KV 成立，Mamba/GDN 这类按 rank 复制的状态不除以 $\mathrm{DCP}$。
+**其中：**$n_{\mathrm{blk}}^{\max}$ 是一个请求最多占用的 block 数（每个 rank 上，代码里的 `max_num_blocks_per_req`，局部记号）；$S_{\max}$ 是 `max_model_len`（token）；$B_{\mathrm{blk}}$ 是 `block_size`（token/block）；
+$S_{\mathrm{loc},r_{\mathrm{dcp}}}$ 是 §9.9.4 里 rank $r_{\mathrm{dcp}}$ 本地存的 token 数，$S$ 是序列长度。这条只对被 DCP 分片的注意力 KV 成立，Mamba/GDN 这类按 rank 复制的状态不除以 $\mathrm{DCP}$。
 
 **怎么算出来：**
 
-1. 一个虚拟 block 覆盖 $B_{\mathrm{blk}}\mathrm{DCP}$ 个逻辑位置，所以 $L_{\max}$ 个位置需要 $\lceil L_{\max}/(B_{\mathrm{blk}}\mathrm{DCP})\rceil$ 个；
-2. 每个 rank 本地存的 token 数由 §9.9.4 的 $L_{r_{\mathrm{dcp}}}$ 给出，最多比 $L/\mathrm{DCP}$ 多出不到一个 interleave 组，上界取 $\lceil L/\mathrm{DCP}\rceil$（$I_{\mathrm{il}}=1$ 时恰好取到）；
-3. 估算一个请求最坏占多少显存时，`max_memory_usage_bytes` 同样把 `max_model_len` 先除以 $\mathrm{DCP}$ 再向上取整、再按 block 数乘页字节数。
+1. 一个虚拟 block 覆盖 $B_{\mathrm{blk}}\mathrm{DCP}$ 个逻辑位置，所以 $S_{\max}$ 个位置需要 $\lceil S_{\max}/(B_{\mathrm{blk}}\mathrm{DCP})\rceil$ 个；
+2. 每个 rank 本地存的 token 数由 §9.9.4 的 $S_{\mathrm{loc},r_{\mathrm{dcp}}}$ 给出。$I_{\mathrm{il}}=1$ 时上界就是 $\lceil S/\mathrm{DCP}\rceil$；$I_{\mathrm{il}}>1$ 时一个 interleave 组不会被拆给两个 rank，最多再多出 $I_{\mathrm{il}}-1$ 个，所以是 $\lceil S/\mathrm{DCP}\rceil+I_{\mathrm{il}}-1$（对 $\mathrm{DCP}\le8$、$I_{\mathrm{il}}\le8$、$S<300$ 逐一枚举核对过，没有超出）；
+3. 估算一个请求最坏占多少显存时，`max_memory_usage_bytes` 把 `max_model_len` 先除以 $\mathrm{DCP}$ 再向上取整、再按 block 数乘页字节数；它不含上面的 $I_{\mathrm{il}}-1$ 项，只是一个估算。
 
-算例：$L_{\max}=131072$、$B_{\mathrm{blk}}=64$、$\mathrm{DCP}=4$：$\lceil131072/(64\times4)\rceil=512$ 个 block；不开 DCP 是 $\lceil131072/64\rceil=2048$ 个。单位检查：token $\div$（token/block）得 block 数。
+算例：$S_{\max}=131072$、$B_{\mathrm{blk}}=64$、$\mathrm{DCP}=4$：$\lceil131072/(64\times4)\rceil=512$ 个 block；不开 DCP 是 $\lceil131072/64\rceil=2048$ 个。上界的算例取 §9.9.4 的 $S=10$、$\mathrm{DCP}=4$、$I_{\mathrm{il}}=2$：rank 0 存 4 个 token，$\lceil10/4\rceil+2-1=3+1=4$，刚好取到；只写 $\lceil10/4\rceil=3$ 就会低估。单位检查：token $\div$（token/block）得 block 数。
 
 **核对：**`AttentionSpec.dcp_sharded` 默认是 `True`（`vllm/v1/kv_cache_interface.py:564`）；`max_num_blocks_per_req` 返回 `cdiv(max_len, block_size * kv_shard_count)`（`:625-630`）；
 `max_memory_usage_bytes` 在 `dcp_sharded` 且 DCP>1 时把 `max_model_len` 换成 `cdiv(max_model_len, dcp_world_size)`（`:658-663`）。
@@ -2519,7 +2519,7 @@ $$
 **白话：**一个 engine 一共有 $W_{\mathrm{engine}}$ 个 worker；跨 $n_{\mathrm{node}}$ 个节点时，每个节点承担一样多，第 $i_{\mathrm{node}}$ 号节点上的第 $\ell$ 个 worker，在 engine 内的编号是前面所有节点的 worker 数加上 $\ell$。
 
 **其中：**$W_{\mathrm{engine}}=\mathrm{TP}\times\mathrm{PP}\times\mathrm{PCP}$（§9.3.1）；$n_{\mathrm{node}}$ 是**一个 DP engine 跨的节点数**，代码里的 `nnodes_within_dp`（`nnodes == 1` 时为 1，否则是 `nnodes` 除以 DP 的节点组数）；
-$i_{\mathrm{node}}$ 是本节点在这个 engine 内的序号（`node_rank_within_dp`）；$\ell$ 是本机 rank；$r_{\mathrm{eng}}$ 是 engine 内的全局 rank（本节的局部记号；§9.3.1 的 $g$ 是本机设备编号，不是这个量）；
+$i_{\mathrm{node}}$ 是本节点在这个 engine 内的序号（`node_rank_within_dp`）；$\ell$ 是本机 rank；$r_{\mathrm{eng}}$ 是 engine 内的全局 rank（本节的局部记号；§9.2.1 的 $g$ 是本机设备编号，不是这个量）；
 $W_{\mathrm{local}}$ 是每个节点上的 worker 数（`local_world_size`）。都是无单位整数。
 
 **怎么算出来：**
@@ -2578,7 +2578,7 @@ sequenceDiagram
 
 - **真正的重叠**：modular kernel 的 `_finalize` 在支持 async 的 prepare/finalize 上先发 `finalize_async`，趁通信在飞时算 shared experts（`_maybe_apply_shared_experts`），最后才调用 `receiver()` 取结果（`vllm/model_executor/layers/fused_moe/modular_kernel.py:1556-1585` @ `05caae03`）；
   `_prepare` 对称地先发 `prepare_async` 再取 `receiver`（`:1334-1411`）。
-- **没有重叠**：DCP 的 A2A 合并虽然写了 `all_to_all_single(..., async_op=True)`，但下一行就是 `work.wait()`，通信期间没有任何独立的活可做（`vllm/v1/attention/ops/dcp.py:1089-1096`）。
+- **没有重叠**：DCP 的 A2A 合并虽然写了 `all_to_all_single(..., async_op=True)`，但下一行就是 `work.wait()`，通信期间没有任何独立的活可做（`vllm/v1/attention/ops/dcp.py:1090-1096`）。
   这里 `async_op=True` 只是为了能拿到 work 句柄，不是为了重叠。
 
 用公式写，把通信藏在计算后面最多能省多少：
@@ -2636,7 +2636,7 @@ flowchart LR
 
 > **读图方法：** 上下两条泳道是两条 stream，方框里的 A、B 是两个 microbatch，箭头是**数据依赖**，不是时间先后。第一遍看每个 microbatch 的依赖链：A 的通信依赖 A 的计算（`cA → mA`），
 > 下一层 A 的计算依赖 A 的通信（`mA → cA2`）。第二遍找“缺失的箭头”：`mA` 与 `cB` 之间没有箭头，说明 B 的计算不必等 A 的通信，二者可以同时进行——这就是重叠发生的原因。
-> 用上面的公式读：每个 microbatch 计算 0.4ms、通信 0.3ms，两个合起来是计算 0.8ms、通信 0.6ms；A 的通信被 B 的计算盖住，稳态下一层约 $\max(0.8,0.6)=0.8$ ms 而不是 1.4 ms。
+> 图中的 0.4 ms、0.3 ms 只是示意数字，不是实测。用上面的公式读：每个 microbatch 计算 0.4 ms、通信 0.3 ms，两个合起来是计算 0.8ms、通信 0.6ms；A 的通信被 B 的计算盖住，稳态下一层约 $\max(0.8,0.6)=0.8$ ms 而不是 1.4 ms。
 
 ### 9.12.2 collective 顺序是全组协议
 
@@ -2781,9 +2781,9 @@ $\alpha$ 是每个阶段的固定延迟（s）；$M_{\mathrm{payload}}$ 是每�
 2. 传输：$M_{\mathrm{payload}}$ 字节按 $\beta$ 的速度送完，用时 $M_{\mathrm{payload}}/\beta$；
 3. 两项相加。小 payload 时第一项主导，大 payload 时第二项主导，两项相等的 payload 是 $M_{\mathrm{payload}}=n_{\mathrm{phase}}\alpha\beta$。
 
-算例一（decode 一个 token 的 hidden states，$n_{\mathrm{phase}}=1$）：$M_{\mathrm{payload}}=8192\times2\ \mathrm{B}=16\ \mathrm{KiB}=16384\ \mathrm{B}$（hidden size 8192、bf16），$\beta=400\ \mathrm{GB/s}=4\times10^{11}\ \mathrm{B/s}$，$\alpha=10\ \mathrm{\mu s}$：
+算例一（教学数字，非实测；decode 一个 token 的 hidden states，$n_{\mathrm{phase}}=1$）：$M_{\mathrm{payload}}=8192\times2\ \mathrm{B}=16\ \mathrm{KiB}=16384\ \mathrm{B}$（hidden size 8192、bf16），$\beta=400\ \mathrm{GB/s}=4\times10^{11}\ \mathrm{B/s}$，$\alpha=10\ \mathrm{\mu s}$：
 传输 $16384/(4\times10^{11})\approx0.041\ \mathrm{\mu s}$，总计 $\approx10.04\ \mathrm{\mu s}$，几乎全是 $\alpha$。
-算例二（prefill 8192 个 token）：$M_{\mathrm{payload}}=8192\times16384\ \mathrm{B}=128\ \mathrm{MiB}$，传输 $134217728/(4\times10^{11})\approx335.5\ \mathrm{\mu s}$，总计 $\approx345.5\ \mathrm{\mu s}$，这时 $\alpha$ 只占 3%。
+算例二（同样是教学数字；prefill 8192 个 token）：$M_{\mathrm{payload}}=8192\times16384\ \mathrm{B}=128\ \mathrm{MiB}$，传输 $134217728/(4\times10^{11})\approx335.5\ \mathrm{\mu s}$，总计 $\approx345.5\ \mathrm{\mu s}$，这时 $\alpha$ 只占 3%。
 单位检查：$\mathrm{B}\div(\mathrm{B/s})=\mathrm{s}$，$n_{\mathrm{phase}}\alpha$ 的单位也是 s。注意换算：$400\ \mathrm{GB/s}=3200\ \mathrm{Gb/s}$（教学代码的 `bandwidth_gbps` 按 Gb/s 输入）。
 
 **核对：**这是一个教学模型，vLLM 源码里没有对应的计算。教学代码 `collective_time_us`（`examples/ch09_parallel_topology.py:440`）按同样的公式实现，输入 payload 字节数、延迟 µs、带宽 Gb/s 和阶段数，

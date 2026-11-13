@@ -1783,7 +1783,7 @@ $$
 调用方 `vllm/v1/attention/ops/triton_unified_attention.py` 在 `:682-683` 取回 `alpha` 并把累加器乘上去，之后按 V 的量化方式分两个分支累加：开启 per-token-head scale 时 `P_v = (P * v_token_head_scales[None, :]).to(V.dtype)`（`:702`）再 `acc += tl.dot(P_v, V)`（`:703`）；
 默认分支是 `acc += tl.dot((P * p_scale).to(V.dtype), V) / p_scale`（`:713`），`p_scale` 在 FP8 的 V 上取 256 或 128、其余为 1，只是为了让 FP8 点积里的权重不下溢，点积之后再除回去，数学上与不缩放相同。
 非 3D 路径在收尾处 `acc = acc / L[:, None]`（`:773`）归一化；3D（`IS_3D`）路径先存每段的局部结果，由 `reduce_segments` 合并。源码里的 `acc` 存的是未归一化的 $Z\,o$，结果与上面先归一化再重标定的写法等价。上面的数字可以按 6.18 节的三个分数手算复核（$\log 11.107=2.408$）。
-DCP 或 split-K 最终合并的正是这类 `(output, LSE)` 状态（第 09 章把同一个量写作 $\operatorname{LSE}_i$，其中 $i$ 是 DCP shard 序号），而不是
+DCP 或 split-K 最终合并的正是这类 `(output, LSE)` 状态（第 09 章对每个 DCP shard $i$ 写作 $\operatorname{LSE}_i$），而不是
 直接平均各分区输出。随书教学模型没有实现 online softmax（见 6.20）。
 
 [源码] `vllm/v1/attention/ops/triton_attention_helpers.py` - `softmax_step`
