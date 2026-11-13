@@ -629,13 +629,13 @@ $$
 
 **其中：** 所有 $M$ 的单位都是 byte（换成 GiB 时所有项一起换）；
 
-- $M_{\mathrm{KV}}$：可分给 KV Cache 的显存，源码里是 `available_kv_cache_memory_bytes`；
+- $M_{\mathrm{KV}}$：可分给 KV Cache 的显存，源码里是 `Worker.available_kv_cache_memory_bytes`（`gpu_worker.py:789-793` 算出，`:810` 写入日志）；
 - $M_{\mathrm{req}}$：vLLM 申请的显存预算（`requested_memory`）。先取 `M_util = ceil(total_memory * gpu_memory_utilization)`，不是 free memory 乘利用率；
   普通进程内加载时 $M_{\mathrm{req}}$ 就是 `M_util`。若 loader 报告外部进程已持有权重
   `M_external>0`，则 $M_{\mathrm{req}}$ 是 `M_util-M_external`，并检查余量为正且 free memory
   足以满足这个余量。外部权重不能因为不归当前进程 allocator 所有就漏算；
 - $M_{\mathrm{nonKV}}$：profile 得到的非 KV 占用，包含权重及 profile 期间非 KV 消耗；
-- $M_{\mathrm{graph}}$：实际扣除的 CUDA Graph 内存估算（`applied_cudagraph_memory_estimate`）。环境变量
+- $M_{\mathrm{graph}}$：实际扣除的 CUDA Graph 内存估算，源码里是 `cudagraph_memory_estimate`（`gpu_worker.py:755` 先置 0，`:760` 在条件成立时由 `model_runner.profile_cudagraph_memory()` 赋值，`:787` 存成 `self.cudagraph_memory_estimate`，`:792` 从预算里扣掉）。环境变量
   `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` 默认值为 `1`，即默认应用估算；显式设为 `0`
   才不扣此项。在 `05caae03` 上，Worker 只按两件事决定要不要去估算：平台是 CUDA-alike（含 ROCm）或 XPU，
   且这个环境变量为真（`gpu_worker.py` L755–L760）。`cudagraph_mode` 是否为 `NONE`、`cudagraph_mm_encoder`
@@ -650,7 +650,7 @@ $$
 
 1. **取利用率预算。** `M_util = ceil(total_memory * gpu_memory_utilization)`（`vllm/v1/worker/utils.py:803`）：对整张卡的总显存取比例，再向上取整到 byte；
 2. **扣外部权重，得到 $M_{\mathrm{req}}$。** 普通加载时 $M_{\mathrm{req}}$ 就是 `M_util`；外部持有权重时是 `M_util - M_external`（`utils.py:805-806`），余量不为正会直接抛 `ValueError`（`:807-816`）；
-3. **扣非 KV 与 graph 估算。** $M_{\mathrm{KV}}=M_{\mathrm{req}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph}}$（`gpu_worker.py:789-793`）。其中 $M_{\mathrm{nonKV}}$ 在源码里是 `total_consumed + transient_peak_headroom`：
+3. **扣非 KV 与 graph 估算。** $M_{\mathrm{KV}}=M_{\mathrm{req}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph}}$，即 `available_kv_cache_memory_bytes = requested_memory - profile_result.non_kv_cache_memory - cudagraph_memory_estimate`（`gpu_worker.py:789-793`）。其中 $M_{\mathrm{nonKV}}$ 在源码里是 `total_consumed + transient_peak_headroom`：
    前者是 profile 前后设备 free memory 的差（持久占用，如权重），后者是 torch 分配器峰值与当前已分配量之差（瞬时峰值余量），
    两者相加避免重复计数（`vllm/utils/mem_utils.py:327-336`）。
 
@@ -663,7 +663,10 @@ $$
 
 单位检查：四项都是 GiB（1 GiB = $2^{30}$ byte），加减不改单位，结果仍是 GiB；(b) 比 (a) 少的 8 GiB 恰好是外部权重，说明漏算它就会把别人占着的显存当成自己的 KV 空间。
 
-**核对：** 三处源码位置如上；`M_util`、`M_external` 保持代码样式，因为它们是代码里的中间量，不是全书符号。算例的数字可用
+**核对：** 三处源码位置如上。这些变量名都在 `05caae03` 的 `gpu_worker.py` 里逐个确认过：`cudagraph_memory_estimate` 在 `:755`、`:760`、`:785`（加进 `peak_activation_memory`）、`:787`、`:792`、`:813-816`（日志里换算成等价的 `gpu_memory_utilization`）、`:1110-1119`（捕获完成后与实际 graph 池大小比较并打日志）使用；
+`available_kv_cache_memory_bytes` 在 `:789` 赋值，`:810` 打日志，`:851` 作为 `reserve_mm_ipc_gpu_memory(...)` 的参数——`determine_available_memory` 最终返回的是它扣掉多模态 IPC 预留之后的值（`:850-854`；显式 `kv_cache_memory_bytes` 的分支同样经过这个函数，`:722`），`:1175` 再用于“Current kv cache memory in use”的提示。
+源码里没有 `applied_cudagraph_memory_estimate` 这个名字（`grep` 在 `05caae03` 的整个 `vllm/` 下无匹配）；“applied”只是文中“实际扣除的估算”的说法，生效与否取决于 `:758-760` 的条件。
+`M_util`、`M_external` 保持代码样式，因为它们是代码里的中间量，不是全书符号。算例的数字可用
 `python3 -c` 复算（命令与输出写在本批 PR 正文里）。
 
 [源码] `vllm/v1/worker/gpu_worker.py` - `Worker.determine_available_memory`（整段 L747–L760，其中是否估算的判断在 L755–L760 @ `05caae03`）
@@ -689,7 +692,7 @@ flowchart TB
     REQ --> CHECK
     REQ --> W["weights and persistent state"]
     REQ --> A["activation/transient peak"]
-    REQ --> G["applied graph estimate"]
+    REQ --> G["graph memory estimate"]
     REQ --> K["remaining KV budget"]
 ```
 
@@ -1090,9 +1093,12 @@ request count、scheduled token count、logits position count 与 generated toke
 
 `Sampler.__call__` 本身只做编排：统计 NaN（可选）→ `sample()` → 组装 logprobs → 计算 `num_sampled` / `num_rejected` →
 打包 `SamplerOutput`。真正“改 logits”的步骤在 `apply_sampling_params`（`:223`）：若本批没有任何请求需要 logits 处理
-（`needs_logits_processing`），在 `:235` 直接返回原 logits；否则先把 logits 拷成 FP32 新 tensor（`:238`），按固定顺序逐个应用
+（`needs_logits_processing`），在 `:235` 直接返回原 logits；否则先把 logits 拷成 FP32 新 tensor（`:239`），按固定顺序逐个应用
 `logits_processors`——logit bias（含 allowed token IDs 与 `min_tokens`）、penalties、bad words、custom processors——
-然后 thinking budget、temperature、min-p，最后（如果调用方没要求延后）top-k/top-p。bias 是加法、penalty 是倍率缩放，
+然后 thinking budget 强制（启用时）、temperature、min-p，最后（如果调用方没要求延后）top-k/top-p。thinking budget 的调用在 `:257`，位于 `:252-253` 的 processors 循环之后、`:260` 的 temperature 之前；
+它“启用”要同时满足两层条件：模型的 `reasoning_config` 里 `reasoning_start_token_ids`、`reasoning_end_token_ids`、`natural_reasoning_end_token_ids` 都非空（`thinking_budget.py:49` 的 `self.enabled`），
+并且这批请求里至少有一个设置了 `thinking_token_budget`（`add_request` 把 `use_thinking_budget` 记成“预算不为 None”，`:82-96`；`apply` 在 `not self.enabled` 或本批没有这样的请求时直接返回，`:115-116`）。
+源码注释写明它放在 processors 之后是因为“强制”（把 thinking 结束标记写进 logits）要最后运行，不能被前面的阶段覆盖或削弱（`sampler.py:255-256`）。bias 是加法、penalty 是倍率缩放，
 二者不可交换，所以列表顺序就是流水线顺序（源码注释原文）。
 
 混合 batch 里 greedy 与 random 请求**没有分成两条路径**：`sample()`（`:275`）把 `skip_top_k_top_p=True` 传给
@@ -1120,7 +1126,7 @@ flowchart TD
     BI --> PE["penalties"]
     PE --> BW["bad words"]
     BW --> CUSTOM["custom logits processors"]
-    CUSTOM --> TB["thinking budget"]
+    CUSTOM --> TB["thinking budget 强制（启用时）"]
     TB --> TE["temperature"]
     TE --> MP["min-p"]
     SK --> ELIG
@@ -1426,9 +1432,11 @@ $\mathcal H(x)$ 无量纲，单位与 $\log$ 的底一致（实现用自然对�
 2. 求每一项的 $\log p_i=z_i-\operatorname{LSE}$，其中 $\operatorname{LSE}$ 是**全词表**的 $\operatorname{logsumexp}$（`fly.py:27`），再取指数得到 $p_i$（`:28`）；
 3. 每项算 $p_i\log p_i$（$p_i=0$ 的项记 0，`:33-37`），求和取负（`:38`）。
 
-算例（教学数字，$k=3$，自然对数）：
+算例（教学数字，$k=3$，自然对数）。三个算例都假设没有设置 top-k、top-p、min_p：这些过滤会把被滤掉的词的 logit 写成 $-\infty$，
+全词表 softmax 实际只在留下的词上归一化，$p_i$ 会变大，算出来的 $\mathcal H$ 就不是下面的数字；本节的 $\mathcal H$ 始终是**处理后**分布上的 top-$k$ 熵。
 
-- 词表 $10^5$ 且完全均匀：每项 $p_i=10^{-5}$，$\mathcal H=-3\times10^{-5}\times\ln10^{-5}\approx3\times10^{-5}\times11.51\approx0.0003$；
+- 词表 $10^5$ 且完全均匀（全词表熵是 $\ln10^5\approx11.51$，很大）：每项 $p_i=10^{-5}$，但 $\mathcal H$ 只求和概率最大的 3 项，$\mathcal H=-3\times10^{-5}\ln10^{-5}\approx3\times10^{-5}\times11.51\approx0.0003$。
+  这里算的是**截断到 top-3 的熵**，不是整个分布的熵，所以全词表那么“不确定”，$\mathcal H$ 反而接近 0；
 - 头部三个候选的概率是 $0.5$、$0.3$、$0.2$：$\mathcal H=-(0.5\ln0.5+0.3\ln0.3+0.2\ln0.2)\approx0.347+0.361+0.322\approx1.03$；
 - 从 logits 出发：4 个词的 logits 为 $(3,2,1,0)$，$\operatorname{LSE}=\ln(e^3+e^2+e^1+e^0)\approx3.440$，
   取前 3 个得 $p\approx(0.644,\ 0.237,\ 0.087)$，$\mathcal H\approx0.644\times0.440+0.237\times1.440+0.087\times2.440\approx0.837$；

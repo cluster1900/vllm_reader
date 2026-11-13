@@ -1800,7 +1800,7 @@ $$
 真正“近似”的是 $M_{\mathrm{graph}}$ 本身——它是一次临时捕获得到的估算，不等于运行时 graph 实际占用的每个 byte。
 
 **其中：** 各项单位均为 byte。$M_{\mathrm{KV}}$ 是可分给 KV Cache 的显存，$M_{\mathrm{req}}$ 是请求的显存预算（`requested_memory`），$M_{\mathrm{nonKV}}$ 是 profile 得到的非 KV 占用，
-$M_{\mathrm{graph}}$ 是实际应用的 graph 估算（`applied_cudagraph_memory_estimate`）。先按 `ceil(total_memory * gpu_memory_utilization)` 得到利用率预算。
+$M_{\mathrm{graph}}$ 是实际应用的 graph 估算（源码变量 `cudagraph_memory_estimate`，`gpu_worker.py:755-760`、`:792`；$M_{\mathrm{KV}}$ 对应 `available_kv_cache_memory_bytes`，`:789-793`）。先按 `ceil(total_memory * gpu_memory_utilization)` 得到利用率预算。
 若 loader 报告外部进程持有权重，则 $M_{\mathrm{req}}$ 还要扣除该外部权重，余量必须为正且不超过 free memory；
 普通进程内加载没有这项扣除。该式描述自动预算路径，
 不覆盖显式 `kv_cache_memory_bytes` 的手动容量分支。固定 revision 默认启用
