@@ -543,7 +543,7 @@ flowchart TB
         IPC --> EC
         TCP1 --> EC
     end
-    subgraph HOP2["第二跳 EngineCore 到 Worker：MessageQueue.enqueue"]
+    subgraph HOP2["第二跳 EngineCore 到 Worker（仅 MultiprocExecutor）：MessageQueue.enqueue"]
         ENQ["rpc_broadcast_mq.enqueue<br/>先 pickle 序列化"]
         ARENA{"enable_shm_tensor_arena 为 True<br/>且全部 reader 在本节点?"}
         AY["大于等于 8 MiB 的连续 CPU tensor<br/>memcpy 进 /dev/shm arena 槽<br/>pickle 里只留 stub"]
@@ -567,7 +567,8 @@ flowchart TB
 ```
 
 > **读图方法：** 图分两个框，对应两跳，每一跳各有自己的选择。上面的框回答“API 与 EngineCore 之间走哪种地址”：这一跳永远是 ZMQ，
-> 只是在 `client_local_only` 为真时用 `ipc://`，否则用 `tcp://`，与共享内存无关。下面的框回答“Engine→Worker 的广播怎么发”：第一遍只沿左侧的“否→否→写 ring”走，
+> 只是在 `client_local_only` 为真时用 `ipc://`，否则用 `tcp://`，与共享内存无关。下面的框只覆盖 `MultiprocExecutor`：`UniProcExecutor` 没有 `MessageQueue`，EngineCore 与 worker 在同一进程里直接调用，没有这一跳。
+> 在 MultiprocExecutor 路径上，下面的框回答“Engine→Worker 的广播怎么发”：第一遍只沿左侧的“否→否→写 ring”走，
 > 这是默认路径（没开 arena、消息不大、只有本节点 Worker）；第二遍再看三处分叉：arena 只改变大 CPU tensor 怎么被序列化，
 > 总字节过大会让数据改走 XPUB，跨节点 reader 额外走 tcp。菱形是条件，矩形是动作。
 
@@ -576,7 +577,7 @@ flowchart TB
 - **第一跳的地址。** `get_engine_zmq_bind_addresses` 在 `client_local_only` 为真时对输入、输出都取 `get_open_zmq_ipc_path()`（`ipc://` 加随机 UUID 路径），否则取 `tcp://host:0`
   （`vllm/v1/engine/utils.py:1144-1156`，路径函数在 `vllm/utils/network_utils.py:175-177`）；`MPClient.__init__` 在 client 一端 bind `ROUTER`（输入）与 `PULL`（输出）
   （`vllm/v1/engine/core_client.py:688-718`；引擎由外部启动、地址由外部给定时，地址由启动方决定，不经过这个函数），EngineCore 端是 `DEALER` 与 `PUSH`（`vllm/v1/engine/core.py:2194`、`:2304`）。
-- **第二跳的默认路径是共享内存。** `MultiprocExecutor._init_executor` 只在 DP leader 节点创建 `rpc_broadcast_mq = MessageQueue(world_size, local_world_size, max_chunk_bytes=…)`
+- **第二跳只属于 `MultiprocExecutor`。** `UniProcExecutor` 没有 `MessageQueue`（`vllm/v1/executor/uniproc_executor.py` 全程进程内 `collective_rpc` / `run_method`）。`MultiprocExecutor._init_executor` 只在 DP leader 节点创建 `rpc_broadcast_mq = MessageQueue(world_size, local_world_size, max_chunk_bytes=…)`
   （`vllm/v1/executor/multiproc_executor.py:202-208`），其中 `max_chunk_bytes = VLLM_MQ_MAX_CHUNK_BYTES_MB × 1 MiB`，默认 16 MiB（`vllm/envs.py:1962-1964`）。
   `MessageQueue.__init__` 有本节点 reader 时创建 `ShmRingBuffer(n_local_reader, max_chunk_bytes, max_chunks)`，`max_chunks` 默认 10（`vllm/distributed/device_communicators/shm_broadcast.py:507`、`:521-526`）。
   这与 `enable_shm_tensor_arena` 无关：关着 arena，小消息照样走共享内存 ring buffer。
@@ -657,10 +658,10 @@ KV cache 的真实规格来自执行侧模型层，容量又依赖加载模型�
    `adjust_dcp_kv_cache_interleave_size`，再通过
    `set_kv_cache_layout(layout, cp_kv_cache_interleave_size)` 把 layout 与 DCP（decode context parallel，把长上下文的 KV 按 token 维度分到多个 rank）的 interleave 大小一起下发。
 4. profile 可用内存。
-5. `get_kv_cache_configs` 生成各 worker cache config 和 scheduler 汇总 config，直接复用第 3 步的分组。
-6. 更新 block 数、block size、容量与可能 auto-fit 的最大长度。
-7. 调用 executor 初始化 cache。
-8. compile 或 warm up 模型（启用 extensible KV cache 时，随后还要按 warmup 后的实测值定稿 block 数并 `extend_kv_cache`）。
+5. `get_kv_cache_configs` 生成各 worker cache config，直接复用第 3 步的分组；若 auto-fit 缩小了 `max_model_len`，经 `collective_rpc` 同步给 worker。
+6. `generate_scheduler_kv_cache_config` 得到 Scheduler 汇总 config，并写入 `num_gpu_blocks`、`block_size`；非 extensible 时再调用 `update_kv_cache_capacity`，只记录并日志 KV 容量（token 数、最大并发）。
+7. 调用 executor 初始化 cache（extensible 时这一步先按预留容量分配）。
+8. compile 或 warm up 模型（启用 extensible KV cache 时，随后还要按 warmup 后的实测值 `finalize_extensible_kv_cache` 并 `extend_kv_cache` 定稿 block 数）。
 9. 若启用 `SimpleCPUOffloadConnector` 且开了 prefix caching，向 worker 取回对齐后的 CPU block 数，
    写回 `cache_config.simple_cpu_offload_num_blocks`。
 
@@ -683,29 +684,35 @@ flowchart TB
     subgraph P2["二 测量"]
         B1["determine_available_memory<br/>profile 得到可用显存"]
     end
-    subgraph P3["三 规划（纯计算）"]
+    subgraph P3["三 规划（主要是计算；auto-fit 缩小 max_model_len 时同步给 worker）"]
         direction LR
-        C1["get_kv_cache_configs<br/>各 worker 的 cache config"] --> C2["generate_scheduler_kv_cache_config<br/>Scheduler 汇总 config"]
-        C2 --> C3["update_kv_cache_capacity<br/>block 数、block size、max_model_len"]
+        C1["get_kv_cache_configs<br/>各 worker 的 cache config"] --> C2["generate_scheduler_kv_cache_config<br/>Scheduler 汇总 config；写 num_gpu_blocks、block_size"]
+        C2 --> C3["update_kv_cache_capacity<br/>记录 KV 容量（token 数、最大并发）；extensible 时跳过"]
     end
     subgraph P4["四 落地"]
         direction LR
-        D1["initialize_from_config<br/>worker 真正分配 KV tensor"] --> D2["compile_or_warm_up_model"]
-        D2 --> D3["SimpleCPUOffload 块数回写<br/>（仅启用时）"]
+        D1["initialize_from_config<br/>worker 真正分配 KV tensor<br/>extensible 时先预留，extend_kv_cache 才定稿"] --> D2["compile_or_warm_up_model"]
+        D2 --> DE["finalize_extensible_kv_cache / extend_kv_cache<br/>（仅 extensible：按 warmup 实测值定稿 block 数）"]
+        DE --> D3["SimpleCPUOffload 块数回写<br/>（仅启用时）"]
     end
     P1 --> P2 --> P3 --> P4
     P4 --> S["返回 KVCacheConfig<br/>之后才创建 Scheduler"]
 ```
 
-> **读图方法：** 先只沿主线从上到下走四段：先收集和解析，再 profile，再规划，最后落地，每段内部从左到右。第二遍留意两处依赖：
+> **读图方法：** 先只沿主线从上到下走四段：先收集和解析，再 profile，再规划，最后落地，每段内部从左到右。第二遍留意三处细节：
 > 第一段算好的全局分组会被第三段的 `get_kv_cache_configs` 直接复用（图里没有画这条边，因为它跨段回指），
 > 这正是 v0.33.0 把分组和 DCP interleave 提前到 profile 之前的原因（NIXL 在 profile 时就要看到最终 interleave）；
+> 第三段主要是计算，但 `get_kv_cache_configs` 若 auto-fit 缩小了 `max_model_len`，会在进入 C2 之前经 `collective_rpc` 同步给 worker，所以这一段除了计算还有一次向 worker 的同步；
+> C2 写入 `num_gpu_blocks` 和 `block_size`，C3 的 `update_kv_cache_capacity` 只记录并日志 token 容量与最大并发，extensible 时整框跳过；
+> 第四段里，extensible 路径在 D1 只按预留容量分配，warmup 之后才由 `finalize_extensible_kv_cache` / `extend_kv_cache` 定稿 block 数（D2 与 D3 之间的那一框；非 extensible 时跳过）。
 > 最下面的出口说明：Scheduler 要的是第三段产出的汇总 config，所以只能在整个函数返回之后创建。
 
 图中每个框都是 `EngineCore._initialize_kv_caches` 里的一次真实调用（`vllm/v1/engine/core.py` @ `05caae03`）：
 `get_kv_cache_specs` `:284`、`resolve_kv_cache_layout` `:318`、`get_global_kv_cache_groups` `:324`、`adjust_dcp_kv_cache_interleave_size` `:325`、
-`set_kv_cache_layout` `:326`、`determine_available_memory` `:342`、`get_kv_cache_configs` `:353`、`generate_scheduler_kv_cache_config` `:366`、
-`update_kv_cache_capacity` `:388`、`initialize_from_config` `:408`、`compile_or_warm_up_model` `:411`、SimpleCPUOffload 块数回写 `:425-439`。
+`set_kv_cache_layout` `:326`、`determine_available_memory` `:342`、`get_kv_cache_configs` `:353`、auto-fit 后同步 `max_model_len` `:364`、
+`generate_scheduler_kv_cache_config` `:366`（随后写 `num_gpu_blocks` `:367`、`block_size` `:379-383`）、
+`update_kv_cache_capacity` `:388`（仅当 `kv_cache_groups and not extensible`，函数在 `vllm/v1/core/kv_cache_utils.py:1157-1175` 只记录并日志 `kv_cache_size_tokens` 与 `kv_cache_max_concurrency`）、
+`initialize_from_config` `:408`、`compile_or_warm_up_model` `:411`、`finalize_extensible_kv_cache` / `extend_kv_cache` `:412-422`（仅 extensible）、SimpleCPUOffload 块数回写 `:425-439`。
 编号列表里的第 8、9 步按源码顺序排列：compile/warm-up 在前，CPU offload 块数回写在后（extensible KV cache 下 worker 在 `extend_kv_cache` 里才创建 connector，所以必须等它）。
 
 [源码] `vllm/v1/engine/core.py` - `EngineCore._initialize_kv_caches`
@@ -745,6 +752,7 @@ $\mathtt{max\_concurrent\_batches}$ 是源码里 `VllmConfig.max_concurrent_batc
 |---|---|---|---|
 | 1 | 关闭 | $1$ | `step`，不创建 batch queue |
 | 1 | 开启 | $1+1=2$ | `step_with_batch_queue`，即 §3.11.2 的容量为 2 的时间线 |
+| 4 | 关闭 | $4$ | `step_with_batch_queue`，容量 4（async 关闭时就是 PP 本身，只要 $\mathrm{PP}>1$ 就会建队列） |
 | 4 | 开启 | $4+1=5$ | `step_with_batch_queue`，容量 5，并不是固定 2 |
 
 **核对：**`EngineCore.__init__` 把这个属性读成 `batch_queue_size`，大于 1 时创建 `deque(maxlen=batch_queue_size)`（`vllm/v1/engine/core.py:222-228`）；
@@ -989,24 +997,26 @@ flowchart LR
 超时判定可以写成：
 
 $$
-\Delta=t_{\mathrm{now}}-t_{\mathrm{feed}},\qquad
-\mathrm{dump}\iff\bigl(\Delta>T_{\mathrm{wd}}\bigr)\wedge\bigl(t_{\mathrm{log}}<t_{\mathrm{feed}}\bigr)
+\Delta t_{\mathrm{silent}}=t_{\mathrm{now}}-t_{\mathrm{feed}},\qquad
+\mathrm{dump}\iff\bigl(\Delta t_{\mathrm{silent}}>\Delta t_{\mathrm{timeout}}\bigr)\wedge\bigl(t_{\mathrm{log}}<t_{\mathrm{feed}}\bigr)
 $$
 
 **白话：**后台线程每隔一会儿看一眼“主线程上次喂狗是多久以前”。超过超时秒数就判定卡住并写一次栈；
 同一次卡顿只写一次，主线程重新喂狗之后才有资格再写。
 
-**其中：**$\mathrm{dump}$ 表示“这一轮检查要不要转储线程栈”，$\wedge$ 是“并且”；$t_{\mathrm{now}}$ 是后台线程检查时 `time.monotonic()` 的读数，$t_{\mathrm{feed}}$ 是源码里的 `last_feed_time`（最近一次 `feed()` 的时刻），
-$t_{\mathrm{log}}$ 是 `last_timeout_log`（上次转储的时刻，初值 0，所以第一次卡顿一定会转储），$T_{\mathrm{wd}}$ 是 `WatchdogConfig.timeout`（正整数秒）；
-三个时刻都在同一个单调时钟上，单位是秒；$\Delta$ 是“已经多久没喂狗”（秒）。检查间隔是 `WatchdogConfig.check_interval`（正整数秒），不在公式里，只决定多久判一次。
+**其中：**$\mathrm{dump}$ 表示“这一轮检查要不要转储线程栈”，是一个布尔量，$\wedge$ 是“并且”；$t_{\mathrm{now}}$ 是后台线程检查时 `time.monotonic()` 的读数，$t_{\mathrm{feed}}$ 是源码里的 `last_feed_time`（最近一次 `feed()` 的时刻），
+$t_{\mathrm{log}}$ 是 `last_timeout_log`（上次转储的时刻，初值 0，所以第一次卡顿一定会转储），$\Delta t_{\mathrm{timeout}}$ 是 `WatchdogConfig.timeout`（正整数秒）；
+三个时刻都在同一个单调时钟上，单位是秒；$\Delta t_{\mathrm{silent}}$ 是“已经多久没喂狗”（秒，时间自上次喂狗起算）。检查间隔是 `WatchdogConfig.check_interval`（正整数秒），不在公式里，只决定多久判一次。
+
+**单位检查：**$t_{\mathrm{now}}$、$t_{\mathrm{feed}}$、$t_{\mathrm{log}}$ 都是同一单调时钟上的秒；$\Delta t_{\mathrm{silent}}$ 与 $\Delta t_{\mathrm{timeout}}$ 都是秒，相减和比较都合法。
 
 **怎么算出来：**这是定义式，直接对应 `ThreadedWatchDog._check_loop`：先在 `active` 为假时把 `last_feed_time` 刷成 `now` 并跳过本轮，否则判断
 `now - self.last_feed_time > self.timeout and self.last_timeout_log < self.last_feed_time`，为真就记 `last_timeout_log = now` 并调用 `handle_failure("feed timeout")`
 （`vllm/utils/watch_dog.py:108-122` @ `05caae03`）。第二个条件的意思是“同一次卡顿只转储一次”：转储后 $t_{\mathrm{log}}\ge t_{\mathrm{feed}}$，
 只要中间没有新的 `feed()`，条件就一直为假。
-算例（教学数字）：$T_{\mathrm{wd}}=60$，并假设检查足够频繁，$t_{\mathrm{log}}$ 初值 0：
+算例（教学数字）：$\Delta t_{\mathrm{timeout}}=60$，并假设检查足够频繁，$t_{\mathrm{log}}$ 初值 0：
 
-| 时刻 $t_{\mathrm{now}}$（秒） | 事件 | $t_{\mathrm{feed}}$ | $\Delta$ | $t_{\mathrm{log}}<t_{\mathrm{feed}}$ | 结果 |
+| 时刻 $t_{\mathrm{now}}$（秒） | 事件 | $t_{\mathrm{feed}}$ | $\Delta t_{\mathrm{silent}}$ | $t_{\mathrm{log}}<t_{\mathrm{feed}}$ | 结果 |
 |---|---|---|---|---|---|
 | 100 | 主线程喂狗后卡住 | 100 | 0 | — | 不转储 |
 | 161 | 检查 | 100 | 61 | $0<100$ 成立 | $61>60$，转储，$t_{\mathrm{log}}\leftarrow161$ |
@@ -1016,7 +1026,7 @@ $t_{\mathrm{log}}$ 是 `last_timeout_log`（上次转储的时刻，初值 0，�
 `disable()` 期间 `active` 为假，后台线程把 $t_{\mathrm{feed}}$ 持续刷新到当前时刻（`:111-115`），所以恢复后的计时窗口从零开始，空闲等请求不会被当成卡住。
 
 **核对：**条件与刷新逻辑逐行对应 `_check_loop`（`vllm/utils/watch_dog.py:108-122`）；`feed()` 只是把 `last_feed_time` 设为 `time.monotonic()`（`:64-65`），
-`disable()` 把 `active` 置假并在退出时恢复（`:68-74`）；算例可在 PR 正文里用同一规则的几行 Python 复算。
+`disable()` 把 `active` 置假并在退出时恢复（`:68-74`）。
 
 [源码] `vllm/utils/watch_dog.py` - `ThreadedWatchDog`、`start_watch_dog`、`get_watch_dog`（`:41`、`:152`、`:147` @ `05caae03`）
 

@@ -499,7 +499,7 @@ flowchart TB
     PE -- "否" --> SG{"带 embeds?"}
     SG -- "是" --> EM["_process_embeds"]
     SG -- "否" --> TM["_process_tokens<br/>有多模态数据则走 multimodal processor"]
-    TM --> TR["_truncate_expanded_prompt<br/>placeholder 展开后再校一次截断"]
+    TM --> TR["_truncate_expanded_prompt<br/>仅多模态且设了 truncate_prompt_tokens"]
     ED --> OUT["EngineInput<br/>附 arrival_time"]
     EM --> OUT
     TR --> OUT
@@ -507,13 +507,13 @@ flowchart TB
 
 > **读图方法：** 第一遍只看最左的主干：入口取时间、进入 `render_prompts` 或 `render_messages`、逐个 tokenize、并入额外字段、`process_for_engine`、得到 `EngineInput`。
 > 第二遍再看分支：`render_chat` 比 `render_cmpl` 多一步 `render_messages`，并多并入一个 `media_io_kwargs`；tokenize 框里，已经是 token ids 的输入跳过编码，
-> 只有 echo 之类需要文本回显时才会在截断之后反解；最后一段按输入类型分三路，多模态输入还要在 placeholder 展开后再校一次截断，因为一个 placeholder 可能展开成很多 token。
+> 只有 echo 之类需要文本回显时才会在截断之后反解；最后一段按输入类型分三路，`_truncate_expanded_prompt` 只在输入是多模态、并且设了 `truncate_prompt_tokens` 时才会真正再截一次，因为一个 placeholder 可能展开成很多 token，把长度重新顶过上限（其它情况函数直接返回，`base.py:1108-1112`）。
 
 图中每个框都对应固定 commit 里的真实函数（`vllm/renderers/base.py` @ `05caae03`）：`render_cmpl` `:1290`（入口取 `arrival_time` `:1298`）、`render_chat` `:1342`、
 `render_prompts` `:553`（空列表检查 `:556-559`）、`render_messages` `:590`、`tokenize_prompts` `:835`、
 `_tokenize_singleton_prompt` `:711-738`（编码前截断与偏移修正 `:722-727`，编码后截断 `:729`，截断后反解 `:733-738`）、`_apply_prompt_extras` `:862`
 （`render_chat` 并入 `media_io_kwargs` 在 `:1369-1371`）、`process_for_engine` `:1246`（`encoder_prompt` 分支 `:1255`，`arrival_time` 写入 `:1262`）、
-`_process_singleton` `:1154`（embeds 分支、`_truncate_expanded_prompt` `:1168`）、`_process_enc_dec` `:1197`。
+`_process_singleton` `:1154`（embeds 分支、调用 `_truncate_expanded_prompt` `:1168`；函数本身 `:1090`，仅多模态且设了 `truncate_prompt_tokens` 时才截，`:1108-1112`）、`_process_enc_dec` `:1197`。
 
 渲染阶段的客户端错误也统一了类型：空 prompt、`multi_modal_uuids` 缺项或长度不符、
 `prompt_embeds` 开关/形状错误，原先抛 `ValueError`，现在抛带 `parameter` 字段的
@@ -753,12 +753,12 @@ $$
 **白话：**一个 DP rank 里的模型被切成 TP、PP、PCP 三个方向，每个切片落在一个 worker 进程上，所以进程数是三个方向路数的乘积。
 
 **其中：**$\mathrm{TP}$、$\mathrm{PP}$、$\mathrm{PCP}$ 分别是 tensor parallel、pipeline parallel、prefill context parallel 的路数，都是无单位正整数；
-$W_{\mathrm{engine}}$ 是一个 DP rank 的 world size（个 worker）；它不含 API 进程和 EngineCore 进程；DCP 不增加进程，所以不在乘积里。
+$W_{\mathrm{engine}}$ 是一个 DP rank 的 world size（个 worker）；$W_{\mathrm{all\_dp}}=W_{\mathrm{engine}}\times\mathrm{DP}$ 是所有 DP rank 的 worker 总数（本书记号，见符号表 §1.5）；两者都不含 API 进程和 EngineCore 进程；DCP 不增加进程，所以不在乘积里。
 
 **怎么算出来：**三个方向相互独立：先沿 TP 切成 $\mathrm{TP}$ 份，每一份再沿 PP 切成 $\mathrm{PP}$ 个 stage，每个 stage 再沿 PCP 切成 $\mathrm{PCP}$ 份，所以总份数是连乘，每份一个 rank、一个 worker 进程。
 算例（教学数字）：$\mathrm{TP}=4$、$\mathrm{PP}=2$、$\mathrm{PCP}=1$ 时 $W_{\mathrm{engine}}=4\times2\times1=8$，
 单节点上这个引擎就是 1 个 EngineCore 进程加 8 个 worker 进程；若还有 $\mathrm{DP}=2$，就是 2 个这样的引擎（各有自己的 EngineCore 和 executor），
-全部 worker 是 $W_{\mathrm{engine}}\times\mathrm{DP}=16$ 个。多节点时一个 DP rank 的 worker 分布在 `nnodes_within_dp` 个节点上，每个节点只起 $W_{\mathrm{engine}}/\mathrm{nnodes\_within\_dp}$ 个（`local_world_size`）。
+全部 worker 是 $W_{\mathrm{all\_dp}}=W_{\mathrm{engine}}\times\mathrm{DP}=16$ 个。多节点时一个 DP rank 的 worker 分布在 `nnodes_within_dp` 个节点上，每个节点只起 $W_{\mathrm{engine}}/\mathrm{nnodes\_within\_dp}$ 个（`local_world_size`）。
 
 **核对：**`ParallelConfig.__post_init__` 把 `world_size` 赋为 `pipeline_parallel_size * tensor_parallel_size * prefill_context_parallel_size`
 （`vllm/config/parallel.py:1062-1066`）；`MultiprocExecutor._init_executor` 断言 `world_size == tp_size * pp_size * pcp_size`
@@ -1375,7 +1375,7 @@ sequenceDiagram
 ```mermaid
 flowchart TB
     subgraph API["API Server 进程 (asyncio)"]
-        H["generate 并发 task<br/>HTTP 请求"] --> ADM{"check_admission<br/>唯一的拒绝点"}
+        H["generate 并发 task<br/>HTTP 请求"] --> ADM{"check_admission<br/>唯一的容量拒绝点"}
         ADM -- "超限" --> REJ["QueueOverflowError<br/>MaxQueuedTokensError"]
         ADM -- "通过" --> OP["OutputProcessor<br/>request_states"]
         OP --> CL["AsyncMPClient<br/>add_request_async"]
@@ -1407,12 +1407,13 @@ flowchart TB
 > `OutputProcessor`、经虚线（跨进程 ZMQ）进入 EngineCore 的 `input_queue`，由 busy loop 交给 Scheduler。
 > 再沿回程看输出：左侧 EngineCore 里的 `output_queue` → ZMQ → 右下 client 的 `outputs_queue` → `output_handler` → 每请求的 `RequestOutputCollector` → 回到顶部的 `generate`。
 > 颜色只表示容量性质：红色是拒绝点；蓝色是没有容量上限的队列（只会积压，不会拒绝）；黄色是各自有约束的位置（Scheduler 由 token/KV 预算限制谁前进，
-> Collector 是单槽并入而不是队列，ShmRingBuffer 写满时写端等待读端）。从 `OP` 指向 `check_admission` 的那条点线表示：两个计数读的是前端 `OutputProcessor` 里的状态，不是 EngineCore 里的 waiting 数。
+> Collector 是单槽并入而不是队列，ShmRingBuffer 写满时写端等待读端）。从 OP 指向 check_admission 的点线表示：排队 token 数读的是前端 OutputProcessor 里的状态；请求数在没有共享计数时也读这里（有 mp_admission_counters 时读共享计数）。两者都不是 EngineCore 里的 waiting 数。
 
 图上的几个事实都能在固定 commit 里找到：
 
 - `check_admission` 在 `n=1` 时由 `AsyncLLM._add_request` 在登记 `OutputProcessor` 之前调用（`vllm/v1/engine/async_llm.py:592`），
-  `n>1` 时由 `AsyncLLM.add_request` 的扇出路径在登记所有 child 之前调用（`:565`）；超限抛出的两个异常对应 HTTP 503（`:326-396` 的 docstring）。
+  `n>1` 时由 `AsyncLLM.add_request` 的扇出路径在登记所有 child 之前调用（`:565`）；容量超限抛出的 `QueueOverflowError`、`MaxQueuedTokensError` 对应 HTTP 503（docstring 见 `:327-354`）。
+  开启 fault tolerance 且引擎不健康时，同一个函数还会先抛 `EngineFaultedError`（`:355-364`），所以图上标的是“唯一的容量拒绝点”，不是唯一会抛错的位置。
 - 本地回退用的请求数是 `OutputProcessor.request_states` 的个数（`vllm/v1/engine/output_processor.py:576-577`），排队 token 数是其中仍在 prefill 的请求的 `prompt_len` 之和（`:582-592`）。
 - `input_queue` 与 `output_queue` 都是不带 `maxsize` 的 `queue.Queue`（`vllm/v1/engine/core.py:1362-1363`）；
   client 的 `outputs_queue` 是不带 `maxsize` 的 `asyncio.Queue`（`vllm/v1/engine/core_client.py:1209`，同步 client 在 `:1008` 是 `queue.Queue`）。
@@ -1421,7 +1422,7 @@ flowchart TB
 - `RequestOutputCollector` 只有一个 `output` 槽：生产者领先时，`put` 把新输出并入已有的那一个（`RequestOutput.add`，`aggregate` 只在 delta 模式为真，
   否则用新输出替换同序号的旧输出），消费者 `get` 取走并清空（`vllm/v1/engine/output_processor.py:54-100`，`vllm/outputs.py:211-255`）。
 - Engine→Worker 的广播走 `MessageQueue`；写端 `acquire_write` 发现下一个槽还没被所有 reader 读完就循环等待（`vllm/distributed/device_communicators/shm_broadcast.py:732-760`），
-  槽数默认是 10（`MessageQueue.__init__` 的 `max_chunks: int = 10`，`:507`）。这是整条路径上唯一会让写端真正等待的位置，细节见第 03 章。
+  槽数默认是 10（`MessageQueue.__init__` 的 `max_chunks: int = 10`，`:507`）。这是这张图里唯一会让写端真正等待的位置（Worker 回 EngineCore 的 response 队列也是同一种 ring buffer，见第 03 章）。
 
 所以“满了怎么办”在不同位置的答案不一样：`check_admission` 满了是**拒绝**，没有上限的队列是**积压**（内存增长、延迟变长，但不报错），
 Collector 是**合并**，ring buffer 是**让写端等**。排查延迟时，先问请求卡在哪一类位置，再去看对应的指标。
@@ -1540,14 +1541,26 @@ online stream:
 真实 `LLM.generate` 用递增数值 ID 记录输入顺序，最终按该数值排序；本项目教学程序
 允许自定义外部 ID，因此需要另记提交序号。两种实现的目标都是保持输入顺序。
 
-v0.32.0 不再把完整 `max_tokens` 从上下文窗口中预留。必须分清三个边界：
+v0.32.0 不再把完整 `max_tokens` 从上下文窗口中预留。必须分清三个边界：入口校验 prompt 本身；在线路径用 `get_max_tokens` 决定输出上限；执行侧 `check_stop` 按长度结束。随书模型把后两处收成同一个教学上限：
 
-- 入口校验 prompt 本身；生成路径在 prompt 长度等于 `max_model_len` 时也拒绝，因为至少还需一个输出 token。
-- `max_tokens` 是输出数量上限，不是保证生成的数量。在线 `get_max_tokens` 会取请求/默认上限、剩余窗口、覆盖值和平台限制的最小值；离线 `InputProcessor` 只在未指定上限时补默认值。
-- 执行侧 `check_stop` 分别检查总 token 数达到 `max_model_len`，或输出 token 数达到请求上限；任一成立都会结束。
+$$
+\min\bigl(\mathtt{max\_tokens},\,\mathtt{max\_model\_len}-\texttt{prompt\_len}\bigr)
+$$
 
-例如窗口为 5、prompt 为 4、请求 `max_tokens=100`，并不因“4+100>5”拒绝，而最多生成 1 个 token。
-随书模型保留原请求上限，在 Core 的确定性响应计划中取两种停止边界的最小值；这是等价的教学简化，
+**白话：**一次生成最多能写出多少个新 token，取决于“请求自己要多少”和“窗口里还剩多少”里更小的那个。窗口已经装不下完整请求上限时，不会在入口按 $\texttt{prompt\_len}+\mathtt{max\_tokens}$ 直接拒绝，而是把输出上限削到剩余窗口。
+
+**其中：**$\mathtt{max\_tokens}$ 是请求（或默认）给出的输出数量上限（个 token）；$\mathtt{max\_model\_len}$ 是模型上下文窗口（个 token）；$\texttt{prompt\_len}$ 是已经占用窗口的 prompt 长度（个 token）。三者都是无单位的非负整数。
+
+**怎么算出来：**执行侧 `check_stop` 分别检查总 token 数是否达到 `max_model_len`、输出 token 数是否达到请求上限，任一成立就结束（`vllm/v1/core/sched/utils.py:114-119`）。因此还能写出的个数不会超过剩余窗口 $\mathtt{max\_model\_len}-\texttt{prompt\_len}$，也不会超过 $\mathtt{max\_tokens}$，教学上取二者最小。
+在线 `get_max_tokens` 在此之外还会与覆盖值 `override_max_tokens`、平台限制 `platform_max_tokens` 一起取最小；若设了 `truncate_prompt_tokens`，参与相减的输入长度还会先被截到该上限（`vllm/entrypoints/serve/utils/api_utils.py:234-270`）。
+离线 `InputProcessor` 只在请求未指定 `max_tokens` 时，把它补成 `max_model_len - prompt_len`（`vllm/v1/engine/input_processor.py:471-475`）。
+算例（教学数字）：窗口为 5、prompt 为 4、请求 $\mathtt{max\_tokens}=100$，则 $\min(100,\,5-4)=1$，并不因“$4+100>5$”拒绝，而最多生成 1 个 token。
+
+**单位检查：**三项都是 token 个数，相减得到剩余个数，再与请求上限取最小，单位一致。
+
+**核对：**入口校验只拒绝“prompt 本身超过窗口”，以及生成路径上 prompt 长度恰好等于 `max_model_len` 的情况（至少还需 1 个输出 token 的位置都没有，`vllm/v1/engine/input_processor.py:563-597`，生成任务在 `:588-597`）。
+`check_stop` 的长度条件是 `request.num_tokens >= max_model_len or request.num_output_tokens >= request.max_tokens`（`:114-119`）。
+随书模型保留原请求上限，在 Core 的确定性响应计划中取这两种停止边界的最小值；这是等价的教学简化，
 不模拟生产 tokenization、EOS 或异步停止的全部路径。Core 也保留教学用终态记录，不模拟完整后台资源回收。
 
 [源码] `vllm/entrypoints/serve/utils/api_utils.py` - `get_max_tokens`
