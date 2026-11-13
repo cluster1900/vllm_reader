@@ -133,7 +133,7 @@ Transformer 结构，kernel 通常只实现其中一个局部算子。
 temperature 或上下文长度，也可以从术语表与 1.1 节开始，不要求学过深度学习课程。第一次阅读只需
 回答三个问题：数据长什么样、一次 forward 做什么、为什么生成必须重复 forward。
 
-遇到向量和矩阵公式时，先看 shape，不要先做代数推导。例如 `[T, D] -> [T, V]`
+遇到向量和矩阵公式时，先看 shape，不要先做代数推导。例如 `[T, D] -> [T, vocab_size]`
 首先表示“每个待计算 token 的隐藏向量被变成一组词表分数”。公式中的求和、softmax
 和旋转随后只是解释这些 shape 内部怎样计算。书中的小数字例子用于建立直觉，不要求
 你手算真实模型的 4096 维向量。
@@ -203,10 +203,26 @@ $$
 p_i = \frac{e^{z_i}}{\sum_j e^{z_j}}
 $$
 
-这里的 `z` 是形状 `[V]` 的分数向量，`V` 是词表大小；`z_i` 是候选 `i` 的分数，
-`e` 是自然指数的底数，分母把所有候选的指数分数相加。`p_i` 是无单位概率，所有
-`p_i` 相加为 1。例如两个候选分数相同，就各分到 1/2 的概率。实际高性能 sampler 不一定显式构造完整
-softmax；数学上的概率定义与实现是否物化整张概率表是两回事。
+**白话：**softmax 把一串可正可负的分数变成一串加起来等于 1 的正数：分数越大，分到的比例越大；
+比例只取决于分数之间的差距，不取决于分数本身有多大。
+
+**其中：**$z$ 是形状 `[vocab_size]` 的分数向量，词表大小写作 $\lvert\mathcal V\rvert$（在张量形状里写 `vocab_size`）；
+$z_i$ 是候选 $i$ 的 logit，$j$ 遍历全部候选；$e\approx2.718$ 是自然指数的底数；$p_i$ 是无单位的概率。
+
+**怎么算出来：**
+
+1. 指数 $e^{z_i}$ 把任意实数变成正数，并保持大小顺序：$z_i$ 越大，$e^{z_i}$ 越大；
+2. 要让所有概率相加为 1，只需把每个正数除以它们的总和 $\sum_j e^{z_j}$，这就是分母；
+3. 验证：$\sum_i p_i=\dfrac{\sum_i e^{z_i}}{\sum_j e^{z_j}}=1$。
+
+算例：取 $z=[4,2,1,0]$（后文 temperature 一节用同一组数）。$e^4\approx54.598$、$e^2\approx7.389$、$e^1\approx2.718$、$e^0=1$，
+总和约 65.705，所以 $p_0\approx54.598/65.705\approx0.8310$。两个候选分数相同时 $p=e^{z}/(2e^{z})=1/2$，各占一半。
+
+**核对：**随书 `softmax()`（`examples/ch01_minimal_inference.py:46-50`）按这个定义实现，只是先减去最大值（原因见 1.3 节“稳定 softmax”）；
+上面的 0.8310 与 temperature 一节 $\tau=1$ 的那一列一致，由 `examples/ch01_numerical_walkthrough.py` 与
+`tests/test_ch01_numerical_walkthrough.py` 固定。
+
+实际高性能 sampler 不一定显式构造完整 softmax；数学上的概率定义与实现是否物化整张概率表是两回事（MRV2 的做法见 1.5 节）。
 
 ## 1.2 Decoder-only Transformer 的最小结构
 
@@ -259,13 +275,33 @@ $$
 \operatorname{MLP}(x) = W_{\mathrm{down}}\bigl(\operatorname{SiLU}(W_{\mathrm{gate}}x) \odot W_{\mathrm{up}}x\bigr)
 $$
 
-`x` 是一个 token 的列向量，shape 为 `[D]`；`D` 是 hidden size。设 MLP 中间宽度为
-`I`，则 `W_gate`、`W_up` 的 shape 为 `[I,D]`，`W_down` 为 `[D,I]`。两个投影先把
-`[D]` 变成 `[I]`，`⊙` 把对应位置相乘，最后投影回 `[D]`，便于与输入相加。
-SiLU 是平滑的非线性函数 `u/(1+exp(-u))`，可理解为按输入大小调节通过量的门。
-本式用列向量；下一节为了展示多 token batch，改用每行一个 token 的矩阵表示。源码中 `gate_proj` 与 `up_proj` 被合并为
-`MergedColumnParallelLinear`，这是执行优化和 Tensor Parallel 布局，不改变上述
-数学角色。
+**白话：**先把一个 token 的向量同时送进两条路：一条经过 SiLU 变成“门”（各维度放行多少），
+另一条是“内容”；门和内容逐维相乘，再投影回原来的宽度。它只在每个 token 自己的向量上做运算，不混合不同位置。
+
+**其中：**$x$ 是一个 token 的列向量（本节局部字母），shape `[D]`，$D$ 是 hidden size；
+$D_{\mathrm{ff}}$ 是 MLP 中间宽度，$W_{\mathrm{gate}}$、$W_{\mathrm{up}}$ 的 shape 为 `[D_ff,D]`，$W_{\mathrm{down}}$ 为 `[D,D_ff]`；
+$\odot$ 是对应位置相乘；SiLU 逐元素计算 $\operatorname{SiLU}(u)=u/(1+e^{-u})$，$u$ 是任一标量输入（本节局部字母），
+可理解为按输入大小调节通过量的门：$u$ 很大时几乎原样通过，$u$ 很负时接近 0。
+
+**怎么算出来：**
+
+1. gate 路：$W_{\mathrm{gate}}x$ 把 `[D]` 变成 `[D_ff]`，再逐元素过 SiLU，得到 `[D_ff]` 的门值；
+2. up 路：$W_{\mathrm{up}}x$ 同样把 `[D]` 变成 `[D_ff]`，是被门调节的内容；
+3. $\odot$ 逐位置把门值乘到内容上，shape 仍是 `[D_ff]`；
+4. $W_{\mathrm{down}}$ 把 `[D_ff]` 投回 `[D]`，这样 MLP 的输出才能与输入做 residual 相加。
+
+教学数字算例：$D=2$、$D_{\mathrm{ff}}=1$，$W_{\mathrm{gate}}=[1,1]$、$W_{\mathrm{up}}=[1,-1]$、$W_{\mathrm{down}}=[2,3]^{\top}$，输入 $x=[1,2]$。
+gate 路 $1\times1+1\times2=3$，$\operatorname{SiLU}(3)=3/(1+e^{-3})\approx2.858$；up 路 $1\times1+(-1)\times2=-1$；
+逐位置相乘得 $2.858\times(-1)=-2.858$；再乘 $W_{\mathrm{down}}$ 得输出 $[2\times(-2.858),\,3\times(-2.858)]\approx[-5.715,\,-8.573]$，
+shape 从 `[1]` 回到 `[2]`。
+
+**核对：**`LlamaMLP`（`vllm/model_executor/models/llama.py:82-122`）里 `gate_up_proj` 是输出宽度 `[intermediate_size]*2` 的合并列并行线性层
+（`:95-102`），一次算出 gate 与 up 两段；`SiluAndMul`（`vllm/model_executor/layers/activation.py:116`，计算式在 `:144`）
+对结果的前半 `x[..., :d]` 做 SiLU、乘后半 `x[..., d:]`；最后是 `down_proj`（`:103-111`）。构造函数只接受 `hidden_act == "silu"`（`:112-115`）。
+随书 `ToyDecoder._finish_layer` 的 `silu(left) * right`（`examples/ch01_minimal_inference.py:173`）是同一个计算。
+
+本式用列向量；下一节为了展示多 token batch，改用每行一个 token 的矩阵表示（权重相应转置）。源码中 `gate_proj` 与 `up_proj` 被合并为
+`MergedColumnParallelLinear`，这是执行优化和 Tensor Parallel 布局，不改变上述数学角色。
 
 ## 1.3 Self-Attention 与张量形状
 
@@ -319,25 +355,95 @@ $$
 - **Key：** 当前 token 提供什么可匹配的索引特征。
 - **Value：** 匹配后真正被聚合的内容。
 
+**白话：**同一份 hidden state $X$ 分别乘三个不同的权重矩阵，得到三种用途不同的向量：拿去“提问”的 $Q$、拿去“被匹配”的 $K$、拿去“被取走”的 $V$。
+
+**其中：**$X$ 是这一层 `input_layernorm`（RMSNorm）之后的 hidden state，shape `[T,D]`，每行是一个 token；
+$W_Q$、$W_K$、$W_V$ 是训练得到的权重。先看单个 head：用“每行一个 token”的写法，$W_Q$、$W_K$ 的 shape 是 `[D,d_h]`，$W_V$ 是 `[D,d_v]`，
+于是 $Q$ 是 `[T,d_h]`、$K$ 是 `[T,d_h]`、$V$ 是 `[T,d_v]`；$d_h$ 是 Query/Key 的单 head 宽度，$d_v$ 是 Value 的单 head 宽度（Llama 里两者相等）。
+真实模型有多个 head，每个 head 各有一份这样的切片，合并成一个大矩阵一次算出（见下文“Multi-Head 与 GQA”）。
+
+**怎么算出来：**
+
+1. 取 $X$ 的第 $t$ 行 $x_t$（$D$ 个数），乘 $W_Q$ 的每一列做点积（$D$ 次乘加），得到 $q_t$ 的一个分量；$d_h$ 个分量合起来就是 $q_t=x_tW_Q$。$K$、$V$ 同理。
+2. 因此 $Q$、$K$、$V$ 的第 $t$ 行**只依赖第 $t$ 个 token**，与其他行无关：后来的 token 不会改变历史行的 $k_t$、$v_t$。这是 KV Cache 能成立的前提（1.7 节）。
+3. 整个矩阵一起乘，就是把 $T$ 个 token 各做一遍：`[T,D]`·`[D,d_h]`=`[T,d_h]`。
+4. 三个权重互相独立，所以 vLLM 把它们拼成一个 `qkv_proj` 一次乘出，再按 `q_size, kv_size, kv_size` 切开。
+
+教学数字算例（与下一小节的数字一致）：取 $D=d_h=2$，三个 token 的 hidden state 为 $[1,0]$、$[0,1]$、$[1,1]$。
+若 $W_K=\begin{bmatrix}1&0\\0&1\end{bmatrix}$，则 $K$ 的三行就是 $[1,0]$、$[0,1]$、$[1,1]$，正是下一小节的 $K$。
+若 $W_Q=\begin{bmatrix}1&0\\0&0.5\end{bmatrix}$，当前（第 3 个）token 的 $q=[1,1]W_Q=[1\times1+1\times0,\ 1\times0+1\times0.5]=[1,0.5]$，正是下一小节的 $Q$。
+$V$ 由另一个 $W_V$ 得到，下一小节直接给出结果。
+
+**核对：**`LlamaAttention.forward`（`vllm/model_executor/models/llama.py:224-233`）依次执行 `qkv, _ = self.qkv_proj(hidden_states)`（`:229`）、
+`q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)`（`:230`）、`q, k = self.rotary_emb(positions, q, k)`（`:231`）和 `self.attn(q, k, v)`（`:232`）；
+所以 Llama 里 $Q$、$K$ 在投影之后还要过一次 RoPE（1.4 节），$V$ 不过。随书 `ToyDecoder._qkv`（`examples/ch01_minimal_inference.py:150-156`）用 `matvec(self.wq, normalized)` 等三次投影，同样先 RMSNorm、再投影、再对 $Q$、$K$ 做旋转。
+
 单个 head 的 attention 为：
 
 $$
 \begin{aligned}
 &\operatorname{Attention}(Q,K,V)\\
-&\qquad=\operatorname{softmax}\!\left(\frac{QK^{\mathsf{T}}}{\sqrt{D_h}}+M\right)V.
+&\qquad=\operatorname{softmax}\!\left(\frac{QK^{\top}}{\sqrt{d_h}}+\mathrm{Mask}\right)V.
 \end{aligned}
 $$
 
-先取单 head、无 batch 的例子：若本轮有 `Nq` 个 Query、可读取 `Nk` 个历史及当前
-位置，则 `Q:[Nq,D_h]`、`K:[Nk,D_h]`、`V:[Nk,D_v]`。上标 `T` 表示转置，
-所以 `QK^T` 是 `[Nq,Nk]` 的相关性表；softmax 对每一行归一化，乘 `V` 后得到
-`[Nq,D_v]`。`D_h`、`D_v` 分别是每个 Key/Query 和 Value 向量的长度。`M` 与分数表
-同形状，允许位置填 0，屏蔽位置填负无穷；这些分数和权重没有时间或字节单位。
+**白话：**每个 Query 拿去和所有“可见”的 Key 比相似度，把相似度用 softmax 变成加起来为 1 的权重，再按权重把对应的 Value 混合起来，得到这个 Query 的输出。
 
-**为什么除以 $\sqrt{D_h}$？** 先看一个简化假设：$q,k$ 的所有分量相互独立，
-均值为 0、方差为 1。点积 $q\cdot k=\sum_i q_i k_i$ 的均值为 0、方差为 $D_h$；
-除以 $\sqrt{D_h}$ 后，方差变回 1。这解释了缩放怎样抵消维度增长带来的分数尺度变化。
-例如 $D_h=128$ 时，未缩放分数的标准差约为 11.3；这不是实际模型分数范围的承诺。
+**其中：**先取单 head、无 batch 的例子：若本轮有 $N_q$ 个 Query、可读取 $N_k$ 个历史及当前位置，则 $Q$ 是 `[N_q,d_h]`、$K$ 是 `[N_k,d_h]`、$V$ 是 `[N_k,d_v]`；
+上标 $\top$ 表示转置，$K^{\top}$ 是 `[d_h,N_k]`；$\mathrm{Mask}$ 与分数表同形状 `[N_q,N_k]`，允许位置填 0，屏蔽位置填 $-\infty$；
+softmax 对分数表的每一行（沿 key 方向）归一化。分数和权重都没有时间或字节单位。
+
+**怎么算出来：**
+
+1. 打分：$(QK^{\top})_{ij}=q_i\cdot k_j$，即第 $i$ 个 Query 与第 $j$ 个 Key 的点积；一次矩阵乘法得到全部 $N_q\times N_k$ 个分数，shape `[N_q,N_k]`。
+2. 缩放：每个分数除以 $\sqrt{d_h}$（原因见下一段）。
+3. 加 Mask：不可见位置加 $-\infty$，因为 $e^{-\infty}=0$，softmax 后权重恰为 0；可见位置加 0，分数不变。
+4. softmax：对每一行取指数再除以该行之和，行内权重相加为 1。
+5. 聚合：权重表 `[N_q,N_k]` 乘 $V$ 的 `[N_k,d_v]`，输出第 $i$ 行是 $\sum_j a_{ij}v_j$，即按权重混合 Value 的各行，shape `[N_q,d_v]`。
+   输出与 $V$ 的量纲相同（本章的 $V$ 也没有单位）。
+
+下一小节用 3 个 Key 把这五步逐个数字算一遍。
+
+**核对：**`LlamaAttention.__init__` 里 `self.scaling = self.head_dim**-0.5`（`vllm/model_executor/models/llama.py:162`），并在构造通用 `Attention` 时作为缩放因子传入（`:212-215`）；
+随书 `ToyDecoder._finish_layer` 先算 `dot(query, key) / math.sqrt(...)`（`examples/ch01_minimal_inference.py:161-163`）、再 `softmax`（`:164`）、再按权重累加 Value（`:165-167`）。
+真实 backend 的 kernel 通常不物化 $\mathrm{Mask}$ 这张表，而是用 causal 参数和 metadata 达到同样的屏蔽效果（第 06 章）。
+
+```mermaid
+flowchart LR
+    X["X: hidden state [T, D]"] --> PQ["multiply by W_Q"]
+    X --> PK["multiply by W_K"]
+    X --> PV["multiply by W_V"]
+    PQ --> Q["Q: [N_q, d_h]"]
+    PK --> K["K: [N_k, d_h]"]
+    PV --> V["V: [N_k, d_v]"]
+    Q --> S["scores = Q times K transposed / sqrt(d_h): [N_q, N_k]"]
+    K --> S
+    S --> ADD["scores + Mask"]
+    M["Mask: 0 or -inf, [N_q, N_k]"] --> ADD
+    ADD --> A["softmax on each row: weights a, [N_q, N_k]"]
+    A --> O["weights times V: output [N_q, d_v]"]
+    V --> O
+```
+
+> **读图方法：** 这是单个 head 的 attention 数据流，只表达“Q、K、V 从哪来、怎样变成输出”。先看左边三条并行的投影线：它们读同一个 $X$，所以对本步的 token，Q、K、V 各有一行（prefill 时 $N_q=N_k=T$；decode 时 K、V 还要接上缓存里的历史行，所以 $N_k>N_q$）；
+> 再从 `scores` 往右走，依次是缩放、加 Mask、逐行 softmax、乘 V，每个方框的 shape 对应上面五步里的 shape。
+> 箭头是数据依赖，不是函数调用；图中省略了 Llama 在投影之后对 Q、K 做的 RoPE（见 1.4 节）和多个 head 的并行。
+
+**为什么除以 $\sqrt{d_h}$？**
+
+**白话：**$d_h$ 越大，点积的数值波动越大，softmax 容易“一边倒”；除以 $\sqrt{d_h}$ 把波动拉回到固定尺度。
+
+**其中：**$q,k$ 是 Query、Key 中的一行（长度 $d_h$），$q_i$、$k_i$ 是它们的第 $i$ 个分量（$i$ 为局部下标）。
+
+**怎么算出来：**先看一个简化假设：$q,k$ 的所有分量相互独立，均值为 0、方差为 1。
+
+1. 一个乘积项 $q_ik_i$：两个独立零均值变量的乘积，均值为 0，方差为 $\mathbb E[q_i^2]\,\mathbb E[k_i^2]=1\times1=1$；
+2. 点积 $q\cdot k=\sum_i q_ik_i$ 是 $d_h$ 个相互独立的乘积项之和，均值为 0，方差为 $d_h\times1=d_h$（独立变量的方差相加）；
+3. 除以 $\sqrt{d_h}$ 把方差乘以 $1/d_h$，变回 1。这解释了缩放怎样抵消维度增长带来的分数尺度变化。
+
+例如 $d_h=128$ 时，未缩放分数的标准差是 $\sqrt{128}\approx11.3$；缩放之后回到 1。这不是实际模型分数范围的承诺。
+
+**核对：**vLLM 的 Llama 路径就是这个缩放：`self.scaling = self.head_dim**-0.5`（`vllm/model_executor/models/llama.py:162`）。
 
 缩放可缓解 softmax 过度集中，但不保证注意力始终平缓，也不保证训练梯度一定通畅。
 真实模型的 Q/K 来自学习到的投影，并不必然符合上述独立、单位方差假设。
@@ -347,6 +453,14 @@ $$
 还应区分**分数缩放**与**指数运算的数值稳定性**。稳定 softmax 会先减去最大分数，
 例如 `[1000,999]` 先变为 `[0,-1]`，再求指数；不能声称只靠除以维度平方根就防止溢出。
 本章教学函数也采用减最大值的方法。
+
+**白话：**softmax 里每个分数同时减去同一个数，结果不变；减去最大值只是为了不让指数溢出。
+
+**怎么算出来：**把分子分母同乘 $e^{-c}$：$\dfrac{e^{z_i}}{\sum_j e^{z_j}}=\dfrac{e^{z_i-c}}{\sum_j e^{z_j-c}}$（$c$ 是任意常数，这里取最大分数）。
+算例：$[1000,999]$ 取 $c=1000$ 得 $[0,-1]$，$e^0=1$、$e^{-1}\approx0.368$，权重为 $[1/1.368,\ 0.368/1.368]\approx[0.731,\ 0.269]$；
+直接算 $e^{1000}$ 会超出 float32（上限约 $e^{88.7}$）和 float64（上限约 $e^{709.8}$）的表示范围，得到 Inf。
+
+**核对：**随书 `softmax()`（`examples/ch01_minimal_inference.py:46-50`）先 `max(values)` 再减。
 
 [源码] `vllm/model_executor/models/llama.py` - `LlamaAttention.__init__` 中的 `scaling`
 
@@ -364,21 +478,45 @@ V &= \begin{bmatrix}1.0&0.0\\0.0&2.0\\2.0&1.0\end{bmatrix}.
 \end{aligned}
 $$
 
-$K$、$V$ 的三行分别对应位置 0、1、2，记作 $K_0,K_1,K_2$ 与 $V_0,V_1,V_2$。
+**白话：**这是一个为手算而编的最小例子：一个 Query 去看三个位置，每个位置有一个 Key 和一个 Value。
 
-第一步，计算缩放点积：
+**其中：**这些都是**教学数字**，不是真实模型的取值。$Q$ 是 `[N_q,d_h]`=`[1,2]`（只有当前这一个 Query，$N_q=1$）；$K$ 是 `[N_k,d_h]`=`[3,2]`、$V$ 是 `[N_k,d_v]`=`[3,2]`
+（$N_k=3$，$d_h=d_v=2$）。$K$、$V$ 的三行分别对应位置 0、1、2，记作 $K_0,K_1,K_2$ 与 $V_0,V_1,V_2$。
+
+**怎么算出来：**当前 token 是第 3 个，位置 0、1、2 都不晚于它（包括它自己），所以这一行 $\mathrm{Mask}$ 全是 0，可以直接省掉；
+真实模型里，$K$ 的前几行来自缓存，最后一行由当前 token 现算。三个 Key 选成 $[1,0]$、$[0,1]$、$[1,1]$，是为了让它们与 $Q$ 的点积各不相同。
+
+**核对：**这组数字与 `examples/ch01_numerical_walkthrough.py` 的 `attention_walkthrough()` 使用的 `query`、`keys`、`values` 相同，
+`tests/test_ch01_numerical_walkthrough.py` 固定了下面的输出。
+
+第一步，计算缩放点积：先对每个 Key 求点积 $Q\cdot K_j$（对应分量相乘再相加），再除以 $\sqrt{d_h}=\sqrt{2}\approx1.4142$：
 
 | Key | 原始点积 $Q\cdot K$ | 除以 $\sqrt{2}$ 后的 score |
 |---|---:|---:|
-| K0 | 1.0 | 0.7071 |
-| K1 | 0.5 | 0.3536 |
-| K2 | 1.5 | 1.0607 |
+| K0 | $1.0\times1.0+0.5\times0.0=1.0$ | 0.7071 |
+| K1 | $1.0\times0.0+0.5\times1.0=0.5$ | 0.3536 |
+| K2 | $1.0\times1.0+0.5\times1.0=1.5$ | 1.0607 |
 
 第二步，对 scores 做 softmax，得到权重向量 $a$：
 
 $$
 a\approx[0.3199,\;0.2246,\;0.4555].
 $$
+
+**白话：**softmax 把三个分数变成三个加起来为 1 的权重：分数最高的 K2 权重最大，K1 最小。
+
+**其中：**$a$ 是长度 $N_k=3$ 的权重向量，$a_j$ 是第 $j$ 个 Key 的权重（无单位，$a_0+a_1+a_2=1$）。
+
+**怎么算出来：**
+
+1. 对三个 score 取指数：$e^{0.7071}\approx2.0281$、$e^{0.3536}\approx1.4241$、$e^{1.0607}\approx2.8883$；
+2. 求和：$2.0281+1.4241+2.8883=6.3405$；
+3. 每个指数除以总和：$2.0281/6.3405\approx0.3199$、$1.4241/6.3405\approx0.2246$、$2.8883/6.3405\approx0.4555$。
+
+实现里会先减去最大分数 1.0607，三个指数变成 $0.7022$、$0.4931$、$1$，总和 $2.1953$，得到同样的 $[0.3199,0.2246,0.4555]$（见上一节的“稳定 softmax”）。
+$0.3199+0.2246+0.4555=1.0000$，满足归一化。
+
+**核对：**`attention_walkthrough()` 的 `probabilities`，由 `tests/test_ch01_numerical_walkthrough.py::test_attention_walkthrough` 检查权重之和为 1。
 
 第三步，用权重聚合 Value：
 
@@ -389,13 +527,22 @@ $$
 \end{aligned}
 $$
 
-这组数字可以通过 `examples/ch01_numerical_walkthrough.py` 复现。这里最容易混淆的
+**白话：**输出是三个 Value 行的加权平均：谁的权重大，输出就更像谁的 Value。
+
+**其中：**$\mathrm{output}$ 是这个 Query 的 attention 输出，长度 $d_v=2$；$V_0,V_1,V_2$ 是上面 $V$ 的三行。
+
+**怎么算出来：**按分量分别加权。第 0 个分量：$0.3199\times1.0+0.2246\times0.0+0.4555\times2.0=0.3199+0+0.9110=1.2309$；
+第 1 个分量：$0.3199\times0.0+0.2246\times2.0+0.4555\times1.0=0+0.4492+0.4555=0.9047$。
+没有单位；每个分量都落在对应 $V$ 列的最小值与最大值之间（第 0 列在 0 到 2 之间，第 1 列在 0 到 2 之间），因为权重非负且相加为 1。
+
+**核对：**`attention_walkthrough()` 的 `output`，测试断言 $[1.2309211\ldots,\ 0.9047402\ldots]$（`tests/test_ch01_numerical_walkthrough.py:26-27`）；
+这些数字也可以直接运行 `examples/ch01_numerical_walkthrough.py` 复现。这里最容易混淆的
 一点是：**Query/Key 决定权重，Value 决定被混合的内容。** Key 本身不会直接按权重
 相加成为 attention 输出。
 
 ```mermaid
 flowchart LR
-    Q[Query Q] --> Dot[Q dot K / sqrt Dh]
+    Q[Query Q] --> Dot[Q dot K / sqrt d_h]
     K[Keys K0 K1 K2] --> Dot
     Dot --> Weights[softmax weights]
     Weights --> Mix[weighted sum]
@@ -411,15 +558,70 @@ flowchart LR
 
 | Tensor | 教学形状 | vLLM attention 层内部常见形状 |
 |---|---|---|
-| Query | `[B,S,Hq,Dh]` | `[T,Hq,Dh]` |
-| Key | `[B,S,Hkv,Dh]` | `[T,Hkv,Dh]` |
-| Value | `[B,S,Hkv,Dh]` | `[T,Hkv,Dv]` |
-| Output | `[B,S,Hq,Dv]` | `[T,Hq*Dv]` |
+| Query | `[B,S,H_q,d_h]` | `[T,H_q,d_h]` |
+| Key | `[B,S,H_kv,d_h]` | `[T,H_kv,d_h]` |
+| Value | `[B,S,H_kv,d_v]` | `[T,H_kv,d_v]` |
+| Output | `[B,S,H_q,d_v]` | `[T,H_q*d_v]` |
+
+（表中 $H_q$、$H_{\mathrm{kv}}$ 是整个模型的 head 数；vLLM 一列是一张卡上的张量，所以 Tensor Parallel 下那里实际的 head 数是每卡数量：Query 侧为 $H_q/\mathrm{TP}$，KV 侧为 $H_{\mathrm{kv,local}}$（$H_{\mathrm{kv}}\ge\mathrm{TP}$ 时等于 $H_{\mathrm{kv}}/\mathrm{TP}$）；$\mathrm{TP}=1$ 时与全模型相同。Llama 里 $d_v=d_h$。）
 
 普通 Multi-Head Attention 中 $H_q=H_{\mathrm{kv}}$。Grouped-Query Attention（GQA）让多组
 query heads 共享较少的 KV heads，即 $H_{\mathrm{kv}}<H_q$。这样可以显著减少 KV Cache，
 也是容量公式必须使用 `num_key_value_heads` 而不是盲目使用
 `num_attention_heads` 的原因。
+
+**白话：**Query head 可以很多，但 Key/Value head 可以少：几个 Query head 共用同一份 K、V。共用得越多，要缓存的 K、V 就越少。
+
+**其中：**$H_q$ 是 Query head 数，$H_{\mathrm{kv}}$ 是 KV head 数；每个 KV head 被 $H_q/H_{\mathrm{kv}}$ 个 Query head 共享，这个比值必须是整数；
+$h$ 是 Query head 的序号（$0\le h<H_q$，本节局部字母）。
+
+**怎么算出来：**
+
+1. 把 $H_q$ 个 Query head 按序号**连续**分成 $H_{\mathrm{kv}}$ 组，每组 $H_q/H_{\mathrm{kv}}$ 个；
+2. 序号为 $h$ 的 Query head 落在第 $\lfloor h\,H_{\mathrm{kv}}/H_q\rfloor$ 组，就读第几号 KV head；
+3. $H_{\mathrm{kv}}=H_q$ 时每组 1 个，就是普通 Multi-Head；$H_{\mathrm{kv}}=1$ 时所有 Query head 共用一份 K、V（常称 MQA）。
+
+教学数字算例：$H_q=8$、$H_{\mathrm{kv}}=2$，每组 $8/2=4$ 个；Query head 5 落在第 $\lfloor5\times2/8\rfloor=\lfloor1.25\rfloor=1$ 组，读 KV head 1；
+Query head 0 到 3 读 KV head 0。要缓存的 K/V 只有普通 Multi-Head 的 $H_{\mathrm{kv}}/H_q=2/8=1/4$（后面的容量公式把这一点换算成字节）。
+
+**核对：**通用 `Attention` 在构造时断言 `num_heads % num_kv_heads == 0`（`vllm/model_executor/layers/attention/attention.py:350`）；
+Triton backend 取 `num_queries_per_kv = num_heads // num_kv_heads`（`vllm/v1/attention/backends/triton_attn.py:542`），
+kernel 里第 `kv_head_idx` 号 KV head 对应的 Query head 序号是 `kv_head_idx * num_queries_per_kv + (0 … num_queries_per_kv-1)`
+（`vllm/v1/attention/ops/triton_unified_attention.py:457`），即上面的“连续分组”。
+表中的形状来自 `Attention.forward` 的 `view(-1, num_heads, head_size)`、`view(-1, num_kv_heads, head_size)`、`view(-1, num_kv_heads, head_size_v)`
+（`attention.py:564-569`）以及输出宽度 `num_heads * head_size_v`（`attention.py:558`）。
+`LlamaAttention` 在 TP 下把两者各除以 TP 路数：`self.num_heads = total_num_heads // tp_size`（`llama.py:146`）、
+`self.num_kv_heads = max(1, total_num_kv_heads // tp_size)`（`llama.py:156`）。
+
+```mermaid
+flowchart LR
+    subgraph QH["Query heads: H_q = 8"]
+        q0["q head 0"]
+        q1["q head 1"]
+        q2["q head 2"]
+        q3["q head 3"]
+        q4["q head 4"]
+        q5["q head 5"]
+        q6["q head 6"]
+        q7["q head 7"]
+    end
+    subgraph KVH["KV heads: H_kv = 2 (cached)"]
+        kv0["KV head 0: K and V"]
+        kv1["KV head 1: K and V"]
+    end
+    q0 --> kv0
+    q1 --> kv0
+    q2 --> kv0
+    q3 --> kv0
+    q4 --> kv1
+    q5 --> kv1
+    q6 --> kv1
+    q7 --> kv1
+```
+
+> **读图方法：** 这是 GQA 的对应关系图（教学数字：8 个 Query head、2 个 KV head），只回答“哪个 Query head 读哪个 KV head”。左边每个方框是一个 Query head，右边每个方框是一份要缓存的 K/V；
+> 箭头表示“这个 Query head 用那个 KV head 的 K、V 做 attention”，同一个 KV head 前面有 $H_q/H_{\mathrm{kv}}=4$ 条箭头。
+> 把右边改成 8 个方框、一一对应就是普通 Multi-Head；改成 1 个方框就是 MQA。缓存里只存右边的方框，所以 KV Cache 随 $H_{\mathrm{kv}}$ 而不是 $H_q$ 增长。
 
 当前 `LlamaAttention.forward` 的顺序非常清晰：
 
@@ -457,8 +659,17 @@ causal attention 可见关系如下：
 softmax 后概率近似为 0。并行计算所有位置不等于允许看到未来。
 
 从矩阵还能直接看出计算量增长：第 0 行读取 1 个 Key，第 1 行读取 2 个，依次到第
-`S-1` 行读取 `S` 个，总数为 $1+2+\cdots+S=\frac{S(S+1)}{2}$。这就是 causal prefill 中
+$S-1$ 行读取 $S$ 个，总数为 $1+2+\cdots+S=\frac{S(S+1)}{2}$。这就是 causal prefill 中
 attention score 数量呈二次增长的来源。
+
+**白话：**causal 下每一行只数“可见”的格子，总数大约是整张 $S\times S$ 表的一半。
+
+**其中：**$S$ 是序列长度（token 数），也是表的行数和列数；第 $i$ 行（$i=0,\dots,S-1$）有 $i+1$ 个可见位置。
+
+**怎么算出来：**把求和正着写一遍、倒着写一遍，上下对齐相加：每一列的和都是 $S+1$，共 $S$ 列，所以两倍的总数是 $S(S+1)$，总数是 $\frac{S(S+1)}{2}$。
+算例：$S=4$ 时 $1+2+3+4=10$，公式给出 $4\times5/2=10$；数上面表里的“可见”格子也是 $1+2+3+4=10$，而整张表有 $4\times4=16$ 格。
+
+**核对：**上面的可见性表和 `figures/causal-mask.svg` 的下三角；随书 `attention_score_counts()`（`examples/ch01_minimal_inference.py:217-227`）逐步求的就是这个和（1.7 节“计算量直觉”）。
 
 ### 只有 token 含义还不够
 
@@ -466,7 +677,7 @@ attention score 数量呈二次增长的来源。
 难以区分顺序。Llama 使用 RoPE，把位置编码作用在 Query 和 Key 上，而不是简单加到
 Value 上。
 
-对向量中的一对维度 `(x_0, x_1)`，RoPE 可直观理解为按位置旋转：
+对向量中的一对维度 $(x_0,x_1)$，RoPE 可直观理解为按位置旋转：
 
 $$
 \begin{bmatrix}
@@ -481,8 +692,63 @@ x_0 \\ x_1
 \end{bmatrix}
 $$
 
-不同维度对使用不同频率，`theta` 随 position 变化。旋转后的 Q/K 点积包含相对位置
-关系。当前 Llama 路径中，`qkv_proj` 和 split 之后立即执行
+**白话：**把一对数当成平面上的一个点，绕原点转 $\theta$ 角。位置越靠后，转得越多；旋转不改变点到原点的距离，所以只把位置写进了方向，没有改变向量的“强度”。
+
+**其中：**$(x_0,x_1)$ 是 Query 或 Key 向量里的一对分量（本节局部字母），$(x'_0,x'_1)$ 是旋转后的值，$\theta$ 是旋转角（弧度）。
+一个 head 的 $d_h$ 维向量被分成 $d_h/2$ 对，第 $j$ 对（$j=0,\dots,d_h/2-1$，局部下标）在位置 $\mathrm{pos}$ 的旋转角是
+
+$$
+\theta=\mathrm{pos}\cdot\omega,\qquad \omega=\mathtt{rope\_theta}^{-2j/d_h}.
+$$
+
+这里 $\omega$ 是第 $j$ 对的“每个位置转多少”（本节局部字母），$\mathtt{rope\_theta}$ 是配置里的基数（源码名 `rope_theta`，缺省 10000，各模型的配置可以不同）。
+下面只讲最基本的 `rope_type="default"`；llama3、YaRN 等变体会改写 $\omega$，不在本章范围内。
+
+**怎么算出来：**
+
+1. 旋转矩阵从和角公式来：把点写成 $(x_0,x_1)=\lVert x\rVert(\cos\varphi,\sin\varphi)$（$\varphi$ 是它原来的角度，本节局部字母）。转 $\theta$ 之后角度变成 $\varphi+\theta$：
+   $x'_0=\lVert x\rVert\cos(\varphi+\theta)=x_0\cos\theta-x_1\sin\theta$，$x'_1=\lVert x\rVert\sin(\varphi+\theta)=x_0\sin\theta+x_1\cos\theta$，
+   这正是矩阵的两行；长度 $\lVert x\rVert$ 不变。
+2. 频率从快到慢：$j=0$ 时 $\omega=\mathtt{rope\_theta}^{0}=1$，每个位置转 1 弧度；$j$ 越大 $\omega$ 越小，最后一对只有 $\mathtt{rope\_theta}$ 分之一的量级，相隔很远的位置才看得出差别。
+3. 为什么点积里只剩相对位置：记 $R(\theta)$ 为上面的 $2\times2$ 旋转矩阵，转 $\alpha$ 再转回 $-\alpha$ 等于没转，所以 $R(\alpha)^{\top}=R(-\alpha)$，且 $R(\alpha)^{\top}R(\beta)=R(\beta-\alpha)$。
+   Query 在位置 $\mathrm{pos}_q$、Key 在位置 $\mathrm{pos}_k$ 时，同一对分量旋转后的点积是
+   $(R(\mathrm{pos}_q\,\omega)q)\cdot(R(\mathrm{pos}_k\,\omega)k)=q^{\top}R(\mathrm{pos}_q\,\omega)^{\top}R(\mathrm{pos}_k\,\omega)k=q^{\top}R\bigl((\mathrm{pos}_k-\mathrm{pos}_q)\,\omega\bigr)k$，
+   只取决于位置差 $\mathrm{pos}_k-\mathrm{pos}_q$，不取决于它们各自的绝对位置。这里 $q,k$ 是旋转前的这一对分量。
+
+算例一（$\omega$ 的取值）：$d_h=4$、$\mathtt{rope\_theta}=10000$，共 2 对：$j=0$ 时 $\omega=10000^{0}=1$；$j=1$ 时 $\omega=10000^{-2/4}=1/\sqrt{10000}=0.01$。
+位置 $\mathrm{pos}=3$ 的两对分别转 $3\times1=3$ 弧度和 $3\times0.01=0.03$ 弧度。
+
+算例二（旋转本身，教学数字：取 $\theta=90^\circ$）：$(x_0,x_1)=(1,0)$，$\cos90^\circ=0$、$\sin90^\circ=1$，
+$x'_0=1\times0-0\times1=0$，$x'_1=1\times1+0\times0=1$，得到 $(0,1)$；长度仍是 1。
+
+算例三（相对位置，教学数字：取每个位置转 $90^\circ$）：$q=k=(1,0)$。Query 在位置 2、Key 在位置 0：Query 转 $180^\circ$ 得 $(-1,0)$，Key 不转，点积 $-1$；
+Query 在位置 5、Key 在位置 3：Query 转 $450^\circ$（等于 $90^\circ$）得 $(0,1)$，Key 转 $270^\circ$ 得 $(0,-1)$，点积 $-1$。两种情形位置差都是 2，点积相同，与绝对位置无关。
+
+**核对：**vLLM 的 Llama 在 split 之后立即执行 `q, k = self.rotary_emb(positions, q, k)`（`vllm/model_executor/models/llama.py:231`），然后才调用 `self.attn(q, k, v)`（`:232`），
+`_init_rotary_emb` 里 `is_neox_style = True`（`:241`）。`get_rope` 取 `rope_theta`（缺省 10000），`rotary_dim` 来自配置里的 `rope_dim`，没有时取 `head_size * partial_rotary_factor`
+（`vllm/model_executor/layers/rotary_embedding/__init__.py:64-72`；`partial_rotary_factor` 缺省 1，所以通常 `rotary_dim` 等于 $d_h$）；
+频率与角度在 `RotaryEmbedding._compute_inv_freq`（`vllm/model_executor/layers/rotary_embedding/base.py:80-92`，即 $\omega$）和 `_compute_cos_sin_cache`（`:94-102`，`t` 与 `inv_freq` 的外积再取 cos、sin，即 $\theta=\mathrm{pos}\cdot\omega$）里算好并缓存；
+旋转在 `ApplyRotaryEmb.forward_static`（`vllm/model_executor/layers/rotary_embedding/common.py:134-173`）：neox 风格把 head 向量切成前后两半 `x1, x2`，
+`o1 = x1 * cos - x2 * sin`、`o2 = x2 * cos + x1 * sin`（`:163-164`），就是上面的矩阵。
+所以 Llama 在 vLLM 里配对的是第 $j$ 维和第 $j+d_h/2$ 维，而不是相邻两维；随书 `rotate_pairs()`（`examples/ch01_minimal_inference.py:53-67`）为了好读用相邻配对，
+两者只是维度排列不同，旋转的数学一样。`tests/kernels/core/test_rotary_embedding.py` 是上游对旋转实现的测试。
+
+```mermaid
+flowchart LR
+    V["Q or K of one head: d_h numbers"] --> SPLIT["split into first half x1 and second half x2"]
+    SPLIT --> PAIR["pair j = (x1[j], x2[j]), j = 0 .. d_h/2 - 1"]
+    POS["position pos"] --> ANG["angle of pair j: theta = pos * rope_theta^(-2j/d_h)"]
+    PAIR --> ROT["rotate each pair by its own theta"]
+    ANG --> ROT
+    ROT --> CAT["concatenate o1 and o2: rotated vector, same shape"]
+```
+
+> **读图方法：** 这是 RoPE 在一个 head 内部的坐标映射图（neox 风格，Llama 使用）。先看最上面一路：向量被切成前后两半，第 $j$ 对由前半的第 $j$ 个数和后半的第 $j$ 个数组成（图里 x1、x2 是前后两半，不是这一对分量）；
+> 再看左下的 position 一路：每一对按自己的频率算出一个角度；两路在 `rotate` 汇合，每一对各自旋转，最后把前后两半拼回原来的 shape。
+> 图里没有任何新增参数，也不改变向量长度；位置只通过角度进入。
+
+不同维度对使用不同频率，旋转角随 position 变化。旋转后的 Q/K 点积包含相对位置
+关系（上面第 3 步）。当前 Llama 路径中，`qkv_proj` 和 split 之后立即执行
 `self.rotary_emb(positions, q, k)`，然后才进入 attention。
 
 ## 1.5 从 Logits 到下一个 Token
@@ -498,6 +764,21 @@ $$
 i_{\mathrm{next}} = \operatorname*{arg\,max}_{i} z_i
 $$
 
+**白话：**挑分数最高的那个候选，不做任何随机选择。
+
+**其中：**$z_i$ 是候选 $i$ 的 logit，$i$ 遍历 $0,\dots,\lvert\mathcal V\rvert-1$；$\operatorname*{arg\,max}$ 返回使 $z_i$ 最大的下标 $i$（而不是最大值本身）；
+$i_{\mathrm{next}}$ 是选中的 token ID，无单位。
+
+**怎么算出来：**从头到尾扫描一遍，记住当前最大的分数和它的下标，遇到更大的就更新；扫完得到的下标就是 $i_{\mathrm{next}}$。
+算例：$z=[4,2,1,0]$ 时最大分数是 4，下标 0，所以 $i_{\mathrm{next}}=0$（后文 temperature 一节里的候选 A）。
+如果两个分数并列最大，公式本身没有规定选谁，要看实现的并列处理规则。
+
+**核对：**随书 `sample_logits()` 在 `temperature == 0` 时直接 `max(range(len(logits)), key=logits.__getitem__)`（`examples/ch01_minimal_inference.py:94-95`），
+并列时取下标最小的；`tests/test_ch01_minimal_inference.py::test_temperature_zero_is_greedy` 检查这个分支。
+vLLM 的 `gumbel_noised_argmax` 在 `temp == 0` 时不加噪声，退化为普通 argmax（`vllm/v1/worker/gpu/sample/gumbel.py:172-212`）（GPU Triton 路径；CPU runner 由 `vllm/v1/worker/cpu/gumbel.py` 的 `gumbel_sample`（`:9-40`）调用 `ops.gumbel_sample_cpu`，温度为 0 时同样不加噪声、退化为普通 argmax（`csrc/cpu/sampling/common.h:239-243` 里 `temp == 0.0f` 走 `greedy_argmax`））；
+`SamplingParams.__post_init__` 在 temperature 小于 `_SAMPLING_EPS`（1e-5）时按 greedy 处理（`vllm/sampling_params.py:619-623`）。
+本章 1.9 节「第七步：`SamplingParams` 在进入 Sampler 前做什么」的读图方法说明了这一点：因为 $0<\tau<10^{-2}$ 会先被抬到 $10^{-2}$，而 greedy 的门槛是 $10^{-5}$，实际走到 greedy 分支的只有 temperature 恰好为 0 的请求。
+
 给定完全相同的 logits 和并列值处理规则，它总会选择同一项；但不同硬件或 batch
 引起的浮点误差仍可能改变非常接近的分数，所以 `temperature=0` 不是跨环境逐字复现
 的保证。随机采样则按处理后的概率分布选择。
@@ -507,19 +788,38 @@ $$
 Temperature 在 softmax 前缩放 logits：
 
 $$
-p_i(T) = \frac{\exp(z_i/T)}{\sum_j \exp(z_j/T)}, \qquad T>0
+p_i(\tau) = \frac{\exp(z_i/\tau)}{\sum_j \exp(z_j/\tau)}, \qquad \tau>0
 $$
 
-这里的 `T` 是无单位温度参数，与前面表示 token 数的 `T` 含义不同；本公式只适用于
-`T > 0`，输入和输出都是长度为词表大小的向量。
+**白话：**先把所有 logit 都除以同一个正数 $\tau$ 再做 softmax：$\tau$ 小于 1 时分数差距被放大，分布更尖锐；大于 1 时差距被压平，分布更平。
 
-- `0 < T < 1`：差距被放大，分布更尖锐。
-- `T > 1`：差距被压平，选择更多样。
+**其中：**$\tau$ 是无单位的温度参数（$\tau>0$），与前面表示 token 数的 `T`（形状 `[T,D]` 的第 0 维）无关，所以本书把温度写成 $\tau$；
+$p_i(\tau)$ 是温度为 $\tau$ 时候选 $i$ 的概率；输入和输出都是长度 $\lvert\mathcal V\rvert$ 的向量。本公式只适用于 $\tau>0$。
+
+**怎么算出来：**
+
+1. 把每个 logit 除以 $\tau$：$z_i/\tau$；
+2. 对结果做普通 softmax（1.1 节）：取指数、除以总和；
+3. 为什么能“放大/压平”：任意两个候选的概率之比是 $\dfrac{p_a}{p_b}=e^{(z_a-z_b)/\tau}$。$\tau<1$ 时指数里的差距被放大，$\tau>1$ 时被缩小；
+   $\tau\to0$ 时最大分数的候选概率趋近 1，就是 greedy，所以 vLLM 把 $\tau=0$ 单独当作 greedy 处理，而不去除以 0。
+
+算例：固定 $z=[4,2,1,0]$。$\tau=0.5$ 时 $z/\tau=[8,4,2,0]$，指数约为 $2981.0$、$54.60$、$7.389$、$1$，总和约 $3043.9$，候选 A 的概率 $2981.0/3043.9\approx97.93\%$；
+$\tau=1$ 时 $z/\tau=[4,2,1,0]$，指数约 $54.60$、$7.389$、$2.718$、$1$，总和约 $65.71$，A 为 $83.10\%$；
+$\tau=2$ 时 $z/\tau=[2,1,0.5,0]$，指数约 $7.389$、$2.718$、$1.649$、$1$，总和约 $12.76$，A 为 $57.93\%$。下面的表就是这样一列列算出来的。
+
+**核对：**vLLM 的 `_temperature_kernel` 逐元素执行 `logits = logits / temperature`（`vllm/v1/worker/gpu/sample/gumbel.py:44`），
+temperature 为 0 或 1 时提前返回、不改 logits（`:34-36`）（GPU Triton 路径；CPU runner 由 `vllm/v1/worker/cpu/sampler.py` 的 `apply_temperature`（`:350-362`）实现：全部请求温度为 0 或 1 时同样提前返回（`:357-359`），否则对温度为 0 的行用 1 做除数从而跳过除以 0（`:361-362`）；采样入口在 `vllm/v1/worker/cpu/gumbel.py` 的 `gumbel_sample`）；
+`SamplingParams` 把落在 $(0,0.01)$ 的 temperature 提高到 0.01（`vllm/sampling_params.py:564-572`），
+并要求 temperature 有限、非负且不大于 2（`:660-676`）。随书表格由 `temperature_rows()`（`examples/ch01_numerical_walkthrough.py`）生成，
+`tests/test_ch01_numerical_walkthrough.py::test_temperature_distributions_sum_to_one` 检查每组概率之和为 1。
+
+- `0 < τ < 1`：差距被放大，分布更尖锐。
+- `τ > 1`：差距被压平，选择更多样。
 - 在 vLLM `SamplingParams` 中，`temperature=0` 表示 greedy。
 
 固定 logits `[4,2,1,0]`，只改变 temperature：
 
-| Token | Logit | `T=0.5` | `T=1.0` | `T=2.0` |
+| Token | Logit | `τ=0.5` | `τ=1.0` | `τ=2.0` |
 |---|---:|---:|---:|---:|
 | A | 4 | 97.93% | 83.10% | 57.93% |
 | B | 2 | 1.79% | 11.25% | 21.31% |
@@ -528,17 +828,17 @@ $$
 
 ![Temperature 对同一组 logits 概率分布的影响](figures/temperature-distribution.svg)
 
-Temperature 不会改变 logit 的大小顺序，所以单纯改变 temperature 不会改变 greedy
+Temperature 不会改变 logit 的大小顺序（除以正数不改变大小关系），所以单纯改变 temperature 不会改变 greedy
 的 argmax；它改变的是随机采样时各候选被选中的相对概率。
 
 ### Top-k 与 Top-p
 
 > **本节先看：** 下面先给出“Top-k 与 Top-p”的结论清单。先理解每一项为什么存在，再记参数名或实现细节。
 
-- **Top-k：** 按最大的 `k` 个分数设定筛选边界；没有边界并列时可理解为保留 `k` 个候选。
-- **Top-p：** 按概率从高到低保留，直到累计概率达到 `p`。
+- **Top-k：** 按最大的 `top_k` 个分数设定筛选边界；没有边界并列时可理解为保留 `top_k` 个候选。
+- **Top-p：** 按概率从高到低保留，直到累计概率达到 `top_p`。
 
-仍使用 `T=1` 的概率：
+仍使用 $\tau=1$ 的概率（上一节表中的第三列）：
 
 ```text
 A: 0.8310
@@ -547,18 +847,27 @@ C: 0.0414
 D: 0.0152
 ```
 
-- `top_k=2` 保留 A、B，再把二者概率重新归一化为约 88.08% 和 11.92%。
-- `top_p=0.9` 先保留 A，但累计概率只有 83.10%；加入 B 后达到 94.35%，因此也保留
-  A、B。
-- 当 `T=2` 时，A+B 只有 79.24%，`top_p=0.9` 还需要加入 C。这说明 temperature
-  会间接改变 nucleus 的候选数量。
+**白话：**top-k 按个数截断，top-p 按累计概率截断；留下来的候选重新归一化，被排除的概率变成 0。
+
+**其中：**$\mathrm{top\_k}$ 是保留的候选个数；$\mathrm{top\_p}\in(0,1]$ 是累计概率阈值；$p_i$ 是候选 $i$ 在温度处理之后的概率；重新归一化后的概率是 $p_i/\sum_{j\in\mathrm{kept}}p_j$，其中 $\mathrm{kept}$ 是保留下来的候选集合，$j$ 遍历它。
+
+**怎么算出来：**
+
+- $\mathrm{top\_k}=2$ 保留 A、B（概率最大的两个）。保留项的概率之和是 $0.8310+0.1125=0.9435$，每项除以它：
+  $0.8310/0.9435\approx88.08\%$、$0.1125/0.9435\approx11.92\%$，两者相加为 100%。
+- $\mathrm{top\_p}=0.9$：从高到低累加概率。A 单独是 $0.8310<0.9$，不够；加入 B 后 $0.8310+0.1125=0.9435\ge0.9$，停止，所以也保留 A、B。
+- $\tau=2$ 时概率是 $[57.93\%,\ 21.31\%,\ 12.93\%,\ 7.84\%]$：A+B 只有 $57.93\%+21.31\%=79.24\%<90\%$，还要加入 C，累计 $92.17\%\ge90\%$，所以保留 A、B、C。
+  这说明 temperature 会间接改变 nucleus 的候选数量。
+
+**核对：**随书 `sample_logits()` 按降序累加概率取 nucleus、再按 `top_k` 截断、再对保留项重新归一化（`examples/ch01_minimal_inference.py:97-115`）；
+vLLM 里的实现和并列规则见下面的 `apply_top_k_top_p`。
 
 Top-k 与 top-p 最终都通过 mask 排除候选，并对保留项重新归一化。两者同时开启时，
 不能把“先截断并归一化，再用新概率计算另一个阈值”的教学捷径当成所有实现的精确
 语义；应查看固定 revision 的 `apply_top_k_top_p` 及其等价性测试。
 
 边界并列时要看实现。当前 PyTorch 参考路径屏蔽的是“严格小于第 k 大分数”的项；
-例如 logits 为 `[4,2,2]`、k=2，两个分数为 2 的候选都可能保留，不能据此断言
+例如 logits 为 `[4,2,2]`、`top_k=2`，两个分数为 2 的候选都可能保留，不能据此断言
 一定只剩两个 token。随书模型按排序后截取候选，是教学简化；其他 backend 的并列
 处理需分别核对，不能只凭 top-k 名称推断。v0.33.0（`4ba787ec`）的 Triton top-k-only 路径按索引打破第 k 位并列，
 保留恰好 k 项；PyTorch 参考实现可以额外保留并列项。对应测试只要求额外项确实与第 k 位同分，
@@ -569,7 +878,7 @@ Top-k 与 top-p 最终都通过 mask 排除候选，并对保留项重新归一�
 [源码] `vllm/v1/sample/ops/topk_topp_sampler.py` - `apply_top_k_top_p_pytorch`、`apply_top_k_only`
 
 **批内有的请求只开 top-p 时，kernel 怎么分工。** 这一节只在 CUDA 上的 Triton 路径成立，是工程细节，不改变上面的
-采样语义。同一个 batch 里，每行请求可以有自己的 `top_k` 与 `top_p`：`top_k` 等于词表大小 $V$ 表示
+采样语义。同一个 batch 里，每行请求可以有自己的 `top_k` 与 `top_p`：`top_k` 等于词表大小 $\lvert\mathcal V\rvert$ 表示
 “这一行没开 top-k”，`top_p` 等于 1 表示“没开 top-p”。vLLM 的 Triton 实现有两种 kernel：
 单体 kernel 同时处理 top-k 与 top-p（对带 top-k 的行很快）；当 batch 不超过 64（`_SPLIT_MAX_BATCH`，
 `vllm/v1/sample/ops/topk_topp_triton.py:986`）且开了 top-p 时，对“没开 top-k”的行改用分块的 split top-p 流水线，
@@ -577,25 +886,39 @@ Top-k 与 top-p 最终都通过 mask 排除候选，并对保留项重新归一�
 之后**仅当确有纯 top-p 的行**才再补跑一遍 split top-p。MRV2 为此在每步算一个布尔值：
 
 $$
-\mathrm{has\_topp\_only\_rows}=\mathrm{do\_top\_p}\ \wedge\ \exists\, i:\ (k_i\ge V\ \wedge\ p_i<1)
+\mathrm{has\_topp\_only\_rows}=\mathrm{do\_top\_p}\ \wedge\ \exists\, i:\ (\mathrm{top\_k}_i\ge\lvert\mathcal V\rvert\ \wedge\ \mathrm{top\_p}_i<1)
 $$
 
-读法：只要本批里至少有一行“没开 top-k 但开了 top-p”，就必须补跑；否则可以省掉这一遍。
+**白话：**只要本批里至少有一行“没开 top-k 但开了 top-p”，就必须补跑；否则可以省掉这一遍。
 
-其中：
+**其中：**$\mathrm{do\_top\_p}$、$\mathrm{has\_topp\_only\_rows}$ 是源码里布尔变量 `do_top_p`、`has_topp_only_rows` 的公式写法；
 
-- $k_i$：第 $i$ 行请求的 `top_k`，等于 $V$ 表示该行没开 top-k；
-- $p_i$：第 $i$ 行请求的 `top_p`，范围 $(0,1]$，等于 1 表示该行没开 top-p；
-- $V$：词表大小（logits 最后一维）；
-- $\mathrm{do\_top\_p}$：本批是否有任何一行 $p_i\ne 1$；
-- $\mathrm{has\_topp\_only\_rows}$：是否需要补跑 split top-p。
+- $\mathrm{top\_k}_i$：第 $i$ 行请求的 `top_k`，等于 $\lvert\mathcal V\rvert$ 表示该行没开 top-k；
+- $\mathrm{top\_p}_i$：第 $i$ 行请求的 `top_p`，范围 $(0,1]$，等于 1 表示该行没开 top-p；
+- $\lvert\mathcal V\rvert$：词表大小（logits 最后一维）；
+- $\mathrm{do\_top\_p}$：本批是否有任何一行 $\mathrm{top\_p}_i\ne 1$；
+- $\mathrm{has\_topp\_only\_rows}$：是否需要补跑 split top-p；
+- $\wedge$ 是“且”，$\exists\,i$ 是“存在某一行 $i$”，$i$ 是行号（本节局部字母）。
 
-手算例子：$V=100$，一批 4 行，$k=[100,100,5,100]$，$p=[0.9,1.0,0.9,1.0]$。第 0 行 $k_0=100\ge V$ 且 $p_0=0.9<1$，
-所以结果为真，要补跑；若换成 $k=[5,3]$、$p=[0.9,0.8]$，两行都开了 top-k，结果为假，补跑被跳过。
+**怎么算出来：**
+
+1. 一行“没开 top-k”：`SamplingStates` 把 `top_k <= 0` 或大于词表的值都存成词表大小（`vllm/v1/worker/gpu/sample/states.py:49-50`），所以“没开”等价于 $\mathrm{top\_k}_i\ge\lvert\mathcal V\rvert$；
+2. 一行“开了 top-p”就是 $\mathrm{top\_p}_i<1$；
+3. 两条同时成立的行就是“纯 top-p 行”；批里存在这样的行（$\exists\,i$，代码里是对布尔数组取 `np.any`），就必须补跑；
+4. 前面再乘一个 $\mathrm{do\_top\_p}$ 在数学上是多余的（有一行 $\mathrm{top\_p}_i<1$ 就一定有一行 $\mathrm{top\_p}_i\ne1$），
+   但 `do_top_p` 本来就要先算出来决定要不要传 `top_p`，写成 `and` 可以在整批都没开 top-p 时短路，少做一次数组比较。
+
+手算例子：$\lvert\mathcal V\rvert=100$，一批 4 行，$\mathrm{top\_k}=[100,100,5,100]$，$\mathrm{top\_p}=[0.9,1.0,0.9,1.0]$。$\mathrm{do\_top\_p}$ 为真（第 0、2 行不等于 1）；
+第 0 行 $\mathrm{top\_k}_0=100\ge\lvert\mathcal V\rvert$ 且 $\mathrm{top\_p}_0=0.9<1$，所以结果为真，要补跑。若换成 $\mathrm{top\_k}=[5,3]$、$\mathrm{top\_p}=[0.9,0.8]$，
+两行都开了 top-k，没有任何一行满足括号里的条件，结果为假，补跑被跳过；若所有行 $\mathrm{top\_p}=1$，$\mathrm{do\_top\_p}$ 为假，结果也为假。
+
+**核对：**`SamplingStates.get_top_k_top_p()`（`vllm/v1/worker/gpu/sample/states.py:105-121`）里 `do_top_p = np.any(top_p_np != 1.0)`，
+`has_topp_only_rows = bool(do_top_p and np.any((top_k_np >= vocab_size) & (top_p_np < 1.0)))`（`:118-120`）就是上面的公式；
+调用方 `apply_top_k_top_p_triton()` 末尾 `if use_split and has_topp_only_rows:` 才补跑 `_apply_topp_split`（`vllm/v1/sample/ops/topk_topp_triton.py:1723-1724`）。
 
 ```mermaid
 flowchart TD
-    B["一批请求: 每行 k_i, p_i"] --> DO{"任意 p_i != 1 ?"}
+    B["一批请求: 每行 top_k_i, top_p_i"] --> DO{"任意 top_p_i != 1 ?"}
     DO -->|"否"| K1["只剩 top-k 路径, 无 top-p"]
     DO -->|"是"| SMALL{"CUDA 且 batch <= 64 ?"}
     SMALL -->|"否"| MONO["只用单体 kernel"]
@@ -603,7 +926,7 @@ flowchart TD
     TKON -->|"否"| SPLIT["全部行走 split top-p"]
     TKON -->|"是"| MONO2["单体 kernel 处理带 top-k 的行"]
     MONO2 --> GATE{"has_topp_only_rows ?"}
-    GATE -->|"真: 存在 k_i>=V 且 p_i<1"| SPLIT2["再补跑 split top-p"]
+    GATE -->|"真: 存在 top_k_i>=vocab_size 且 top_p_i<1"| SPLIT2["再补跑 split top-p"]
     GATE -->|"假"| SKIP["跳过补跑"]
 ```
 
@@ -612,7 +935,7 @@ flowchart TD
 这个布尔值在 `SamplingStates.get_top_k_top_p()`（`vllm/v1/worker/gpu/sample/states.py:105`）里用 CPU 侧 numpy 数组
 一次算好，经 `apply_top_k_top_p(..., has_topp_only_rows=…)`（`vllm/v1/sample/ops/topk_topp_sampler.py:198`）传给
 `apply_top_k_top_p_triton()`（`vllm/v1/sample/ops/topk_topp_triton.py:1618`），其函数 docstring 明确要求：
-只要有行满足 $p<1$ 且 $k\ge V$，调用方必须传 `True`，否则这样的行会得不到 top-p。默认值是 `True`（保守）。
+只要有行满足 $\mathrm{top\_p}<1$ 且 $\mathrm{top\_k}\ge\lvert\mathcal V\rvert$，调用方必须传 `True`，否则这样的行会得不到 top-p。默认值是 `True`（保守）。
 上游提交：[7b6310c10](https://github.com/vllm-project/vllm/commit/7b6310c10)（[#61996](https://github.com/vllm-project/vllm/pull/61996)）。
 同一区间内 split top-p 还修了两个正确性问题：第 k 位并列时的“并列配额”现在能跨 block 累计
 （[ce49c47cb](https://github.com/vllm-project/vllm/commit/ce49c47cb)，[#62046](https://github.com/vllm-project/vllm/pull/62046)，
@@ -792,6 +1115,21 @@ T = 4 + 1 + 2 = 7
 hidden_states.shape = [7, D]
 ```
 
+**白话：**把三个请求本 step 要算的 token 首尾相接排成一行，$T$ 是这一行的总长度；再用“每个请求从哪里开始”和“每个请求现在一共多长”两组数字，把请求边界补回来。
+
+**其中：**$N_{q,r}$ 是请求 $r$ 本 step 的 query token 数（表中的“本 step 新计算 token”）；$N_{\mathrm{ctx},r}$ 是它已有的上下文 token 数（表中的“已有上下文长度”，源码里的 `num_computed_tokens`）；
+$S_r$ 是请求 $r$ 本 step 之后的序列长度；$\mathrm{qsl}_r$ 是 `query_start_loc[r]`，请求 $r$ 的 query 在展平 batch 里的起点；$r=0,1,2$ 是请求序号。
+
+**怎么算出来：**
+
+1. 总 token 数：$T=\sum_r N_{q,r}=4+1+2=7$；
+2. 起点：第 0 个请求从 0 开始，后一个请求紧接在前一个之后，$\mathrm{qsl}_{r+1}=\mathrm{qsl}_r+N_{q,r}$，得 $0,\ 0+4=4,\ 4+1=5,\ 5+2=7$，即 `[0,4,5,7]`，最后一项就是 $T$；
+3. 序列长度：已有上下文加本步新 token，$S_r=N_{\mathrm{ctx},r}+N_{q,r}$，得 $0+4=4$、$37+1=38$、$100+2=102$，即 `[4,38,102]`；
+4. 每个 token 的位置：请求 $r$ 的第 $k$ 个新 token（$k$ 从 0 起）位置是 $N_{\mathrm{ctx},r}+k$，所以 R1 的位置是 37，R2 的是 100、101，与上面 `input_ids` 里的 `r1t37`、`r2t100`、`r2t101` 一致。
+
+**核对：**GPU Model Runner 的 `prepare_inputs`（`vllm/v1/worker/gpu/model_runner.py:1458`）用 `np.cumsum(num_scheduled_tokens_np, out=query_start_loc_np[1 : num_reqs + 1])`
+算起点（`:1533-1535`，`query_start_loc_np[0] = 0`）；序列长度在 `_prepare_pos_seq_lens_kernel` 里 `seq_len = num_computed_tokens + query_len`（`vllm/v1/worker/gpu/input_batch.py:383`）。
+
 仅凭这 7 个 token 无法恢复请求边界，因此还必须有：
 
 - 每个请求本 step 的 token 数。
@@ -879,52 +1217,108 @@ $q_{t+1}$，不需要读取历史 $q_t$。相反，历史 $k_t,v_t$ 会在未来
 的查询中继续使用，因此值得跨 step 保存。Q 在当前计算内可能被多次使用或暂存，
 “不长期缓存历史 Q”不表示它只能读取一次，也不限制调试或其他算法保存中间结果。
 
+**白话：**每个位置的输出只需要“自己的 Query”和“所有可见位置的 Key、Value”；旧位置的 Query 用完就没用了，旧位置的 Key、Value 却会被之后每个新位置反复读到。
+
+**其中：**$t$ 是位置序号（本章局部字母，从 0 起）；$q_t$ 是位置 $t$ 的 Query，$k_j$、$v_j$ 是位置 $j$ 的 Key、Value；位置 $t$ 的输出是 $\sum_{j\le t}a_jv_j$，权重 $a_j$ 是 softmax 之后 $q_t$ 对第 $j$ 个 Key 的权重，打分为 $q_t\cdot k_j/\sqrt{d_h}$。
+
+**怎么算出来：**
+
+1. 把位置 $t$ 的输出展开：打分 $q_t\cdot k_j$ 里只出现当前的 $q_t$，而 $j$ 遍历 $0,\dots,t$，所以需要 $k_0,\dots,k_t$ 和 $v_0,\dots,v_t$；
+2. 到位置 $t+1$，打分换成 $q_{t+1}\cdot k_j$（$j=0,\dots,t+1$），需要 $k_0,\dots,k_{t+1}$ 和 $v_0,\dots,v_{t+1}$——旧的 $k_j,v_j$ 又用了一次，而 $q_t$ 没有再出现；
+3. 算例：4 个 token 的 prompt（位置 0 到 3）生成第 5 个 token（位置 4）时，需要 $q_4$ 和 $k_0,\dots,k_4$、$v_0,\dots,v_4$；再下一步需要 $q_5$ 和 $k_0,\dots,k_5$、$v_0,\dots,v_5$。
+   整个过程里没有任何一步重新用到 $q_0,\dots,q_3$，而 $k_0,v_0$ 在每一步都被读取。
+
+**核对：**`LlamaAttention.forward` 只把当前 step 的 `q, k, v` 交给 `Attention`，由它把新的 K/V 写进缓存、从缓存读历史 K/V（下面两条 `[源码]`）；缓存的对象是 K 和 V，没有为历史 Q 设置缓存。
+
 [源码] `vllm/model_executor/models/llama.py` - `LlamaAttention.forward`
 
 [源码] `vllm/model_executor/layers/attention/attention.py` - `Attention.forward`、`unified_kv_cache_update`
 
 ### 计算量直觉
 
-只数 causal attention 中的 QK 点积：长度 `S` 的完整序列约需要
-$\frac{S(S+1)}{2}$ 次。带缓存的一个 decode token 只新增约 `S` 次点积。
+只数 causal attention 中的 QK 点积：长度 $S$ 的完整序列约需要
+$\frac{S(S+1)}{2}$ 次。带缓存的一个 decode token 只新增约 $S$ 次点积。
 
-本章最小实验使用 `P=128` 的 prompt 生成 `G=32` 个 token，得到：
+本章最小实验使用 $N_{\mathrm{prompt}}=128$ 的 prompt 生成 $N_{\mathrm{out}}=32$ 个 token，得到：
 
 ```text
 完整重算 QK 次数: 333136
 缓存路径 QK 次数: 12720
 ```
 
+**白话：**没有缓存时，每生成一个 token 都把当前整条序列重新算一遍；有缓存时，prompt 只算一次，之后每步只让新 token 的 Query 去和已有的 Key 做点积。这里数的就是这两种做法的 QK 点积次数。
+
+**其中：**$N_{\mathrm{prompt}}=128$、$N_{\mathrm{out}}=32$ 是本章最小实验的教学数字；$S$ 是某一次计算时的序列长度（token）。第一个输出 token 来自 prefill 的 logits，所以共有 1 次长度 128 的计算加 31 次 decode。
+
+**怎么算出来：**
+
+1. 无缓存：32 次计算的序列长度依次是 $128,129,\dots,159$，每次需要 $S(S+1)/2$ 次点积。
+   $\sum S=32\times(128+159)/2=4592$，$\sum S^2=661680$（用 $\sum_{S=1}^{n}S^2=n(n+1)(2n+1)/6$：$n=159$ 得 1352560，$n=127$ 得 690880，相减），所以总数是 $(661680+4592)/2=333136$；
+2. 有缓存：prefill 一次，$128\times129/2=8256$ 次；之后 31 次 decode，序列长度依次是 $129,130,\dots,159$，每步新增 $S$ 次（新 Query 对全部 $S$ 个 Key，含它自己），
+   共 $31\times(129+159)/2=31\times144=4464$ 次；合计 $8256+4464=12720$；
+3. 比值 $333136/12720\approx26.2$。
+
+**核对：**`attention_score_counts(128, 32)`（`examples/ch01_minimal_inference.py:217-227`）按上面两条逐项求和，运行 `python3 examples/ch01_minimal_inference.py` 打印 `no-cache=333136, cached=12720`（见 1.8 节的实际观察）。
+
 这里的数字只统计教学模型中的 QK score，不包含 QKV projection、MLP、kernel launch、
 显存访问和 batch 效率，不能当作 26 倍端到端加速结论。
 
 ### KV Cache 容量公式
 
-令 $B_{\mathrm{token}}$ 表示每 token 的 KV 字节数，$B_{\mathrm{dtype}}$ 表示每个
+令 $M_{\mathrm{tok}}$ 表示每 token 的 KV 字节数，$b_{\mathrm{elem}}$ 表示每个
 数值元素占用的字节数。基础 KV 容量可估算为：
 
 $$
-B_{\mathrm{token}} = L(H_kD_k + H_vD_v)B_{\mathrm{dtype}}
+M_{\mathrm{tok}} = L(H_kd_k + H_vd_v)\,b_{\mathrm{elem}}
 $$
 
-- `L`：attention layers 数量。
-- `H_k,D_k`：Key 的 head 数和 head size。
-- `H_v,D_v`：Value 的 head 数和 head size。
+**白话：**生成并缓存一个 token，要在每一层各存下它的 K 和 V；这个公式数的就是“一个 token 的 K、V 一共占多少字节”。
+
+**其中：**
+
+- $L$：有 attention KV 的层数；
+- $H_k,d_k$：Key 的 head 数和单 head 宽度（元素）；
+- $H_v,d_v$：Value 的 head 数和单 head 宽度（元素）；
+- $b_{\mathrm{elem}}$：每个元素占的字节数（bf16 为 2，byte/元素）；
+- $M_{\mathrm{tok}}$：每 token 的 KV 字节数（byte/token）。
+
+**怎么算出来：**
+
+1. 一层里，一个 token 的 K 有 $H_k$ 个 head、每个 head $d_k$ 个元素，共 $H_kd_k$ 个元素；V 共 $H_vd_v$ 个元素，加起来是 $H_kd_k+H_vd_v$ 个元素；
+2. 共 $L$ 层，一个 token 在所有层一共是 $L(H_kd_k+H_vd_v)$ 个元素；
+3. 每个元素 $b_{\mathrm{elem}}$ 字节，乘上去得到字节数；因为数的是“每个 token”，单位是 byte/token。
+
+单位检查：元素数 × byte/元素 = byte，每个 token 各存一份，所以是 byte/token。
+
+**核对：**vLLM 的 `AttentionSpec` 只有一个 `num_kv_heads`，K 与 V 的 head 数相同，二者的宽度分别是 `head_size`、`head_size_v`
+（`head_size_v` 缺省等于 `head_size`，`vllm/v1/kv_cache_interface.py:563-592`）；一个 page 的字节数是
+`num_heads * num_states * (head_size + head_size_v) * dtype_size`（`state_content_size_bytes` 与 `unpadded_page_size_bytes`，`:601-609`），
+其中 `num_states` 默认等于 `block_size`（`:262-266`）。除以 `block_size` 就是一层一个 token 的字节数 $H_{\mathrm{kv}}(d_k+d_v)\,b_{\mathrm{elem}}$，再乘 $L$ 层就是上式
+（$H_k=H_v=H_{\mathrm{kv}}$；上式允许 $H_k\ne H_v$ 只是更一般的写法）。
 
 普通 Llama 类 attention 中 Key/Value 通常拥有相同的 head 数和 head size，于是简化为：
 
 $$
-B_{\mathrm{token}} = 2LH_{\mathrm{kv}}D_h B_{\mathrm{dtype}}
+M_{\mathrm{tok}} = 2LH_{\mathrm{kv}}d_h\,b_{\mathrm{elem}}
 $$
+
+**白话：**K 和 V 一样大，所以把括号里的两项合并成“2 倍”。
+
+**其中：**$H_{\mathrm{kv}}$ 是 KV head 数，$d_h$ 是单 head 宽度；前面的 $2$ 表示 K 和 V 两份；其余符号同上式。
+
+**怎么算出来：**在上式里令 $H_k=H_v=H_{\mathrm{kv}}$、$d_k=d_v=d_h$：$L(H_{\mathrm{kv}}d_h+H_{\mathrm{kv}}d_h)\,b_{\mathrm{elem}}=2LH_{\mathrm{kv}}d_h\,b_{\mathrm{elem}}$。
+代入 $L=32$、$H_{\mathrm{kv}}=8$、$d_h=128$、$b_{\mathrm{elem}}=2$：$2\times32\times8\times128\times2=131072\ \mathrm{byte/token}$（下面的算例逐步展开）。
+
+**核对：**与下面两个算例一致；这是普通 K/V 张量的情形，MLA 等压缩缓存不在这两个式子之内（见下文）。
 
 上述两式都以逐层保存普通 K/V 张量为前提。通用 `Attention` 接口允许 `head_size_v`
 与 `head_size` 不同，此时应使用第一式，不能机械套用 `2×` 简式。
 
 MLA（多头潜在注意力）需要另看实际缓存表示：当前 `MLAAttentionSpec` 使用单份潜在
-状态，并将 `head_size_v` 设为 0；还可能包含量化和对齐开销。不能把模型的 Query/Key/Value
+状态，并将 `head_size_v` 设为 0（`vllm/v1/kv_cache_interface.py:759`）；还可能包含量化和对齐开销。不能把模型的 Query/Key/Value
 维度直接代入普通 K/V 公式来估算 MLA 显存，应读取实际 spec 的 `page_size_bytes`。
 
-上述公式的 $B_{\mathrm{dtype}}$ 假设每个元素占整数个字节。v0.33.0 起 `--kv-cache-dtype` 可由平台通过
+上述公式的 $b_{\mathrm{elem}}$ 假设每个元素占整数个字节。v0.33.0 起 `--kv-cache-dtype` 可由平台通过
 `register_kv_cache_dtype()` 注册新名字（[9499c949b](https://github.com/vllm-project/vllm/commit/9499c949b)，
 [#52670](https://github.com/vllm-project/vllm/pull/52670)），其存储布局、量化 scale 和对齐由各 spec/backend 决定，
 因此不能再默认用元素字节数估算；以实际 spec 的 `page_size_bytes` 为准。
@@ -937,31 +1331,63 @@ MLA（多头潜在注意力）需要另看实际缓存表示：当前 `MLAAttent
 
 $$
 \begin{aligned}
-B_{\mathrm{token}} &= 2\times32\times32\times128\times2\;\frac{\mathrm{byte}}{\mathrm{token}}\\
-&= 512\,\frac{\mathrm{KiB}}{\mathrm{token}},\\
-B_{2048} &= (2048\,\mathrm{token})\,B_{\mathrm{token}} = 1\,\mathrm{GiB}.
+M_{\mathrm{tok}} &= 2\times32\times32\times128\times2\;\frac{\mathrm{byte}}{\mathrm{token}}
+= 524288\;\frac{\mathrm{byte}}{\mathrm{token}}
+= 512\,\frac{\mathrm{KiB}}{\mathrm{token}},\\
+M_{2048} &= (2048\,\mathrm{token})\,M_{\mathrm{tok}} = 1\,\mathrm{GiB}.
 \end{aligned}
 $$
+
+**白话：**每个 token 要存 512 KiB，2048 个 token 就是整整 1 GiB。
+
+**其中：**$M_{2048}$ 是 2048 个 token 的 KV 总字节数；$1\,\mathrm{KiB}=2^{10}$ byte，$1\,\mathrm{MiB}=2^{20}$ byte，$1\,\mathrm{GiB}=2^{30}$ byte；其余符号同上。
+
+**怎么算出来：**
+
+1. 连乘：$2\times32=64$，$64\times32=2048$，$2048\times128=262144$（元素/token），再乘每个元素的 2 字节得 $524288$ byte/token；
+2. 换算单位：$524288/1024=512$，即 512 KiB/token；
+3. 2048 个 token：$2048\times524288=1073741824=2^{30}$ byte，正好 1 GiB。单位检查：token × byte/token = byte。
+
+**核对：**与第一个通式、简式的代入一致；这个算例是 KV head 数等于 Query head 数（普通 Multi-Head）时的上界，下面的 GQA 算例是同一模型换成 8 个 KV head。
 
 若同样模型采用 8 个 KV heads 的 GQA：
 
 $$
 \begin{aligned}
-B_{\mathrm{token}} &= 2\times32\times8\times128\times2\;\frac{\mathrm{byte}}{\mathrm{token}}\\
-&= 128\,\frac{\mathrm{KiB}}{\mathrm{token}},\\
-B_{2048} &= (2048\,\mathrm{token})\,B_{\mathrm{token}} = 256\,\mathrm{MiB}.
+M_{\mathrm{tok}} &= 2\times32\times8\times128\times2\;\frac{\mathrm{byte}}{\mathrm{token}}
+= 131072\;\frac{\mathrm{byte}}{\mathrm{token}}
+= 128\,\frac{\mathrm{KiB}}{\mathrm{token}},\\
+M_{2048} &= (2048\,\mathrm{token})\,M_{\mathrm{tok}} = 256\,\mathrm{MiB}.
 \end{aligned}
 $$
 
-令 $S_r$ 为请求 $r$ 缓存的 token 数，$B_{\mathrm{total}}$ 为总字节数。把公式
+**白话：**KV head 从 32 个减到 8 个，每个 token 的字节数也降到 1/4。
+
+**其中：**符号同上，只有 $H_{\mathrm{kv}}$ 从 32 变成 8，其余（$L=32$、$d_h=128$、$b_{\mathrm{elem}}=2$）不变。
+
+**怎么算出来：**$2\times32=64$，$64\times8=512$，$512\times128=65536$，$65536\times2=131072$ byte/token $=131072/1024=128$ KiB/token；
+$2048\times131072=268435456=2^{28}$ byte $=256\,\mathrm{MiB}$。比值 $8/32=1/4$：$M_{\mathrm{tok}}$ 与 $H_{\mathrm{kv}}$ 成正比，其他因子都没变，所以 $128/512=1/4$，$256\,\mathrm{MiB}/1\,\mathrm{GiB}=1/4$。
+
+**核对：**与上一个算例相差正好 $8/32$ 倍；32 层、8 个 KV head、head size 128 只是本章选用的教学配置，真实模型的取值要读各自的配置文件。
+
+令 $S_r$ 为请求 $r$ 缓存的 token 数，$M_{\mathrm{total}}$ 为总字节数。把公式
 扩展到并发请求：
 
 $$
-B_{\mathrm{total}} \approx B_{\mathrm{token}} \sum_r S_r
+M_{\mathrm{total}} \approx M_{\mathrm{tok}} \sum_r S_r
 $$
 
-例如 8 个请求平均各缓存 2,048 token，在前述 8 KV heads 配置下，仅基础 K/V 数值就
-约为 $8\times256\,\mathrm{MiB}=2\,\mathrm{GiB}$。如果请求继续生成，缓存还会逐 token 增长。
+**白话：**每个请求缓存多少个 token，就乘上每 token 的字节数；所有请求加起来就是总量。
+
+**其中：**$r$ 遍历所有并发请求，$S_r$ 的单位是 token，$M_{\mathrm{tok}}$ 是 byte/token，所以 $M_{\mathrm{total}}$ 是 byte；用 $\approx$ 是因为下一节列出的 block 对齐、前缀共享等因素没有算进去。
+
+**怎么算出来：**请求 $r$ 的 KV 是 $S_r$ 个 token 各 $M_{\mathrm{tok}}$ 字节，即 $S_rM_{\mathrm{tok}}$；各请求的 KV 互不重叠，加起来得 $\sum_rS_rM_{\mathrm{tok}}=M_{\mathrm{tok}}\sum_rS_r$。
+算例一：8 个请求平均各缓存 2,048 token，$8\times256\,\mathrm{MiB}=2\,\mathrm{GiB}$。
+算例二：1.6 节的三个请求序列长度是 $S=[4,38,102]$，共 $144$ token，用 GQA 的 $128\,\mathrm{KiB/token}$ 得 $144\times128\,\mathrm{KiB}=18432\,\mathrm{KiB}=18\,\mathrm{MiB}$。
+
+**核对：**这是没有计入 block 对齐和前缀共享的估算（对齐会让真实占用更大，前缀共享会让它更小）；真实的 KV block 数由第 05 章从 `KVCacheSpec` 反推。
+
+仅基础 K/V 数值就已经如此；如果请求继续生成，缓存还会逐 token 增长。
 
 ```mermaid
 flowchart LR
@@ -971,7 +1397,7 @@ flowchart LR
     subgraph L1[Layer 1]
       K1[K blocks] --- V1[V blocks]
     end
-    subgraph LN[Layer N-1]
+    subgraph LN[Layer L-1]
       KN[K blocks] --- VN[V blocks]
     end
     Tokens[每个缓存 token] --> L0
@@ -1111,6 +1537,8 @@ decode step 3: max cached/full diff=0.00e+00, sampled=6:。
 QK score count example (P=128, G=32): no-cache=333136, cached=12720
 ```
 
+脚本输出里的 `P`、`G` 就是正文的 $N_{\mathrm{prompt}}=128$、$N_{\mathrm{out}}=32$。
+
 缓存路径与完整重算在三个 decode step 上得到相同 logits，最大绝对误差为 0。测试还
 覆盖 prefill 全位置一致性、连续 decode 一致性、temperature=0 greedy 和 top-k=1。
 
@@ -1124,6 +1552,8 @@ attention scores: [0.7071, 0.3536, 1.0607]
 attention probabilities: [0.3199, 0.2246, 0.4555]
 attention output: [1.2309, 0.9047]
 ```
+
+脚本输出里的 `T=0.5` 等标签是温度 $\tau$（正文表格里写作 $\tau=0.5$），不是 token 数 `T`。
 
 ### 实验限制
 
@@ -1176,7 +1606,7 @@ attention output: [1.2309, 0.9047]
 flowchart TD
     Runner[GPUModelRunner] --> LF[LlamaForCausalLM.forward]
     LF --> LM[LlamaModel.forward]
-    LM --> Layer[LlamaDecoderLayer.forward x N]
+    LM --> Layer[LlamaDecoderLayer.forward x L]
     Layer --> LA[LlamaAttention.forward]
     LA --> QKV[qkv_proj and split]
     QKV --> RoPE[rotary_emb on Q and K]
@@ -1241,7 +1671,7 @@ input_ids -> embed_input_ids -> hidden_states
 当前 rank 拥有的 `[start_layer,end_layer)`。非最后 rank 把 hidden states 和 residual
 重新包装为 `IntermediateTensors`；最后 rank 执行 final RMSNorm 并返回 hidden states。
 
-这说明教学图里的“所有 N 层连续执行”是单设备视角。在 Pipeline Parallel 下，数学
+这说明教学图里的“所有 $L$ 层连续执行”是单设备视角。在 Pipeline Parallel 下，数学
 层次不变，但对象所有权和数据传输跨进程/设备分段。
 
 ### 第三步：`LlamaDecoderLayer.forward` 的 residual 为什么看起来特殊
@@ -1340,6 +1770,28 @@ sampling。这是模型数学与分布式所有权结合的一个具体例子。
 - temperature 小于 greedy epsilon 时，会把 top-p、top-k、min-p 重置为禁用状态，
   再检查 greedy 条件，例如 `n` 必须为 1。
 - stop strings 需要 detokenization；空 stop string 会被拒绝。
+
+上面这些步骤在 `SamplingParams.__post_init__` 里的先后顺序（`vllm/sampling_params.py:563-636`）决定了结果，尤其是 temperature：
+
+```mermaid
+flowchart TD
+    START["SamplingParams.__post_init__"] --> CLAMP{"0 < temperature < _MAX_TEMP (1e-2)?"}
+    CLAMP -- yes --> RAISE["warn, then temperature = 1e-2"]
+    CLAMP -- no --> NORM
+    RAISE --> NORM["normalize fields: seed -1 to None, stop str to list, dedupe stop_token_ids and bad_words"]
+    NORM --> VERIFY["_verify_args: check temperature in 0 to 2, top_p, top_k, min_p, penalties"]
+    VERIFY -- bad value --> ERR["raise VLLMValidationError"]
+    VERIFY -- ok --> GREEDY{"temperature < _SAMPLING_EPS (1e-5)?"}
+    GREEDY -- yes --> RESET["reset top_p = 1.0, top_k = 0, min_p = 0.0"]
+    RESET --> CHECKN{"n > 1?"}
+    CHECKN -- yes --> ERR
+    CHECKN -- no --> DONE
+    GREEDY -- no --> DONE["valid SamplingParams"]
+```
+
+> **读图方法：** 这张图只回答一个问题：一个 temperature 值在 `__post_init__` 里会经过哪几道门。先沿最左的主路径从上到下读：先“抬高”过小的正 temperature，再整理字段，再统一校验，最后才判断是否 greedy；
+> 菱形是分支，指向 `raise` 的两条边是拒绝请求的出口。注意顺序带来的一个结论：因为 $0<\tau<10^{-2}$ 已在第一道门被抬到 $10^{-2}$，而 greedy 的门槛是 $10^{-5}$，所以实际走到 greedy 分支的只有 temperature 恰好为 0 的请求。
+> 图中只画 `SamplingParams` 自己的构造期检查；`InputProcessor._validate_params` 之后调用的 `params.verify` 属于下一段说明的准入校验，不在图内。
 
 这些是基础参数契约，不等于所有校验都由 `SamplingParams` 独立完成。
 `InputProcessor._validate_params`（`vllm/v1/engine/input_processor.py:130`）先调用 `params.verify`，再调用
@@ -1475,7 +1927,7 @@ VLLM_LOGGING_LEVEL=DEBUG python3 examples/basic/offline_inference/basic.py
 | 看到的现象 | 先检查什么 | 不要先下什么结论 |
 |---|---|---|
 | 输出 token 不同 | temperature、seed、top-k/top-p、模型 revision | 模型 forward 一定错误 |
-| logits shape 不像 `[B,S,V]` | `logits_indices`、packed token 数、TP local/global logits | sequence 维度丢失 |
+| logits shape 不像 `[B,S,vocab_size]` | `logits_indices`、packed token 数、TP local/global logits | sequence 维度丢失 |
 | 源码没看到显式 causal mask | backend metadata、kernel 的 causal 参数 | 模型允许读取未来 |
 | decoder layer 没看到 `x + f(x)` | fused RMSNorm 的 residual 输入输出 | residual connection 被删掉 |
 | KV cache tensor 不连续 | block table 和 slot mapping | attention 无法读取完整历史 |
@@ -1516,7 +1968,7 @@ vLLM 的核心任务，是在多个不同长度请求之间高效安排这些 to
    Cache 理论容量怎样变化？为什么 Query heads 不一定同步减少？
 3. 为什么有 KV Cache 后，新 token 仍需要经过所有 decoder layers？
 4. 在 vLLM 中看到 hidden state 形状 `[T,D]` 时，如何找到每个请求的 sequence 边界？
-5. 为什么 `temperature=0` 应走 greedy 分支，而不是直接套用 $z_i/T$？
+5. 为什么 `temperature=0` 应走 greedy 分支，而不是直接套用 $z_i/\tau$？
 
 ## 源码追踪题
 
@@ -1544,7 +1996,7 @@ vLLM 的核心任务，是在多个不同长度请求之间高效安排这些 to
 <summary>2. 从 32 个 KV heads 改为 8 个，KV 容量怎样变化？</summary>
 
 在层数、head size、dtype 和 token 数不变，且 Key/Value 形状相同的简化条件下，容量
-与 KV head 数成正比，因此降为原来的 $8/32=1/4$。Query heads 可以继续保持 32，
+与 KV head 数成正比（$M_{\mathrm{tok}}=2LH_{\mathrm{kv}}d_h\,b_{\mathrm{elem}}$ 里只有 $H_{\mathrm{kv}}$ 变了），因此降为原来的 $8/32=1/4$。Query heads 可以继续保持 32，
 由每组多个 Query heads 共享一个 KV head，这就是 GQA。
 </details>
 
