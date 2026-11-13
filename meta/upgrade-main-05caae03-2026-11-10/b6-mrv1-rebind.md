@@ -36,7 +36,7 @@
 | ch03 §3.6.3 | batch queue 容量 async 时为 P+1（`vllm.py:559-565`）；补 draft `max_model_len` 更新链 | — |
 | ch06 §6.16.6 | `num_common_prefix_blocks` 清理；`common_prefix_len` 说明 | — |
 | ch08 §8.4.3 | `cache_blocks` 的调用条件多出第三分支：Mamba + 同步调度 + prefix caching | — |
-| ch08 §8.x | `compile_hash` → `compile_factors`；FULL/PIECEWISE 捕获顺序注释；capture-size 配置拆分与 `_decode_descs` 请求数表（只简短点到） | #65652 |
+| ch08 §8.x | `compile_hash` → `compile_factors`；FULL/PIECEWISE 捕获顺序注释；capture-size 配置拆分与 `_decode_descs` 请求数表（已在 §8.14.3、§8.14.7 展开） | #65652 |
 | ch09 §9.9.3 | 投机解码与 PCP 的限制改为 `pcp_unsupported_reason` | — |
 | ch09 §9.7.7 | 新增 `_has_global_unfinished_reqs` 容错分支一段（`core.py:2864-2866`） | — |
 | ch07（§7.25 附近） | `init_speculator` / `speculator_class` 命名 | — |
@@ -44,7 +44,7 @@
 
 ## 四、存疑与未尽事项
 
-- ch08 §8.14 的 capture-size 配置拆分（`prefill_/decode_cudagraph_capture_*`）和 `_decode_descs` 请求数表只做了简短提示，没有展开重写；如要完整覆盖需另起一批。
+- ch08 §8.14 的 capture-size 配置拆分（`prefill_/decode_cudagraph_capture_*`）和 `_decode_descs` 请求数表已在 §8.14.3 与新增的 §8.14.7 展开重写（行号核对到 pin `05caae03`）。
 - MRV2 里没有对应 compile_sizes padding 校验，正文只写“已删除”，没有断言替代行为。
 - 7.32、8.26 的发布祖先表仍保留 v0.33.0 时代口径，不是遗漏。“main 上的变化”注记已在 r2 按第五节第 6 项改写，不再使用“未发版”标签。
 - 上游 `docs/` 里仍有 V1 历史叙述（含 `docs/design/model_runner_v2.md` 的 MRV1 对照），本批未据此改动；按规则不对外提交，仅记在 bot-hub。

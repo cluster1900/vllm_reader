@@ -2349,5 +2349,5 @@ Update 发现请求不存在或已 finished 后直接跳过，不能追加 token
 - [ ] 在真实在线服务上比较 TTFT、TPOT 与 throughput。
 
 本章正文已经完整，`content_complete=true`。当前机器缺少可用 vLLM GPU runtime，
-因此 `runtime_verified=false`，按项目规则保持 `draft`。
+因此 `runtime_verified=false`，待 GPU 动态验证，状态为 `draft`。
 

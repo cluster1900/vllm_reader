@@ -98,7 +98,7 @@ $n_{\mathrm{users}}$、$n_{\mathrm{GPU}}$，不写 $N_{\dots}$。
 | 符号 | 含义 | 单位 | 备注 |
 |---|---|---|---|
 | $b_{\mathrm{elem}}$ | 一个元素占的字节数（bf16 为 2） | byte/元素 | 旧 $B_{\mathrm{dtype}}$ |
-| $M_{\mathrm{tok}}$ | 每 token 的 KV 字节数，$M_{\mathrm{tok}}=2LH_{\mathrm{kv}}d_hb_{\mathrm{elem}}$（单卡用 $H_{\mathrm{kv,local}}$） | byte/token | 旧 $B_{\mathrm{token}}$（ch01、ch05）；ch04 同名的 token 预算改为 $N_{\mathrm{budget}}$。ch01 L906 先给通式 $M_{\mathrm{tok}}=L(H_kd_k+H_vd_v)\,b_{\mathrm{elem}}$（K、V 的 head 数和宽度可以不同），本行是 $H_k=H_v=H_{\mathrm{kv}}$、$d_k=d_v=d_h$ 的特例；MLA 等压缩缓存不在这两个式子之内 |
+| $M_{\mathrm{tok}}$ | 每 token 的 KV 字节数，$M_{\mathrm{tok}}=2LH_{\mathrm{kv}}d_hb_{\mathrm{elem}}$（单卡用 $H_{\mathrm{kv,local}}$） | byte/token | 旧 $B_{\mathrm{token}}$（ch01、ch05）；ch04 同名的 token 预算改为 $N_{\mathrm{budget}}$。ch01「KV Cache 容量公式」一节先给通式 $M_{\mathrm{tok}}=L(H_kd_k+H_vd_v)\,b_{\mathrm{elem}}$（K、V 的 head 数和宽度可以不同），本行是 $H_k=H_v=H_{\mathrm{kv}}$、$d_k=d_v=d_h$ 的特例；MLA 等压缩缓存不在这两个式子之内 |
 | $M_{\mathrm{blk}}$、$M_{\mathrm{seq}}$ | 每 block、每序列的 KV 字节数：$M_{\mathrm{blk}}=B_{\mathrm{blk}}M_{\mathrm{tok}}$，$M_{\mathrm{seq}}=S\,M_{\mathrm{tok}}$ | byte | 旧 $B_{\mathrm{block}}$、$B_{\mathrm{sequence}}$ |
 | $M_{\mathrm{total}}$、$M_{2048}$ | 全部请求的 KV 总字节数；2048 token 的 KV 字节数（ch01 算例） | byte | 旧 $B_{\mathrm{total}}$、$B_{2048}$ |
 | $M_{\mathrm{KV}}$ | 可分给 KV Cache 的显存，$M_{\mathrm{KV}}=M_{\mathrm{req}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph}}$ | byte | ch07 §7.9 与 ch08 §8.17.2 讲的是同一个量 |
@@ -148,8 +148,8 @@ $n_{\mathrm{users}}$、$n_{\mathrm{GPU}}$，不写 $N_{\dots}$。
 5. **代码名与数学记号并列**：第一次出现时写 `num_computed_tokens`（$N_{\mathrm{computed}}$），之后在公式里用记号，
    在讲源码时用代码名。
 6. **同一个量只有一种写法**：同一章里已经有的写法优先；跨章不一致的，以第 1 节为准。
-7. **局部字母**只在所在小节有效，必须不在第 1 节（整个符号相同才算冲突，$b$ 与 $b_{\mathrm{elem}}$ 是两个符号），并在首次出现处用“其中”定义，在第 3 节登记；
-   不同章的局部字母可以重名。第 1 节与第 3 节的符号互不相交由 `tests/test_notation.py` 检查。
+7. **只在一节里用的符号**（局部字母，以及少数用 `\mathrm` 写的命名符号，如 $\mathrm{score}_i$、$\mathrm{dump}$）只在所在小节有效，必须不在第 1 节（整个符号相同才算冲突，$b$ 与 $b_{\mathrm{elem}}$ 是两个符号），并在首次出现处用“其中”定义，在第 3 节登记；
+   不同章里只在一节里用的符号可以重名。第 1 节与第 3 节的符号互不相交由 `tests/test_notation.py` 检查。
 8. **索引**（$i$、$j$、$k$、$r$、$t$）一律是局部字母，不登记在第 1 节；第 1 节里 $z_i$、$N_{q,r}$ 的 $i$、$r$ 只是下标。
 
 ## 3 局部字母表
@@ -168,6 +168,14 @@ $n_{\mathrm{users}}$、$n_{\mathrm{GPU}}$，不写 $N_{\dots}$。
 | ch05 | $E_i$、$i$、$j$ | 覆盖 block 与 lookahead 范围的 `extra_keys`；block 序号 |
 | ch06 | $i$、$b$、$o$、$m$、$Z$、$m'$、$Z'$、$m_{\mathrm{tile}}$、$\mathrm{pos}_0$、$E_{\mathrm{max}}$、$B_{\mathrm{mgr}}$、$B_{\mathrm{ker}}$、$\kappa$、$i_{\mathrm{mgr}}$ | §6.4 地址公式里的逻辑 block 序号与物理 block ID；$o$ 是 attention 的输出向量；$m,Z$ 是在线 softmax 的当前最大值与分母（旧 $\ell$，让给 ch09 的 local rank），带撇号是合入新片段之后的值，$m_{\mathrm{tile}}$ 是新片段的最大分数；$\mathrm{pos}_0$ 是滑窗里首个 query 的位置；$E_{\mathrm{max}}$ 是一次 staged 写入的最长元素数；manager、kernel 的 block 大小、两者之比 $\kappa=B_{\mathrm{mgr}}/B_{\mathrm{ker}}$ 与 manager block 序号 |
 | ch07 | $k$、$x$ | FLy 判定里熵的 top-$k$ 大小（不是采样的 top-k）；输入 |
+| ch08 | $N_{\mathrm{graph}}$、$N_{\mathrm{pad}}$、$N_{\mathrm{uni}}$、$n_{\mathrm{ub}}$、$R$、$R_{\mathrm{graph}}$ | §8.14 全节（8.14.1–8.14.7）：descriptor 的 `num_tokens`（token，padding 之后）；padding 补的行数，$N_{\mathrm{pad}}=N_{\mathrm{graph}}-T$（token）；均匀 decode 批里每个请求的 query token 数（token/请求，批不是均匀 decode 时为 $\varnothing$）；批被切成的微批数（`num_ubatches`，个）；一批的请求数；descriptor 的 `num_reqs`（请求）。$R$ 与第 1 节的 $B$ 含义相同（一批里的请求数）；$B$ 只用在教学形状里，这里为与 $R_{\mathrm{graph}}$、$R_{\mathrm{key}}$ 成对而用 $R$；它不是 $n_{\mathrm{req}}$（benchmark 的成功请求数） |
+| ch08 | $\varnothing$、$\mathrm{compat}$ | §8.14.2：空值（源码的 `None`）；六项条件的合取（布尔量） |
+| ch08 | $m$、$R_{\mathrm{key}}$、$\mathrm{tbl}$、$j$、$t$、$N_{\mathrm{pick}}$、$\mathcal S_{\mathrm{mode}}$、$u_k$、$k$ | §8.14.3：批里最长的 query token 数 $m=\max_rN_{q,r}$；decode 表的查表请求数（源码变量 `n`）；decode 表这一组的列表及其下标；token 表的键（token 数）；键 $t$ 对应的“刚好够大”的 graph token 数；同一模式、同一 LoRA 情形下 token 键 descriptor 的 token 数集合；这个集合里从小到大第 $k$ 个 token 数 |
+| ch08 | $N_{\mathrm{buf}}$、$M_{\mathrm{buf}}$ | §8.14.5：持久输出 buffer 的行数（token）与字节数（byte） |
+| ch08 | $N_{\mathrm{cap}}$、$N_{\mathrm{dec,cap}}$、$N_{\mathrm{dec,budget}}$、$N_{\mathrm{shared}}$ | §8.14.7：记录下来的最大 capture token 数（`max_cudagraph_capture_size`）；decode graph 的 token 上限；decode 的 token 预算（`max_decode_cudagraph_capture_tokens`）；拆分之前的共享上限（token） |
+| ch08 | $R_{\mathrm{lim}}$、$R_{\mathrm{uni,max}}$、$R_{\max}$、$R_j$、$R_{j^\ast}$、$T_j$ | §8.14.7（请求或 token）：一个 query 长度下 decode graph 的请求数上限；这个 query 长度的批最多有的请求数；`max_num_seqs`；decode 请求数列表里第 $j$ 个数；第一个不小于 $R_{\mathrm{lim}}$ 的元素；共享 token 列表里第 $j$ 个数 |
+| ch08 | $\mathcal L_{\mathrm{dec}}$、$\mathcal L_{\mathrm{pre}}$、$\mathcal L_{\mathrm{shared}}$、$\mathcal E$、$\mathcal Q$ | §8.14.7：decode 的请求数列表；prefill 的 token 数列表；共享的旧 token 列表；一个 query 长度要捕获的（请求数, query 长度）对的集合；target 的 decode query 长度集合 |
+| ch08 | $x$、$x_{\mathrm{next}}$、$\mathrm{step}$、$\mathrm{stride}$、$n_{\mathrm{desc}}$、$n_{\mathrm{lora}}$ | §8.14.7：网格里当前的数及其下一个数；网格函数里“想要的步长”与取成 2 的幂后的步长；要捕获的 descriptor 总数；LoRA 情形数（`len(lora_capture_cases)`） |
 | ch09 | $A,A_i,X_i,Y_i,b_i$、$Y^{\mathrm{part}}_i$、$u_r,f_r,\Sigma_u,\Sigma_f$、$G_2$、$\hat T$、$\mathrm{pad}_{r,t}$、$\alpha,\beta$、$N_{\mathrm{sch},i}$、$N_{\mathrm{drf},i}$、$N_{\mathrm{acc},i}$ | TP 线性层的权重与分片（$A$ 是权重，为避免与 world size $W$ 冲突）、偏置 $b_i$；行并行的 partial output；DP 同步的两个标志和它们的和；all-reduce 分组大小；PCP 填充后每 rank 的 token 数及其掩码；通信的固定延迟（s）与有效带宽（byte/s）（ch01 的 RoPE 角用 $\theta_1$、$\theta_2$）；「v0.33.0：batch-sharded sampling 可与自适应验证同开」一节里请求 $i$ 调度时预留的 logits 行数、带的 draft token 数、实际接纳的 draft 数（$N_{\mathrm{sch},i}$ 是按调度上限预留的 logits 行数，**不等于**第 1.3 节的 $N_{\mathrm{scheduled}}$，后者是 ch04 里请求本步被调度的 token 数） |
 | ch09 | $\mathrm{score}_i$、$\mathrm{score}^{\mathrm{base}}_i$ | §9.7.3 engine $i$ 的负载分数及其基础分（无单位，分数低的 engine 优先接新请求） |
 | ch09 | $n_{\mathrm{exp}}$、$n_{\mathrm{base}}$、$n_{\mathrm{rem}}$、$n_{\mathrm{exp},r}$、$\mathrm{start}_r$ | §9.8.2 expert 放置：expert 总数、每个 rank 至少拥有的个数、多出来的个数、rank $r_{\mathrm{ep}}$ 实际拥有的个数、`linear` 放置时它的起点 |
@@ -307,6 +315,7 @@ $n_{\mathrm{users}}$、$n_{\mathrm{GPU}}$，不写 $N_{\dots}$。
 | $M_{\mathrm{available\ KV}}$、$M_{\mathrm{graph\ reserve}}$ | $M_{\mathrm{KV}}$、$M_{\mathrm{graph}}$ | 可给 KV 的显存、graph 预留 |
 | $M_{\mathrm{requested}}$ | $M_{\mathrm{req}}$ | `requested_memory` |
 | `P`（PP stage 数） | $\mathrm{PP}$ | pipeline stage 数 |
+| 源码变量 `n`（`n = cdiv(num_tokens, uniform_token_count)`） | $R_{\mathrm{key}}$ | §8.14.3 decode 表的查表请求数 |
 
 ### ch09 分布式
 
@@ -441,6 +450,6 @@ $$
 ## 8 共享文件与维护约定
 
 - 本文件（`glossary/notation.md`）是全书符号的唯一登记处：第 1 节是带固定含义的命名符号（可以只在一章里出现），
-  第 3 节是只在一节里用的裸字母；改名后在第 4 节追加一行。第 1 节与第 3 节的符号互不相交、第 1 节的符号只登记一次，由 `tests/test_notation.py` 检查。
+  第 3 节是只在一节里用的符号（裸字母，也有少数用 `\mathrm` 写的命名符号，如 $\mathrm{score}_i$、$\mathrm{cap\_bound}$）；改名后在第 4 节追加一行。第 1 节与第 3 节的符号互不相交、第 1 节的符号只登记一次，由 `tests/test_notation.py` 检查。
 - `glossary/terms.md`、`book/README.md`、`book/reading-guide.md`：术语表、总览和阅读指南，改符号约定时同步检查。
 - 章节保持 `draft`、`runtime_verified: false`；源码引用保持 pin `05caae03c20f69436ff7ec23ded339ea104f1a01`。

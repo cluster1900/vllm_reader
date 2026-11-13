@@ -1765,5 +1765,5 @@ Actor mixin 提供 Ray 生命周期、可见 GPU 和免握手覆盖；EngineCore
 - [ ] 启动真实在线服务验证信号、ZMQ 和 EngineDeadError 传播。
 
 本章正文已经完整，`content_complete=true`。当前机器缺少可用 vLLM GPU runtime，
-因此 `runtime_verified=false`，按项目规则保持 `draft`。
+因此 `runtime_verified=false`，待 GPU 动态验证，状态为 `draft`。
 

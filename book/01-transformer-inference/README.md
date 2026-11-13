@@ -2067,7 +2067,5 @@ sequence lengths、request ordering，以及用于 KV 寻址的 block tables 和
 - [x] 包含异常路径、设计取舍、自检题、答案和源码追踪题。
 - [ ] 在真实 NVIDIA GPU 上执行预训练模型与 vLLM runtime trace。
 
-本章内容已经完整，`content_complete=true`。按照本项目规则，AI 生成内容不能仅因篇章
-完成就自行标记为 `verified`；当前 `runtime_verified=false`，等待 GPU 动态验证和独立
-审阅。
+本章内容已经完整，`content_complete=true`；`runtime_verified=false`，待 GPU 动态验证。
 
