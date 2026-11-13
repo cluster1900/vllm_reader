@@ -488,7 +488,7 @@ $$
 
 1. 开始时 `token_budget` $=C_{\mathrm{step}}$；
 2. 每调度一个请求，先把它的 token 数裁到不超过当前 `token_budget`（`min(…, token_budget, …)`），再从 `token_budget` 里扣掉；
-3. priority 策略下，已经排进本轮的请求如果又被抢占，它的份额会退回 `token_budget`（4.13）。所以任何时刻都有 $\sum_r N_{\mathrm{scheduled}}(r)=C_{\mathrm{step}}-\text{token\_budget}$，而 `token_budget` 因为每次先裁剪再扣减，永远不会变成负数，于是和不超过 $C_{\mathrm{step}}$。
+3. priority 策略下，已经排进本轮的请求如果又被抢占，它的份额会退回 `token_budget`（4.13）。所以任何时刻都有 $\sum_r N_{\mathrm{scheduled}}(r)=C_{\mathrm{step}}-\text{token\_budget}$（暂停时除外：`PAUSED_ALL` 下 `token_budget` 直接置 0 且不调度任何请求，和为 0，上界仍成立），而 `token_budget` 因为每次先裁剪再扣减，永远不会变成负数，于是和不超过 $C_{\mathrm{step}}$。
 
 算例（4.11 的教学配置 $C_{\mathrm{step}}=8$）：step 1 调度 A 的 6 个与 B 的 2 个，$6+2=8\le8$，额度正好用完；step 2 调度 $1+1+2=4\le8$，剩 4。单位检查：两边都是 token。
 
@@ -739,7 +739,7 @@ Chunked prefill 让长 prompt 分多轮推进，可与 decode 共享预算。例
 [源码] `vllm/v1/core/sched/scheduler.py` - `Scheduler.schedule` 的预算裁剪与 waiting 准入
 
 
-Chunked prefill 把长差额裁成预算允许的片段：本轮真正调度的 token 数，是差额与各项上限里最小的那个。
+Chunked prefill 把长差额裁成预算允许的片段：本轮真正调度的 token 数不大于差额与各项上限里最小的那个；没有 Mamba 对齐、lookahead 预留这类向下取整的步骤时，正好等于它。
 
 $$
 \begin{aligned}
@@ -748,13 +748,14 @@ N_{\mathrm{chunk}} = \min\bigl(&N_{\mathrm{remaining}},\; N_{\mathrm{budget}},\;
 \end{aligned}
 $$
 
-**白话：**每个上限都说“这一轮最多再给你这么多”，要同时满足所有上限，就只能取最小的那个；没算完的部分留到下一轮。
+**白话：**每个上限都说“这一轮最多再给你这么多”，要同时满足所有上限，就不能超过其中最小的那个；没算完的部分留到下一轮。
 
 **其中：**所有项以 token 为单位。$N_{\mathrm{remaining}}$ 是还没算的差额（4.5 的 $N_{\mathrm{new}}$）；
 $N_{\mathrm{budget}}$ 是本轮剩余的 token 预算（`token_budget`，不是字节数）；
 $N_{\mathrm{budget,in}}$ 是输入侧剩余预算（`input_budget`）减去为 draft 预留的位置（`draft_slots`）之后的值；
-$C_{\mathrm{threshold}}$ 是 `long_prefill_token_threshold` 当前生效的值（只在多于一个请求时才起作用，见 4.10.3），没有生效时可以看作无穷大；
+$C_{\mathrm{threshold}}$ 是 `long_prefill_token_threshold` 当前生效的值（只在开启 chunked prefill 且多于一个请求时才起作用，见 4.10.3），没有生效时可以看作无穷大；
 $C_{\mathrm{other}}$ 表示其余上限：`max_model_len` 余量、Mamba block 对齐、encoder 预算、prefill lookahead 等。
+其中 Mamba 对齐和 lookahead 预留是向下取整，不是简单的上限；它们生效时 $N_{\mathrm{chunk}}$ 比下式的最小值更小，下式的等号对应它们不生效的情形（本节算例都属此类）。
 
 **怎么算出来：**源码不是一次写出这个 `min`，而是按顺序一层一层往 `num_new_tokens` 上套上限：
 
@@ -763,7 +764,7 @@ $C_{\mathrm{other}}$ 表示其余上限：`max_model_len` 余量、Mamba block �
 3. 再和 `token_budget`、`input_budget - draft_slots` 取最小（`:807-809`）；
 4. 再依次和 `max_model_len` 余量（`:813-817`）取最小，并经过 Mamba 对齐、encoder 预算、lookahead 保留这几步截断。
 
-每一层的结果都不会比上一层大，所以连续套用，等于一次取所有项的最小值，这就是上式。
+每一层的结果都不会比上一层大，所以连续套用，结果不大于所有项的最小值；没有对齐和预留这类向下取整时恰好等于最小值，这就是上式的 $\min$。
 
 算例：用 4.10.1 的上游测试：3 个 800-token prompt，`max_num_batched_tokens=1024`（$N_{\mathrm{budget}}$ 和 $N_{\mathrm{budget,in}}$ 一开始都是 1024，没有 draft），$C_{\mathrm{threshold}}=400$，不计 $C_{\mathrm{other}}$。
 
@@ -851,7 +852,7 @@ chunked prefill 后，如果下一个长请求整体放不进剩余 budget，Sch
 
 `long_prefill_token_threshold` 是条件化的额外上限，不是总 chunk 大小。v0.31.0 先从
 `get_request_counts()` 取得 running + waiting（含 `kv_holding_waiting`）请求数：
-只有多于一个请求时才启用 cap；
+只有开启 chunked prefill 且多于一个请求时才启用 cap；
 单独一个长请求可以使用整轮预算。若同时启用 `long_prefill_token_threshold_adaptive`，
 有效 cap 为配置阈值与本轮初始 `input_budget // num_eligible_reqs` 的较大值。
 
@@ -1087,7 +1088,7 @@ $N_{\mathrm{computed}}$ 是请求开始调度时的计算进度（`num_computed_
 
 **怎么算出来：**
 
-1. 本地查询：在请求的 block hash 链上找最长命中，命中长度的上限是 $N_{\mathrm{tokens}}-1$（最后一个 token 一定要重算才能得到 logits，`vllm/v1/request.py:352-356`），得到 $N_{\mathrm{hit,local}}$；
+1. 本地查询：在请求的 block hash 链上找最长命中，命中长度至多 $N_{\mathrm{tokens}}-1$（最后一个 token 一定要重算才能得到 logits；另受 `prefix_cache_hit_limit` 与 aux 上限约束，`vllm/v1/request.py:352-356`），得到 $N_{\mathrm{hit,local}}$；
 2. 外部查询：把本地命中（取整 block 的部分）交给 connector，它返回在这之后还能提供多少 token（`get_num_new_matched_tokens`），这就是 $N_{\mathrm{hit,ext}}$。外部命中从本地命中的末尾开始数，两段不重叠，所以可以直接相加；
 3. 两段相加得到 $N_{\mathrm{computed}}$，源码断言结果不超过 $N_{\mathrm{tokens}}$（`scheduler.py:1204`）。
 
@@ -1106,6 +1107,7 @@ $$
 
 **其中：**$N_{\mathrm{tokens}}$ 是请求当前已知的 token 总数（`num_tokens`）；刚接纳的 waiting 请求没有 draft，也没有 placeholder，所以这里不加这两项；
 被抢占后重新接纳的请求，$N_{\mathrm{tokens}}$ 还包含它之前已经生成的输出 token。$N_{\mathrm{new}}$ 仍是预算裁剪之前的差额。
+单位检查：$N_{\mathrm{tokens}}$ 与 $N_{\mathrm{computed}}$ 都是 token 数，相减仍是 token 数。
 
 **怎么算出来：**这是 4.5 的 $N_{\mathrm{new}}=N_{\mathrm{target}}-N_{\mathrm{computed}}$ 在 waiting 路径上的特例：没有 draft 和 placeholder 时 $N_{\mathrm{target}}=N_{\mathrm{tokens}}$。
 代入上面的例子：$N_{\mathrm{new}}=100-80=20$，这 20 个 token 之后还要经过 4.10 的取最小。
@@ -1196,7 +1198,7 @@ flowchart TB
 [测试] `tests/v1/core/test_scheduler.py` - `test_no_mm_input_chunking`、
 `test_no_mm_input_chunking_for_same_step_duplicate`、`test_same_step_duplicate_encoder_input_stays_cached`
 
-### 4.16.1 “恰好从 item 起点开始”的切分判定（v0.33.0）
+### 4.16.1 “恰好从 item 起点开始”的切分判定（v0.33.0 起，v0.34.0rc0 补全）
 
 设某个多模态 item 在序列中从位置 $\mathrm{pos}_{\mathrm{mm}}$ 开始（源码 `start_pos`），共占 $N_{\mathrm{mm}}$ 个 encoder token
 （`num_encoder_tokens`）；本轮请求已计算 $N_{\mathrm{computed}}$ 个 token（`num_computed_tokens`），本轮准备再调度
@@ -1235,6 +1237,7 @@ $$
 解出 $N_{\mathrm{new}}'\le\mathrm{pos}_{\mathrm{mm}}-N_{\mathrm{computed}}-\delta$，再取满足条件的最大非负整数，就是上式。
 若 $N_{\mathrm{computed}}\ge\mathrm{pos}_{\mathrm{mm}}$，右边不是正数（$\delta\ge0$），结果为 0。源码把这两种情况写成两个分支：
 $N_{\mathrm{computed}}<\mathrm{pos}_{\mathrm{mm}}$ 时用上式，否则直接置 0，两者一致。
+单位检查：$\mathrm{pos}_{\mathrm{mm}}$、$N_{\mathrm{computed}}$、$\delta$ 都是 token 位置或个数，差仍是 token 数，所以 $N_{\mathrm{new}}'$ 是 token 数。
 
 继续上面的例子（$\delta=0$）：
 
@@ -1247,8 +1250,7 @@ encoder-decoder 模型被显式排除在这个检查之外。
 **核对：**两个式子对应 `vllm/v1/core/sched/scheduler.py:2066-2084`（`_try_schedule_encoder_inputs`）@ `05caae03`。
 上游测试 `test_no_mm_input_chunking_at_item_boundary` 用 offset=400、length=800 的 item，以 $(N_{\mathrm{computed}},N_{\mathrm{new}})\to N_{\mathrm{new}}'$ 的写法：
 $(0,500)\to400$、$(400,500)\to0$、$(400,800)\to800$、$(600,500)\to0$、$(600,600)\to600$，逐个代入上面两个式子，得到同样的数。
-本章此前按 v0.33.0 把触发条件写成还要满足 $N_{\mathrm{computed}}\le\mathrm{pos}_{\mathrm{mm}}$；`05caae03` 的守卫已经没有这个前提，起点在 item 内部时同样回退为 0
-（测试 `test_no_mm_input_chunking_after_prefix_cache_hit_inside_item`），本节已按 `05caae03` 改正。
+版本说明：v0.33.0 的守卫是 `num_computed_tokens <= start_pos and …`；#65271（`65a904538d`，v0.34.0rc0）去掉了 `<=` 前提，起点在 item 内部时同样回退为 0（测试 `test_no_mm_input_chunking_after_prefix_cache_hit_inside_item`）。
 
 ```mermaid
 flowchart TD
@@ -1342,7 +1344,7 @@ its blocks were freed and its worker state dropped at preemption”（`scheduler
 | `kv_cache_block_copies` | 本轮执行前需要完成的 CoW copy |
 | connector metadata | KV/encoder cache 传输协议数据 |
 | `num_spec_tokens_to_schedule` | 动态 speculative decoding 的 K |
-| `encoder_input_updates` | MRV2（V2 Model Runner）专用：按请求下发 encoder 输入 CPU payload 的释放或恢复（v0.33.0） |
+| `encoder_input_updates` | 按请求下发 encoder 输入 CPU payload 的释放或恢复（v0.33.0）；Scheduler 总会生成，GPU MRV2（V2 Model Runner）与 CPU standalone runner 消费 |
 | `skip_drafts` | 本轮之后提出的 draft 一定用不上，drafter 可以跳过（v0.33.0） |
 
 自 v0.32.0 起已删除 cascade attention 的执行与公共前缀统计链。v0.33.0 还留着的兼容字段 `SchedulerOutput.num_common_prefix_blocks`
@@ -1357,7 +1359,7 @@ SchedulerOutput 把控制面决定转换为第 07 章 Model Runner 能消费的�
 
 spec decode 在每步之后都会提出下一批 draft；但如果本轮之后没有任何请求会去验证它们，这次
 drafting 就是浪费。v0.33.0（#62784，提交 `856b98415`）让 Scheduler 判断这一点并写入
-`SchedulerOutput.skip_drafts`。只有 `can_skip_drafts`（`num_lookahead_tokens > 0` 且使用 MRV2）
+`SchedulerOutput.skip_drafts`。只有 `can_skip_drafts`（`num_lookahead_tokens > 0`；`skip_drafts` 由 MRV2 的 `worker/gpu/model_runner.py` 消费）
 为真时才会判断，否则 `skip_drafts` 恒为 `False`。
 
 对每个本轮被调度的请求 $r$，`_drafts_unused` 判定“它之后的 draft 一定用不上”：
@@ -1381,7 +1383,8 @@ stop token 与 stop string 无法提前知道，所以只按这两种“确定�
 **其中：**$N_{\mathrm{computed}}$ 是本步前已算 token 数（含前缀缓存与 KV connector 命中）；$N_{\mathrm{new}}$ 是本步调度的 token
 数；$N_{\mathrm{tokens}}$ 是请求当前已知 token 总数（`num_tokens`）；$N_{\mathrm{out}}$ 是已确认的输出 token 数；$a_{\mathrm{async}}$ 在存在
 async output placeholder 时取 1（还有一个在途的采样步），否则取 0；$N_{\mathrm{max}}$ 是 `max_tokens`；$\mathrm{batch}$ 是本轮被调度的全部请求。
-$\vee$ 是“或”，$\bigwedge$ 是“全部成立”；单位：前三个量和 $N_{\mathrm{out}}$、$N_{\mathrm{max}}$ 都是 token，$a_{\mathrm{async}}$ 是 0 或 1。
+$\vee$ 是“或”，$\bigwedge$ 是“全部成立”；$\operatorname{unused}(r)$ 与 $\mathrm{skip\_drafts}$ 是布尔值。
+单位检查：不等式两边都是 token 数（$N_{\mathrm{out}}+1+a_{\mathrm{async}}$ 里的 1 和 $a_{\mathrm{async}}\in\{0,1\}$ 都按 token 个数计），比较才有意义。
 
 **怎么算出来：**draft 在某一步之后提出，要在该请求的下一次 decode 步里验证；没有下一次 decode 步，draft 就是白提。这样的“确定没有”只有两种：
 
@@ -1424,9 +1427,9 @@ flowchart TD
 
 ### 4.17.4 `encoder_input_updates`：MRV2 的 encoder 输入 payload（v0.33.0）
 
-MRV2 在 Worker 侧为每个请求保留多模态输入的 CPU payload，供需要重新编码时使用。为了不无限
+MRV2（以及 CPU standalone runner）在 Worker 侧为每个请求保留多模态输入的 CPU payload，供需要重新编码时使用。为了不无限
 占内存，v0.33.0（#57368，提交 `373614f66`）让 Scheduler 通过 `_get_encoder_input_updates`
-告诉 Worker 哪些输入可以释放、哪些要恢复。非 MRV2 直接返回空字典。规则是：
+告诉 Worker 哪些输入可以释放、哪些要恢复。Scheduler 对所有 runner 都生成该表；GPU MRV2 与 CPU standalone runner 消费它。规则是：
 
 - 新请求（含 resume、streaming 重新安装）的 `mm_features` 里，有 `data` 且不含 `"address"`
   （即不是共享内存描述符）的输入登记为 pending；共享内存描述符走处理器缓存自己的 ACK 协议，
@@ -1642,7 +1645,7 @@ sequenceDiagram
 
 > **读图方法：** 这是 speculative rejection 回滚的时间线。先从左到右认四个角色，Q 是被改的那组计数，其余三个是改它的人；再从上到下看三次改账：调度时按乐观值记账，结果回来后先退拒绝的 draft，再按 stop 位置退被截掉的 token。每一步右边的数字就是该步之后的计数，最后一行的两个数应满足 `N_computed = N_tokens - 1`。同步调度时 `N_placeholders` 恒为 0，只看 `N_computed` 那条线。
 
-之后，若请求原为 RUNNING、本次输出不是 stale，且此前有 placeholder 或开启了 spec decode，
+之后，若请求原为 RUNNING、本次输出不是 stale，且此前有 placeholder 或开启了 spec decode（Mamba 同步调度且开启 prefix caching 时也会调用），
 基类会调用 `kv_cache_manager.cache_blocks(request, num_computed_tokens - num_in_flight_tokens)`，
 只缓存已确认的部分：这个上限是 $N_{\mathrm{cacheable}}=N_{\mathrm{computed}}-N_{\mathrm{in\ flight}}$，上面的算例里是 $21-0=21$；这段逻辑原先在 `AsyncScheduler` 里，由 #61589 搬到基类。
 

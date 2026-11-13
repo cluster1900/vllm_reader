@@ -2,10 +2,13 @@
 
 The helpers below are the formulas of book/04-scheduler/README.md written as code
 (notation: glossary/notation.md).  Each test replays the chapter's worked example
-step by step, so a changed number in the chapter has to be changed here too.
+step by step.  ``ReadmeSyncTest`` reads the chapter and asserts that the numbers
+produced by these helpers are the ones printed in the README, so a changed number
+in either place fails the test.
 """
 
 import unittest
+from pathlib import Path
 
 from examples.ch04_continuous_batching import Request, TeachingScheduler
 
@@ -200,6 +203,39 @@ class Ch04FormulaWalkthroughTest(unittest.TestCase):
         self.assertTrue(released(4, 10, 16, 1))
         # truncate: min(N_new, pos - computed)
         self.assertEqual(min(6, 4 - 0), 4)
+
+
+class ReadmeSyncTest(unittest.TestCase):
+    """The README text must contain the numbers the helpers compute."""
+
+    @classmethod
+    def setUpClass(cls):
+        root = Path(__file__).resolve().parents[1]
+        cls.readme = (root / "book" / "04-scheduler" / "README.md").read_text(encoding="utf-8")
+
+    def assertInReadme(self, text):
+        self.assertIn(text, self.readme)
+
+    def test_n_target_example(self):
+        t = n_target(4, 1, 2)
+        self.assertEqual(t, 7)
+        self.assertInReadme(f"$N_{{\\mathrm{{target}}}}=5+2={t}$")
+
+    def test_chunk_examples(self):
+        self.assertInReadme(f"$\\min(800,1024,1024,400)={n_chunk(800, 1024, 1024, 400)}$")
+        self.assertInReadme(f"$\\min(800,624,624,400)={n_chunk(800, 624, 624, 400)}$")
+        self.assertInReadme(f"$\\min(800,224,224,400)={n_chunk(800, 224, 224, 400)}$")
+        self.assertInReadme(f"$\\min(352,1022,1022,400)={n_chunk(352, 1022, 1022, 400)}$")
+
+    def test_mm_rollback_examples(self):
+        for computed, pos, delta, shown in [(0, 4, 0, "4-0"), (0, 4, 1, "4-1"), (4, 4, 0, "4-4"), (7, 4, 0, "4-7")]:
+            value = mm_rollback(computed, pos, delta)
+            self.assertInReadme(f"\\max(0,{shown})={value}$")
+
+    def test_hit_example(self):
+        self.assertEqual(4 * 16 + 16, 80)
+        self.assertInReadme("$N_{\\mathrm{computed}}=64+16=80$ token")
+        self.assertInReadme(f"$N_{{\\mathrm{{new}}}}=100-80={100 - 80}$")
 
 
 if __name__ == "__main__":

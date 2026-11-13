@@ -71,6 +71,8 @@ jobs:
           set -euo pipefail
           curl -fsSL -o "${RUNNER_TEMP}/pandoc.deb" \
             https://github.com/jgm/pandoc/releases/download/3.9/pandoc-3.9-1-amd64.deb
+          # sha256 of pandoc-3.9-1-amd64.deb (matches the digest GitHub lists for the asset)
+          echo "f95d6e280da0daec1297bc2608bd537de563eadc31b56088d258532abcd257f4  ${RUNNER_TEMP}/pandoc.deb" | sha256sum -c -
           sudo dpkg -i "${RUNNER_TEMP}/pandoc.deb"
           pandoc --version | head -n 1
 
