@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.math_support import ROOT, check_math
+from scripts.math_support import ROOT, check_math, markdown_formulas
 from scripts.notation_census import WRAPPER, census, code_symbols, flatten_scripts, formula_symbols, render
 
 
@@ -219,6 +219,21 @@ class NotationGuideTest(unittest.TestCase):
                      "新批次的 token 数", "下一个批次", "本批次的请求数", "每个批次的 token 数", "该批次内的请求",
                      "按批次统计 token 数", "上一批次已经完成", "下一个批次里\n的请求"):
             self.assertEqual(process_hits(text), [], text)
+
+    def test_math_holds_no_cjk_text(self):
+        """Inline and display math renders without a CJK font, so Chinese stays outside `$...$` (code spans are not math)."""
+        cjk = re.compile(r"[\u3000-\u303f\u3400-\u9fff\uff00-\uffef]")
+        self.assertEqual([f.tex for f in markdown_formulas("说明 `$x，y$` 与\n```\n$$\n中文\n$$\n```\n")], [])
+        self.assertTrue(any(cjk.search(f.tex) for f in markdown_formulas("行内 $\\text{批次}$ 与\n$$\nx=\\text{否则}\n$$\n")))
+        paths = sorted((ROOT / "book").glob("*/README.md")) + [
+            ROOT / "book/README.md", ROOT / "book/reading-guide.md", ROOT / "glossary/notation.md"]
+        found = {}
+        for path in paths:
+            bad = [f"line {f.line}: {f.tex[:40]}" for f in markdown_formulas(path.read_text(encoding="utf-8"))
+                   if cjk.search(f.tex)]
+            if bad:
+                found[str(path.relative_to(ROOT))] = bad
+        self.assertEqual(found, {})
 
     def test_descriptive_subscript_families_used_in_chapters_are_registered(self):
         """N_{..}, n_{..}, t_{..} and \\Delta t_{..} symbols that chapters use must be in section 1 or 3."""
