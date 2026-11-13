@@ -7,6 +7,19 @@ from scripts.math_support import ROOT, check_math
 from scripts.notation_census import WRAPPER, census, code_symbols, flatten_scripts, formula_symbols, render
 
 
+PROCESS_TALK = [
+    r"meta/",
+    r"\bmeta[-\s]+(?:file|note|doc|review|tracking)",
+    r"\b[Rr]eview(?:er)?s?\b",              # does not match pedagogy_reviewed_at
+    r"\bB9\b", r"B1[-–]B8", r"\bB\d+\s*批次", r"批次\s*(?:B\d|PR|开工|补写|改写)",
+    r"(?:后续|各|每个?|本|上一个?|下一个?|该|新|F/D\s*)批次",
+    r"bot-hub", r"\btracker\b", r"本\s*PR\b", r"独立审阅",
+    r"上一轮(?:审阅|评审|review|复核|改写|修订|批次|PR)", r"5893426b",
+    r"applied_cudagraph_memory_estimate",
+]
+PROCESS_PATTERN = re.compile("|".join(f"(?:{item})" for item in PROCESS_TALK))
+
+
 def _section(text: str, start: str, end: str) -> str:
     return text.split(start, 1)[1].split(end, 1)[0]
 
@@ -106,7 +119,7 @@ class NotationGuideTest(unittest.TestCase):
     def test_has_every_required_section(self):
         for heading in ("## 1 全局符号表", "## 2 命名规则", "## 3 局部字母表", "## 4 改名对照表",
                         "## 5 写法规则", "## 6 公式讲解模板", "## 7 配图规则",
-                        "## 8 B1–B8 的优先清单", "## 9 共享文件与改动权限"):
+                        "## 8 共享文件与维护约定"):
             self.assertIn(heading, self.text)
 
     def test_template_requires_how_it_is_computed(self):
@@ -115,11 +128,6 @@ class NotationGuideTest(unittest.TestCase):
         self.assertIn("必写项", template)
         self.assertIn("推导", template)
         self.assertIn("算例", template)
-
-    def test_priority_list_names_all_27_groups(self):
-        section = self.text.split("## 8 B1–B8 的优先清单", 1)[1].split("## 9 ", 1)[0]
-        rows = [line for line in section.splitlines() if line.startswith("| B")]
-        self.assertEqual(len(rows), 27)
 
     def _registries(self):
         global_rows = _table_rows(_section(self.text, "## 1 全局符号表", "## 2 命名规则"))
@@ -153,7 +161,7 @@ class NotationGuideTest(unittest.TestCase):
             _section(self.text, "## 3 局部字母表", "## 4 改名对照表"))
         unregistered = {}
         for row in _table_rows(_section(self.text, "## 4 改名对照表", "## 5 写法规则")):
-            if len(row) < 4 or row[0] == "旧写法":
+            if len(row) < 3 or row[0] == "旧写法":
                 continue
             for key in keys(row[1]) - registered:
                 unregistered[key] = row[1]
@@ -173,9 +181,47 @@ class NotationGuideTest(unittest.TestCase):
 
     def test_diagram_rule_covers_required_and_optional(self):
         rule = self.text.split("## 7 配图规则", 1)[1].split("## 8 ", 1)[0]
-        self.assertIn("必配的 10 处", rule)
-        self.assertIn("review 提出的要求", rule)
-        self.assertIn("每个批次 PR 的正文必须列出做了哪些可选位置及原因", rule)
+        self.assertIn("必配图的 10 处", rule)
+        self.assertIn("**其他位置**只在**确实复杂**时才配图", rule)
+
+    def test_reader_text_has_no_process_talk(self):
+        """The notation guide and the chapters are reader text: no batches, review history or meta pointers.
+
+        Technical uses stay legal: 固定批次、局部批次、微批次、多批次 (a batch of requests), 上一轮 (the previous
+        scheduling round), vLLM PR citations such as #63098, and the front-matter key pedagogy_reviewed_at.
+        """
+        pattern = PROCESS_PATTERN
+        paths = sorted((ROOT / "book").glob("*/README.md")) + [
+            ROOT / "book/README.md", ROOT / "book/reading-guide.md", ROOT / "glossary/notation.md"]
+        found = {}
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            hits = sorted({m.group(0) for m in pattern.finditer(text)})
+            if hits:
+                found[str(path.relative_to(ROOT))] = hits
+        self.assertEqual(found, {})
+
+    def test_process_pattern_separates_process_from_technical_uses(self):
+        for text in ("后续批次补写", "B9 收尾", "见 meta/notes.md", "bot-hub#128", "本 PR 只改符号", "由独立审阅者复核",
+                     "上一轮审阅提出", "the review comments", "每个批次负责一章"):
+            self.assertTrue(PROCESS_PATTERN.search(text), text)
+        for text in ("固定批次完成时间", "局部批次携带全局信息", "双批次重叠微批次", "多批次在途", "上一轮 GPU 重叠",
+                     "pedagogy_reviewed_at: 2026-10-08", "见 vLLM #63098", "本轮批次行"):
+            self.assertIsNone(PROCESS_PATTERN.search(text), text)
+
+    def test_descriptive_subscript_families_used_in_chapters_are_registered(self):
+        """N_{..}, n_{..}, t_{..} and \\Delta t_{..} symbols that chapters use must be in section 1 or 3."""
+        def canon(key: str) -> str:
+            key = re.sub(r"\^\{[^}]*\}", "", key.replace("\\Delta", "").replace("\\overline", ""))  # superscripts do not name a new symbol
+            return re.sub(r",(i|j|r|k|t|l|[A-Z])\}$", "}", key)  # an index after the name: N_{rt,i} is N_{rt}
+
+        global_atoms, local_atoms = self._registries()
+        registered = {canon(atom) for atom in global_atoms + local_atoms}
+        math, _, _ = census(ROOT, include_code=False)
+        family = re.compile(r"^(?:\\overline\{)?(?:N|n|t)_\{[A-Za-z\\_,]{2,}\}")
+        missing = {key: sorted(chapters) for key, chapters in math.items()
+                   if family.match(canon(key)) and canon(key) not in registered}
+        self.assertEqual(missing, {}, "chapters use these symbols but section 1 or 3 does not register them")
 
 
 if __name__ == "__main__":

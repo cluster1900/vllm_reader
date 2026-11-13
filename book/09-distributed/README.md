@@ -45,6 +45,8 @@ prerequisites:
 engine，控制面仍可能汇总各 engine 的队列和 KV 使用率；启用 MoE wide EP 后，不同 DP
 rank 还会进入同一专家通信域。
 
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09，美国太平洋时间；2026-11-10 核对源码引用与行号）。
+
 ## 阅读目标
 
 读完本章后，你应当能够：
@@ -1464,7 +1466,7 @@ $$
 **白话：**把同一个 PP stage 里所有要跑 MoE 层的 GPU 排成一排，每张卡拿到一个 EP 编号，experts 就按这个编号分给各卡。
 DP、PCP、TP 在 MoE 层里不再各管各的，而是合成一个 EP 组。
 
-**其中：**$\mathrm{EP}$ 是 EP 组的大小；$r_{\mathrm{ep}}$ 是本卡在 EP 组里的编号（代码里的 `ep_rank`，是本节的局部记号）；
+**其中：**$\mathrm{EP}$ 是 EP 组的大小；$r_{\mathrm{ep}}$ 是本卡在 EP 组里的编号（代码里的 `ep_rank`）；
 $i_{\mathrm{dp}}$、$i_{\mathrm{pcp}}$、$i_{\mathrm{tp}}$ 是本卡的 DP、PCP、TP 坐标（§9.3.3），取值范围分别是 $0\ldots\mathrm{DP}-1$、$0\ldots\mathrm{PCP}-1$、$0\ldots\mathrm{TP}-1$。
 PP 不在乘积里：EP 组在每个 PP stage 内部各建一个；DCP 复用 TP rank，也不在乘积里。以上都是无单位的整数。
 
@@ -1587,15 +1589,15 @@ ARM、Power、Zen 的 INT8 实现只在 `not use_ep` 时可用（`:1262`、`:141
 写成公式，一层 MoE 对第 $t$ 个 token 的输出，以及各 rank 要算的 (token, expert) 对数是：
 
 $$
-y_t=\sum_{k=1}^{\mathrm{top\_k}} w_{t,k}\,E_{e_{t,k}}(x_t),\qquad
-\sum_{i=0}^{\mathrm{EP}-1}N_{\mathrm{rt},i}=N_{\mathrm{tok}}\times\mathrm{top\_k}
+y_t=\sum_{k=1}^{\mathtt{top\_k}} w_{t,k}\,E_{e_{t,k}}(x_t),\qquad
+\sum_{i=0}^{\mathrm{EP}-1}N_{\mathrm{rt},i}=N_{\mathrm{tok}}\times\mathtt{top\_k}
 $$
 
 **白话：**一个 token 要去 `top_k` 个 expert 各算一遍，结果按 router 给的权重加权求和，就是它在这一层的输出；
 把所有 rank 要算的 (token, expert) 对加起来，恰好是 token 数乘 `top_k`。
 
 **其中：**$t$ 是 token 序号，$x_t$、$y_t$ 是它进入、离开 MoE 层的 hidden state（形状相同）；$e_{t,k}$ 是它选中的第 $k$ 个 expert 的编号，$w_{t,k}$ 是 router 给这一对的权重，
-$E_e$ 是第 $e$ 个 expert 的 MLP；`top_k` 是每个 token 选几个 expert；$N_{\mathrm{tok}}$ 是本层要处理的 token 数；
+$E_e$ 是第 $e$ 个 expert 的 MLP；$\mathtt{top\_k}$（代码里的 `top_k`）是每个 token 选几个 expert，与采样的 $\mathrm{top\_k}$ 是两个不同的量；$N_{\mathrm{tok}}$ 是本层要处理的 token 数；
 $N_{\mathrm{rt},i}$ 是路由到 EP rank $i$ 上的 expert 的 (token, expert) 对数，$i=0,\dots,\mathrm{EP}-1$。
 $t$、$k$、$x_t$、$y_t$、$e_{t,k}$、$w_{t,k}$、$E_e$、$N_{\mathrm{tok}}$ 都是本节的局部记号。$w_{t,k}$ 无单位，$N_{\mathrm{rt},i}$ 与 $N_{\mathrm{tok}}$ 是计数。
 
@@ -1605,7 +1607,7 @@ $t$、$k$、$x_t$、$y_t$、$e_{t,k}$、$w_{t,k}$、$E_e$、$N_{\mathrm{tok}}$ �
 2. dispatch 按每个 expert 的 owner（§9.8.2）把 $x_t$ 送到对应 rank；
 3. owner 用本地完整的 expert 算 $E_e(x_t)$；
 4. combine 把每个 $(t,k)$ 的结果送回 token $t$ 的源位置，乘权重 $w_{t,k}$ 后对 $k$ 求和；
-5. 守恒：每个 token 恰好产生 `top_k` 个 (token, expert) 对，每个对恰好属于一个 owner rank，所以各 rank 的对数加起来是 $N_{\mathrm{tok}}\times\mathrm{top\_k}$。
+5. 守恒：每个 token 恰好产生 `top_k` 个 (token, expert) 对，每个对恰好属于一个 owner rank，所以各 rank 的对数加起来是 $N_{\mathrm{tok}}\times\mathtt{top\_k}$。
 
 算例（教学数字）：30 个 token、`top_k=2`，共 $30\times2=60$ 对；EP=4 时均匀分配是 $N_{\mathrm{rt}}=(15,15,15,15)$，有热点则可能是 $(30,10,10,10)$，两种情况的和都是 60。
 单位检查：$N_{\mathrm{rt},i}$ 按“对”计数，不是字节；通信字节数取决于 all-to-all backend 怎样打包（§9.8.5），这里的计数只用来估 expert 的计算量。
@@ -1809,7 +1811,7 @@ flowchart TB
 
 ### 9.9.2 PCP 的 DualChunkSwap
 
-MRV2 `PCPManager` 把 prefill tokens 切成 `2×PCP` 个 chunks。rank `r` 同时获得前侧 chunk
+MRV2 `PCPManager` 把 prefill tokens 切成 `2×PCP` 个 chunks。rank `r`（下文记作 $i_{\mathrm{pcp}}$）同时获得前侧 chunk
 `r` 和镜像的后侧 chunk `2×PCP-1-r`，以改善 causal attention 工作量平衡。
 
 例如 16 tokens、PCP=4：
@@ -1897,6 +1899,8 @@ $N_{q,r}=17$：$c=3$，$7\times3=21\ge17$，又复制。所以这个条件不随
 prefill 在后，再按 request 与原片段起点排序。切片和正确重排共同构成算法契约。
 
 ### 9.9.3 当前 PCP 不是通用开关
+
+本小节与下面的 v0.33.0 小节里，下标 $r$（$N_r$、$\mathrm{pad}_{r,t}$）是 PCP rank，和 §9.9.2 里 $N_{q,r}$ 的请求序号 $r$ 不是同一个量。
 
 固定版本的 `PCPManager.validate_config` 有明确限制，包括：
 
@@ -2121,7 +2125,7 @@ $$
 
 **其中：**$i$ 是 DCP shard（rank）序号；$s_j$ 是固定 query 对 key $j$ 的打分（已含 softmax 缩放）；$\operatorname{LSE}_i=\log Z_i$，$Z_i=\sum_{j\in\mathcal K_i}e^{s_j}$ 是 shard $i$ 的分母，$\mathcal K_i$ 是它持有的 key 集合；
 $O_i=\frac1{Z_i}\sum_{j\in\mathcal K_i}e^{s_j}v_j$ 是它的局部输出（$v_j$ 是 value 行）；$d_v$ 是 value 的单头宽度（元素）。
-这里的下标 $i$ 是 shard 序号，与 notation 里 $s_{ij}$ 的 query 行号不同；$s_j$、$\mathcal K_i$、$Z_i$、$v_j$ 都是本节的局部记号。
+这里的下标 $i$ 是 shard 序号（固定一个 query），不是 query 行号；$s_j$ 沿用符号表里的打分，$\mathcal K_i$、$Z_i$、$v_j$ 是本节的局部记号。
 $\operatorname{LSE}$ 是无单位的对数量，默认底数是 $e$；若 backend 用以 2 为底的 LSE（见核对），$e^{\cdots}$ 换成 $2^{\cdots}$、$\log$ 换成 $\log_2$。
 
 **怎么算出来：**
@@ -2235,7 +2239,11 @@ $S_{\mathrm{loc},r_{\mathrm{dcp}}}$ 是 §9.9.4 里 rank $r_{\mathrm{dcp}}$ 本�
 **怎么算出来：**
 
 1. 一个虚拟 block 覆盖 $B_{\mathrm{blk}}\mathrm{DCP}$ 个逻辑位置，所以 $S_{\max}$ 个位置需要 $\lceil S_{\max}/(B_{\mathrm{blk}}\mathrm{DCP})\rceil$ 个；
-2. 每个 rank 本地存的 token 数由 §9.9.4 的 $S_{\mathrm{loc},r_{\mathrm{dcp}}}$ 给出。$I_{\mathrm{il}}=1$ 时上界就是 $\lceil S/\mathrm{DCP}\rceil$；$I_{\mathrm{il}}>1$ 时一个 interleave 组不会被拆给两个 rank，最多再多出 $I_{\mathrm{il}}-1$ 个，所以是 $\lceil S/\mathrm{DCP}\rceil+I_{\mathrm{il}}-1$（对 $\mathrm{DCP}\le8$、$I_{\mathrm{il}}\le8$、$S<300$ 逐一枚举核对过，没有超出）；
+2. 每个 rank 本地存的 token 数由 §9.9.4 的 $S_{\mathrm{loc},r_{\mathrm{dcp}}}$ 给出。$I_{\mathrm{il}}=1$ 时上界就是 $\lceil S/\mathrm{DCP}\rceil$；一般情形可以手工推出来：
+   - 把 $S$ 拆成整轮和余数，$n_{\mathrm{rnd}}=\lfloor S/(I_{\mathrm{il}}\mathrm{DCP})\rfloor$ 是整轮数，$n_{\mathrm{rest}}=S\bmod(I_{\mathrm{il}}\mathrm{DCP})$ 是不足一轮的余数（两个都是本节的局部记号），于是 $S=n_{\mathrm{rnd}}I_{\mathrm{il}}\mathrm{DCP}+n_{\mathrm{rest}}$，$S/\mathrm{DCP}=n_{\mathrm{rnd}}I_{\mathrm{il}}+n_{\mathrm{rest}}/\mathrm{DCP}$；
+   - 每个 rank 在每个整轮里恰好拿 $I_{\mathrm{il}}$ 个，余数部分它拿 $\operatorname{clamp}(n_{\mathrm{rest}}-r_{\mathrm{dcp}}I_{\mathrm{il}},0,I_{\mathrm{il}})$ 个，因为 $r_{\mathrm{dcp}}\ge0$，这一项至多是 $\min(I_{\mathrm{il}},n_{\mathrm{rest}})$；
+   - 两式相减：$S_{\mathrm{loc},r_{\mathrm{dcp}}}-S/\mathrm{DCP}\le\min(I_{\mathrm{il}},n_{\mathrm{rest}})-n_{\mathrm{rest}}/\mathrm{DCP}$。若 $n_{\mathrm{rest}}\le I_{\mathrm{il}}$，右边是 $n_{\mathrm{rest}}(1-1/\mathrm{DCP})$，比 $n_{\mathrm{rest}}$ 小（$n_{\mathrm{rest}}=0$ 时为 0），所以小于 $I_{\mathrm{il}}$；若 $n_{\mathrm{rest}}>I_{\mathrm{il}}$，右边是 $I_{\mathrm{il}}-n_{\mathrm{rest}}/\mathrm{DCP}<I_{\mathrm{il}}$；
+   - 所以总有 $S_{\mathrm{loc},r_{\mathrm{dcp}}}<S/\mathrm{DCP}+I_{\mathrm{il}}\le\lceil S/\mathrm{DCP}\rceil+I_{\mathrm{il}}$。左边和 $\lceil S/\mathrm{DCP}\rceil+I_{\mathrm{il}}$ 都是整数，严格小于就意味着至少小 1，所以左边至多等于右边减 1，即 $S_{\mathrm{loc},r_{\mathrm{dcp}}}\le\lceil S/\mathrm{DCP}\rceil+I_{\mathrm{il}}-1$；
 3. 估算一个请求最坏占多少显存时，`max_memory_usage_bytes` 把 `max_model_len` 先除以 $\mathrm{DCP}$ 再向上取整、再按 block 数乘页字节数；它不含上面的 $I_{\mathrm{il}}-1$ 项，只是一个估算。
 
 算例：$S_{\max}=131072$、$B_{\mathrm{blk}}=64$、$\mathrm{DCP}=4$：$\lceil131072/(64\times4)\rceil=512$ 个 block；不开 DCP 是 $\lceil131072/64\rceil=2048$ 个。上界的算例取 §9.9.4 的 $S=10$、$\mathrm{DCP}=4$、$I_{\mathrm{il}}=2$：rank 0 存 4 个 token，$\lceil10/4\rceil+2-1=3+1=4$，刚好取到；只写 $\lceil10/4\rceil=3$ 就会低估。单位检查：token $\div$（token/block）得 block 数。
@@ -2360,12 +2368,12 @@ collective 顺序、shape 和 NCCL 网络，而不是 API queue。
 被选中回复的那个 worker 的编号由下式给出：
 
 $$
-r_{\mathrm{out}}=W_{\mathrm{engine}}-\mathrm{TP}\times\mathrm{PCP},\qquad W_{\mathrm{engine}}=\mathrm{TP}\times\mathrm{PP}\times\mathrm{PCP}
+\mathrm{rank}_{\mathrm{out}}=W_{\mathrm{engine}}-\mathrm{TP}\times\mathrm{PCP},\qquad W_{\mathrm{engine}}=\mathrm{TP}\times\mathrm{PP}\times\mathrm{PCP}
 $$
 
 **白话：**模型输出在最后一个 PP stage 才产生，所以让这个 stage 里编号最小的 worker（它的 TP rank 为 0）回复，其他 worker 不回。
 
-**其中：**$r_{\mathrm{out}}$ 是这个 engine 内被选中回复的 worker 的全局 rank（代码里的 `output_rank`，本节的局部记号）；$W_{\mathrm{engine}}$ 是一个 engine 的 worker 数（§9.3.1，等于 `world_size`）；
+**其中：**$\mathrm{rank}_{\mathrm{out}}$ 是这个 engine 内被选中回复的 worker 的全局 rank（代码里的 `output_rank`，与 §9.6.6 是同一个量）；$W_{\mathrm{engine}}$ 是一个 engine 的 worker 数（§9.3.1，等于 `world_size`）；
 $\mathrm{TP}\times\mathrm{PCP}$ 是一个 PP stage 里的 worker 数。都是无单位整数。
 
 **怎么算出来：**
@@ -2373,7 +2381,7 @@ $\mathrm{TP}\times\mathrm{PCP}$ 是一个 PP stage 里的 worker 数。都是无
 1. worker 按 PP stage 从前往后连续编号，每个 stage 有 $\mathrm{TP}\times\mathrm{PCP}$ 个 worker；
 2. 最后一个 stage 的第一个 worker 的编号，就是总数减去一个 stage 的大小。
 
-算例：$\mathrm{TP}=8$、$\mathrm{PP}=4$、$\mathrm{PCP}=1$：$W_{\mathrm{engine}}=32$，$r_{\mathrm{out}}=32-8=24$，即最后一个 stage（24–31）的第一个 worker。加上 $\mathrm{PCP}=2$、$\mathrm{TP}=4$、$\mathrm{PP}=2$：$W_{\mathrm{engine}}=16$，每个 stage 8 个 worker，$r_{\mathrm{out}}=16-8=8$。
+算例：$\mathrm{TP}=8$、$\mathrm{PP}=4$、$\mathrm{PCP}=1$：$W_{\mathrm{engine}}=32$，$\mathrm{rank}_{\mathrm{out}}=32-8=24$，即最后一个 stage（24–31）的第一个 worker。加上 $\mathrm{PCP}=2$、$\mathrm{TP}=4$、$\mathrm{PP}=2$：$W_{\mathrm{engine}}=16$，每个 stage 8 个 worker，$\mathrm{rank}_{\mathrm{out}}=16-8=8$。
 单位检查：worker 数相减仍是 worker 序号。
 
 **核对：**`_get_output_rank` 返回 `world_size - tensor_parallel_size * prefill_context_parallel_size`，注释里用 TP=8、PP=4 做了同样的算例；
@@ -2722,7 +2730,7 @@ sequenceDiagram
 > **读图方法：** 参与者从左到右是调度核心、Executor、PP 第 0 个 stage 的 TP 组、第 1 个 stage 的 TP 组。第一遍沿实线箭头读：`execute_model` 广播到每个 worker，
 > stage 0 算完把 `IntermediateTensors` 传给 stage 1，stage 1 算完 forward；这时 Executor 只拿到“forward 结束”，**还没有 token**。第二遍看 `sample_tokens` 这一段：
 > 它是第二次 RPC，只有最后一个 stage 采样，其他 stage 在 `sample_tokens` 里接收这批 token 的广播（`vllm/v1/worker/gpu/model_runner.py:2241-2252`、`:2277-2285` 的 `pp_handler.receive` 与 `broadcast`），
-> 回复也只来自 §9.10.3 公式里的 $r_{\mathrm{out}}$ 那个 worker。读完应能说出：为什么 forward 与 sampling 是两次 RPC。
+> 回复也只来自 §9.10.3 公式里的 $\mathrm{rank}_{\mathrm{out}}$ 那个 worker。读完应能说出：为什么 forward 与 sampling 是两次 RPC。
 
 ### 9.13.3 运行阶段：DP+EP 的一个 wave
 
@@ -3168,9 +3176,6 @@ communication contract 重新建立理解。
 17. `vllm/distributed/elastic_ep/elastic_state.py`、`elastic_execute.py`、`external_elastic_ep.py`：扩缩容状态机、Worker 执行与外部 LB 协调。
 18. `vllm/v1/engine/async_llm.py`、`vllm/v1/engine/core.py`：`scale_elastic_ep`、`reinitialize_distributed`、`commit_prepared_elastic_ep`。
 
-本章源码基线为 vLLM main commit `05caae03c20f69436ff7ec23ded339ea104f1a01`（2026-11-10 重新钉扎；前一基线 v0.33.0 为
-`4ba787ec9959e566d3b587a796dff07673324da5`）。这次重新钉扎核对了源码引用与行号，并重新绑定了 Model Runner V1 删除带来的变化；
-其余行为没有在 `05caae03` 上逐一重新核实。
 v0.32.0（`5df63a7203cdb9328d824a27b682e77c7b9928be`）到 v0.33.0 的变化在各节以“v0.33.0”标出。当前环境没有可用的 NVIDIA 多 GPU vLLM
 运行条件，因此真实 NCCL/Ray 多机实验仍标记为 `runtime_verified: false`，不能把静态源码
 核对和 CPU 教学测试表述成真实 GPU 验证。

@@ -41,7 +41,7 @@ Continuous Batching 不是源码中的一个独立 `ContinuousBatching` 类。�
 4. 新请求可以填补空出的 sequence slot 和 token budget；
 5. 长 prefill 可以切成多个 chunk，与 decode 工作共享一轮计算。
 
-本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，2026-11-10 重新钉扎到此 revision：源码引用与行号已逐条核对，Model Runner V1 删除已重新绑定；其余行为未在 05caae03 上全面重核，清单见 `meta/upgrade-main-05caae03-2026-11-10/`）。文中继续区分：
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09，美国太平洋时间；2026-11-10 核对源码引用与行号）。文中继续区分：
 
 - **源码事实**：固定 revision 的实现或测试可直接证明。
 - **设计含义**：由多个源码事实推导出的系统解释。
@@ -2331,7 +2331,6 @@ Update 发现请求不存在或已 finished 后直接跳过，不能追加 token
 - [本项目第 4 章教学模型](../../examples/ch04_continuous_batching.py)
 - [本项目第 4 章测试](../../tests/test_ch04_continuous_batching.py)
 - [第 4 章实验记录](../../experiments/ch04-continuous-batching.md)
-- [全书章节源码映射](../../meta/chapter-source-map.md)
 
 ## 完成状态
 
@@ -2348,13 +2347,6 @@ Update 发现请求不存在或已 finished 后直接跳过，不能追加 token
 - [x] 提供标准库教学模型、7 个单元测试和实验方案。
 - [ ] 在真实 NVIDIA GPU 上采集 continuous batch、KV usage 和 preemption trace。
 - [ ] 在真实在线服务上比较 TTFT、TPOT 与 throughput。
-- [ ] 由独立审阅者复核后将状态改为 `verified`。
-
-2026-10-19 已按 v0.32.0 复核暂停排空、encoder-only 分块、pooling 长度边界与输出协议；
-静态证据和本次 CPU 教学测试记录见 [升级核对](../../meta/upgrade-v0.32.0-2026-10-19/04-scheduler.md)。
-2026-11-10 已对照 v0.33.0（`4ba787ec9959`）静态复核，修订清单见
-[v0.33.0 升级核对](../../meta/upgrade-v0.33.0-2026-11-10/04-scheduler.md)。
-那是 v0.33.0 时代的核对；当前阅读基线是 `05caae03`（2026-11-10 重新钉扎）。
 
 本章正文已经完整，`content_complete=true`。当前机器缺少可用 vLLM GPU runtime，
 因此 `runtime_verified=false`，按项目规则保持 `draft`。

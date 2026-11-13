@@ -36,7 +36,7 @@ LLMEngine / AsyncLLM
 执行期间到达的 abort 怎样生效、多个 batch 如何保持在途，以及进程退出或 worker
 故障如何被前端看见。
 
-本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，2026-11-10 重新钉扎到此 revision：源码引用与行号已逐条核对，Model Runner V1 删除已重新绑定；其余行为未在 05caae03 上全面重核，清单见 `meta/upgrade-main-05caae03-2026-11-10/`）。文中区分：
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09，美国太平洋时间；2026-11-10 核对源码引用与行号）。文中区分：
 
 - **源码事实**：可在固定 revision 的实现或测试中直接定位。
 - **设计含义**：由多个源码事实推导出的工程解释。
@@ -1763,9 +1763,6 @@ Actor mixin 提供 Ray 生命周期、可见 GPU 和免握手覆盖；EngineCore
 - [x] 提供标准库教学模型、7 个单元测试和实验记录。
 - [ ] 在真实 NVIDIA GPU 上采集 Future、CUDA stream 与 batch queue 时间线。
 - [ ] 启动真实在线服务验证信号、ZMQ 和 EngineDeadError 传播。
-- [ ] 由独立审阅者复核后将状态改为 `verified`。
-
-2026-11-10 已对照 v0.33.0（`4ba787ec9959`）做过一次静态复核；那是 v0.33.0 时代的核对。当前阅读基线是 `05caae03`（2026-11-10 重新钉扎）：源码引用与行号已逐条核对，Model Runner V1 删除已重新绑定，其余行为未在 `05caae03` 上全面重核。
 
 本章正文已经完整，`content_complete=true`。当前机器缺少可用 vLLM GPU runtime，
 因此 `runtime_verified=false`，按项目规则保持 `draft`。

@@ -36,7 +36,7 @@ KV Cache 不是一个 Python 字典，也不只是一块 GPU tensor。阅读当�
 3. EngineCore 中代表物理页所有权的 `KVCacheBlock` 元数据；
 4. 每个请求按逻辑 token 顺序维护的 block table。
 
-本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09）。源码引用与行号已按此 revision 核对，Model Runner V1 删除已重新绑定；正文其余部分最初按 v0.33.0 `4ba787ec` 写成，其中未在 `05caae03` 上全面重核的行为，仍按当时的 v0.33.0 叙述。文中继续使用三种
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09，美国太平洋时间；2026-11-10 核对源码引用与行号）。文中继续使用三种
 证据标签：
 
 - **源码事实**：能在固定 revision 的实现或测试中直接定位。
@@ -886,7 +886,7 @@ Worker 只负责接收并赋值。
 
 [源码] `vllm/config/vllm.py` - `VllmConfig.adjust_dcp_kv_cache_interleave_size`
 
-> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-28～10-29（0106c8abc..36d4ef654）。
+> **已在本书基线中、未在正文展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。区间为 vLLM main 2026-10-28～10-29（UTC，`0106c8abc..36d4ef654`，不含起点）。
 > - [edad8b03c5](https://github.com/vllm-project/vllm/commit/edad8b03c5285a1c12e7e4f83c1af709b319a01b)（[#61294](https://github.com/vllm-project/vllm/pull/61294)）：`resolve_kv_cache_layout` / `_merge_supported_layouts` 跨 PP stage 取各 worker 支持布局的**交集**，再按“多数 worker 把该布局排第一”排序（`vllm/v1/attention/backends/utils.py` L243–L337 @ `36d4ef654`），不再要求各 stage 列表完全一致。
 > - [317081fb6d](https://github.com/vllm-project/vllm/commit/317081fb6dc8b125a3134711a7750707bfd55371)（[#62860](https://github.com/vllm-project/vllm/pull/62860)）：DSA decode indexer logits 计入 memory profile workspace（`sparse_attn_indexer.py` L496–L541）。
 
@@ -1783,7 +1783,7 @@ v0.33.0 另外带入了一批 KV offload / P2P 的修复，本书只讲到 offlo
 P2P 失败处理 [#63708](https://github.com/vllm-project/vllm/pull/63708)（send 不阻塞）、
 [#63628](https://github.com/vllm-project/vllm/pull/63628)、[#63664](https://github.com/vllm-project/vllm/pull/63664)、[#63498](https://github.com/vllm-project/vllm/pull/63498)。
 
-> **已在本书基线中、正文尚未展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。
+> **已在本书基线中、未在正文展开的变化：** 以下提交都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文对它们尚未展开，仍按 v0.33.0 时代的写法叙述（Model Runner V1 删除除外）。条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。
 > - main 2026-10-25～10-27：[c13d4a5a4](https://github.com/vllm-project/vllm/commit/c13d4a5a46c2c663b728aa21af7eb00ece6bd698)（[#57646](https://github.com/vllm-project/vllm/pull/57646)） finalize 时暴露已处理前缀；P2P [963399729](https://github.com/vllm-project/vllm/commit/9633997299f29d54f1da38fb4a37e7d1a6535005)（[#63781](https://github.com/vllm-project/vllm/pull/63781)）分模式超时 10s/30s。
 > - main 2026-10-27～10-28：[e3883b7a7e](https://github.com/vllm-project/vllm/commit/e3883b7a7ec41f3117dfb7ca764746ec80a24d87)（[#60469](https://github.com/vllm-project/vllm/pull/60469)） KVCR 按请求聚合 completed_prefixes 并保序，由 scheduler finalize recency；[36f5ff3172](https://github.com/vllm-project/vllm/commit/36f5ff3172eb75433e54e496d64c473e951f8ecc)（[#63889](https://github.com/vllm-project/vllm/pull/63889)） 降低 KVCR adapter 开销；[70cb50dab2](https://github.com/vllm-project/vllm/commit/70cb50dab240a03f7db9ab87a613b5b52f1339fe)（[#62592](https://github.com/vllm-project/vllm/pull/62592)） 新增 `HiSparseBackend` 平台后端（pin/unpin、cache ops、IPC event）。
 > - main 2026-10-28～10-29：[0beab6c251](https://github.com/vllm-project/vllm/commit/0beab6c251e8046c0c6cf2fef114cd23b58cda74)（[#63779](https://github.com/vllm-project/vllm/pull/63779)） tier promotion 可失败并 `defer_write_release`（`tiering/manager.py` L170–L214、L556–L638 @ `36d4ef654`）；[77f58e5304](https://github.com/vllm-project/vllm/commit/77f58e530450416d217e4816727a35910bf3d9bf)（[#64229](https://github.com/vllm-project/vllm/pull/64229)） bounded-replay SWA 计入 lazy walk；P2P [f4fd1ab68e](https://github.com/vllm-project/vllm/commit/f4fd1ab68e2ba3a76bf6b903662eb6a8ee8202ab)（[#63207](https://github.com/vllm-project/vllm/pull/63207)）、[a1cfd2c1b5](https://github.com/vllm-project/vllm/commit/a1cfd2c1b584c4ac197db9cc9ac84a6d973d39df)（[#64250](https://github.com/vllm-project/vllm/pull/64250)）；NIXL `transfer_mode` push（[#64230](https://github.com/vllm-project/vllm/pull/64230)）、Mooncake 跳过 padding（[#63513](https://github.com/vllm-project/vllm/pull/63513)）、MORI embedded（[#61793](https://github.com/vllm-project/vllm/pull/61793)）仅清单。
@@ -2515,13 +2515,6 @@ KV Cache 管理的核心不是“保存一个 tensor”，而是维护动态服�
 8. 请求 free 后 cached block 仍可命中，真正复用页面时才 eviction；
 9. partial-tail 是条件化的细粒度能力，继续写必须维护 CoW 一致性；
 10. Scheduler 负责抢占策略，PagedAttention 负责消费 block table，它们都不等于本层。
-
-2026-10-19 对 v0.32.0 的静态复核与 CPU 教学测试，重点是对齐容量、
-checkpoint 可恢复边界以及按 group 防止异步写入与清零竞争。
-2026-11-10 对 v0.33.0（`4ba787ec9959`）的静态复核，重点是规划模块
-迁到 `kv_cache_planning.py`、启动流程里全局分组前移、EAGLE lookahead 哈希，以及
-Sliding Window 的 null 头部处理。那一次核对针对的是当时的 v0.33.0 基线；本章当前源码基线
-是 `05caae03`（见章首），默认 block size 与 Extensible KV 的正文已按此 revision 写入。
 
 本章正文、图示、教学模型和 CPU 测试已经完成，`content_complete=true`。当前机器没有可用
 的 vLLM NVIDIA GPU runtime，无法核对真实显存 profiling、GPU copy 和 attention 执行，
