@@ -98,7 +98,7 @@ $n_{\mathrm{users}}$、$n_{\mathrm{GPU}}$，不写 $N_{\dots}$。
 | 符号 | 含义 | 单位 | 备注 |
 |---|---|---|---|
 | $b_{\mathrm{elem}}$ | 一个元素占的字节数（bf16 为 2） | byte/元素 | 旧 $B_{\mathrm{dtype}}$ |
-| $M_{\mathrm{tok}}$ | 每 token 的 KV 字节数，$M_{\mathrm{tok}}=2LH_{\mathrm{kv}}d_hb_{\mathrm{elem}}$（单卡用 $H_{\mathrm{kv,local}}$） | byte/token | 旧 $B_{\mathrm{token}}$（ch01、ch05）；ch04 同名的 token 预算改为 $N_{\mathrm{budget}}$。ch01 L906 先给通式 $M_{\mathrm{tok}}=L(H_kd_k+H_vd_v)\,b_{\mathrm{elem}}$（K、V 的 head 数和宽度可以不同），本行是 $H_k=H_v=H_{\mathrm{kv}}$、$d_k=d_v=d_h$ 的特例；MLA 等压缩缓存不在这两个式子之内 |
+| $M_{\mathrm{tok}}$ | 每 token 的 KV 字节数，$M_{\mathrm{tok}}=2LH_{\mathrm{kv}}d_hb_{\mathrm{elem}}$（单卡用 $H_{\mathrm{kv,local}}$） | byte/token | 旧 $B_{\mathrm{token}}$（ch01、ch05）；ch04 同名的 token 预算改为 $N_{\mathrm{budget}}$。ch01「KV Cache 容量公式」一节先给通式 $M_{\mathrm{tok}}=L(H_kd_k+H_vd_v)\,b_{\mathrm{elem}}$（K、V 的 head 数和宽度可以不同），本行是 $H_k=H_v=H_{\mathrm{kv}}$、$d_k=d_v=d_h$ 的特例；MLA 等压缩缓存不在这两个式子之内 |
 | $M_{\mathrm{blk}}$、$M_{\mathrm{seq}}$ | 每 block、每序列的 KV 字节数：$M_{\mathrm{blk}}=B_{\mathrm{blk}}M_{\mathrm{tok}}$，$M_{\mathrm{seq}}=S\,M_{\mathrm{tok}}$ | byte | 旧 $B_{\mathrm{block}}$、$B_{\mathrm{sequence}}$ |
 | $M_{\mathrm{total}}$、$M_{2048}$ | 全部请求的 KV 总字节数；2048 token 的 KV 字节数（ch01 算例） | byte | 旧 $B_{\mathrm{total}}$、$B_{2048}$ |
 | $M_{\mathrm{KV}}$ | 可分给 KV Cache 的显存，$M_{\mathrm{KV}}=M_{\mathrm{req}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph}}$ | byte | ch07 §7.9 与 ch08 §8.17.2 讲的是同一个量 |
@@ -148,8 +148,8 @@ $n_{\mathrm{users}}$、$n_{\mathrm{GPU}}$，不写 $N_{\dots}$。
 5. **代码名与数学记号并列**：第一次出现时写 `num_computed_tokens`（$N_{\mathrm{computed}}$），之后在公式里用记号，
    在讲源码时用代码名。
 6. **同一个量只有一种写法**：同一章里已经有的写法优先；跨章不一致的，以第 1 节为准。
-7. **局部字母**只在所在小节有效，必须不在第 1 节（整个符号相同才算冲突，$b$ 与 $b_{\mathrm{elem}}$ 是两个符号），并在首次出现处用“其中”定义，在第 3 节登记；
-   不同章的局部字母可以重名。第 1 节与第 3 节的符号互不相交由 `tests/test_notation.py` 检查。
+7. **只在一节里用的符号**（局部字母，以及少数带下标的命名符号，如 $\mathrm{score}_i$、$\mathrm{dump}$）只在所在小节有效，必须不在第 1 节（整个符号相同才算冲突，$b$ 与 $b_{\mathrm{elem}}$ 是两个符号），并在首次出现处用“其中”定义，在第 3 节登记；
+   不同章里只在一节里用的符号可以重名。第 1 节与第 3 节的符号互不相交由 `tests/test_notation.py` 检查。
 8. **索引**（$i$、$j$、$k$、$r$、$t$）一律是局部字母，不登记在第 1 节；第 1 节里 $z_i$、$N_{q,r}$ 的 $i$、$r$ 只是下标。
 
 ## 3 局部字母表
@@ -450,6 +450,6 @@ $$
 ## 8 共享文件与维护约定
 
 - 本文件（`glossary/notation.md`）是全书符号的唯一登记处：第 1 节是带固定含义的命名符号（可以只在一章里出现），
-  第 3 节是只在一节里用的裸字母；改名后在第 4 节追加一行。第 1 节与第 3 节的符号互不相交、第 1 节的符号只登记一次，由 `tests/test_notation.py` 检查。
+  第 3 节是只在一节里用的符号（裸字母，也有带下标的命名符号，如 $\mathrm{score}_i$、$\mathrm{cap\_bound}$）；改名后在第 4 节追加一行。第 1 节与第 3 节的符号互不相交、第 1 节的符号只登记一次，由 `tests/test_notation.py` 检查。
 - `glossary/terms.md`、`book/README.md`、`book/reading-guide.md`：术语表、总览和阅读指南，改符号约定时同步检查。
 - 章节保持 `draft`、`runtime_verified: false`；源码引用保持 pin `05caae03c20f69436ff7ec23ded339ea104f1a01`。
