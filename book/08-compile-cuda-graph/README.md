@@ -1430,7 +1430,7 @@ classDiagram
     }
 ```
 
-> **读图方法：** 这张类图只有一个类，没有继承或持有关系，要看的是字段类型：带 `or_none` 的四个字段（`num_reqs`、`uniform_token_count`、`max_query_len`）可以为空，空值在 8.14.2 的匹配条件里有特殊含义；其余字段始终有值。
+> **读图方法：** 这张类图只有一个类，没有继承或持有关系，要看的是字段类型：带 `or_none` 的三个字段（`num_reqs`、`uniform_token_count`、`max_query_len`）可以为空，空值在 8.14.2 的匹配条件里有特殊含义；其余字段始终有值。
 
 相比 `vllm/forward_context.py:30` 里仍在的 `BatchDescriptor`（见 8.11；字段是 `num_tokens`、`num_reqs`、`uniform`、`num_active_loras`），
 `BatchExecutionDescriptor` 多了 `cg_mode`，并把布尔的 `uniform` 换成能区分不同 query 长度的 `uniform_token_count`，
@@ -1461,7 +1461,7 @@ $$
 **怎么算出来：** 一次相减。例如批里有 $T=5$ 个 token，命中一张 $N_{\mathrm{graph}}=8$ 的 graph，则 $N_{\mathrm{pad}}=8-5=3$：这一步多算 3 个空 token，占 graph 的 $3/8=37.5\%$（比例是教学上的量，源码不记它）。
 单位检查：token 减 token 仍是 token。
 
-**核对：** `make_cudagraph_stats` 把 `num_paddings` 记成 `batch_desc.num_tokens - num_tokens`（`cudagraph_utils.py:92-100`，`:98`），在 `observability_config.cudagraph_metrics` 打开时由 `execute_model` 调用（`model_runner.py:1920-1921`）。
+**核对：** `make_cudagraph_stats` 把 `num_paddings` 记成 `batch_desc.num_tokens - num_tokens`（`cudagraph_utils.py:92-100`，`:98`），在 `observability_config.cudagraph_metrics` 打开时由 `execute_model` 调用（`model_runner.py:1921-1922`）。
 
 [源码] `vllm/v1/worker/gpu/cudagraph_utils.py` - `make_cudagraph_stats`
 
@@ -1538,7 +1538,7 @@ Runner 在 dispatch 之前先给批分类，得到 $N_{\mathrm{uni}}$：
 $$
 N_{\mathrm{uni}}=
 \begin{cases}
-\max_r N_{q,r}, & \text{if } \mathtt{decode\_graph\_eligible}\ \text{and}\ T=R\cdot\max_r N_{q,r}\\
+\max_r N_{q,r}, & \text{if } \mathtt{decode\_graph\_eligible}\ \text{and}\ R>0\ \text{and}\ T=R\cdot\max_r N_{q,r}\\
 \varnothing, & \text{otherwise}
 \end{cases}
 $$
@@ -1550,7 +1550,7 @@ $$
 **怎么算出来：**
 
 1. 取批里最长的 query，记 $m=\max_rN_{q,r}$；
-2. 如果所有请求都恰好是 $m$ 个 token，那么总数 $T$ 必然等于 $R\cdot m$；反过来，只要有一个请求比 $m$ 短，$T<R\cdot m$。所以“$T=R\cdot m$”正好判断“全都一样长”（`is_uniform_query_len`）；
+2. 如果所有请求都恰好是 $m$ 个 token，那么总数 $T$ 必然等于 $R\cdot m$；反过来，只要有一个请求比 $m$ 短，$T<R\cdot m$。所以“$T=R\cdot m$”正好判断“全都一样长”；源码还要求 $R>0$（空批不算均匀 decode），整个判断是 `is_uniform_query_len`（`utils.py:1052`）；
 3. 再叠加 `decode_graph_eligible`：形状像 decode 的 prefill 块（例如一个 prompt 块恰好和 decode 批一样长）不能算。
 
 教学数字：8 个请求都只算 1 个 token，$T=8$，$m=1$，$R\cdot m=8=T$，所以 $N_{\mathrm{uni}}=1$；4 个请求各算 3 个 token（$N_{\mathrm{spec}}=2$ 个 draft），$T=12=4\times3$，$N_{\mathrm{uni}}=3$；
@@ -1712,7 +1712,8 @@ Runner 完成 dispatch、padding、input/attention preparation 后，按 `batch_
 - PIECEWISE：建立 `ForwardContext`，调用 `run_pw_graph()`。
 - NONE：同样建立 `ForwardContext`，直接调用模型。
 
-在后两条（非 FULL）里，有一个先于它们判断的特例：如果这一步用了 DBO（`ubatch_state` 非空），就交给 `ubatch_runner.run()` 按微批执行，不论 `cg_mode` 是 NONE 还是 PIECEWISE。
+在后两条（非 FULL）里，有一个先于它们判断的特例：如果这一步用了 DBO（`batch_desc.num_ubatches > 1`，`model_runner.py:2008`，此时 `ubatch_state` 非空），就交给 `ubatch_runner.run()` 按微批执行。
+PIECEWISE 的 descriptor 的 `num_ubatches` 恒为 1，而 `_is_compatible` 要求 descriptor 与批的 `num_ubatches` 相等（`cudagraph_utils.py:141`），所以走到这里的 `cg_mode` 只会是 NONE；命中 FULL 孪生的批已在上面的 FULL 分支走掉。
 DBO 的 graph 只有 FULL（8.14.3），所以这条特例实际是“DBO 开着但这一步没命中 graph”的 eager 微批路径。
 
 [源码] `vllm/v1/worker/gpu/model_runner.py` - `GPUModelRunner.execute_model`（FULL 分支 `:2121-2129`；非 FULL 的 `set_forward_context` 从 `:2137` 起，DBO 特例 `:2151-2155`，PIECEWISE `:2156-2162`，NONE `:2164-2166`）
@@ -1819,7 +1820,7 @@ flowchart TD
 
 > **读图方法：** 图分两段。上半段发生在启动期：先算出“有没有 PIECEWISE 的实现来源”，没有就在这里降级，所以后面的运行期不会遇到“要 PIECEWISE 却没有 provider”。下半段发生在运行期：只有 `use_breakable_cg` 这个布尔值决定走哪一种实现。如果某条箭头让你疑惑，回到 `resolve_cudagraph_mode_and_sizes` 和 `run_pw_graph` 各看一次。
 
-降级规则只有两条（`without_piecewise`）：
+降级规则（`without_piecewise`）只有两条，其余模式不变：
 
 | 配置的模式 | 没有 PIECEWISE 来源时变成 | 为什么 |
 |---|---|---|
@@ -1891,7 +1892,7 @@ R_{\mathrm{lim}}&=\min\Bigl(R_{\mathrm{uni,max}},\ \Bigl\lfloor\frac{N_{\mathrm{
 \end{aligned}
 $$
 
-$R_{j^\ast}$ 是列表里第一个不小于 $R_{\mathrm{lim}}$ 的元素，更大的元素不会被捕获；$R_{\mathrm{lim}}<1$ 时 $\mathcal E$ 为空。
+$R_{j^\ast}$ 是列表里第一个不小于 $R_{\mathrm{lim}}$ 的元素，更大的元素不会被捕获；列表里没有这样的元素（所有 $R_j<R_{\mathrm{lim}}$）时全部保留，不压缩；$R_{\mathrm{lim}}<1$ 时 $\mathcal E$ 为空。
 每个元素 $(R_{\mathrm{graph}},N_{\mathrm{uni}})$ 生成一个 descriptor：`num_reqs=`$R_{\mathrm{graph}}$，`uniform_token_count=`$N_{\mathrm{uni}}$，`num_tokens=`$N_{\mathrm{graph}}=R_{\mathrm{graph}}\,N_{\mathrm{uni}}$。
 
 **白话：** 先定 decode graph 最多能有多少 token（不能比所有 graph 里最宽的那张还宽，也不能超过 decode 自己的预算）；再算这个 query 长度下最多能装多少个请求；最后把请求数列表里超出上限的第一个数“压”到上限，更大的丢掉，这样刚好覆盖到上限。
@@ -1972,13 +1973,13 @@ $x=16$ 时 $\mathrm{step}=\min(16,\max(8,4),\ldots)=8$，下一个 24；一路�
 
 #### 配置怎么变成两套列表
 
-`VllmConfig._split_cudagraph_capture_sizes` 在配置解析时把两套列表各自定下来，“各用各的大小、上限或默认值，互不借用”（函数文档，`vllm.py:2554-2566`）。分四种情形：
+`VllmConfig._split_cudagraph_capture_sizes` 在配置解析时把两套列表各自定下来，“各用各的大小、上限或默认值，互不借用”（函数文档，`vllm.py:2554-2566`）。分五种情形，prefill 和 decode 两侧各自判断（`vllm.py:2624` 起 prefill、`:2643` 起 decode）：
 
 | 情形 | prefill 的 token 数列表 | decode 的请求数列表 |
 |---|---|---|
 | 用户设了 `prefill_/decode_cudagraph_capture_*_sizes` | 去掉 $[1,\ \texttt{max\_num\_batched\_tokens}]$ 之外的数；超过 `max_prefill_...` 上限就报错（`:2609-2631`） | 去掉 $[1,\ \texttt{max\_num\_seqs}]$ 之外的数；超过 `max_decode_...` 上限就报错（`:2643-2650`） |
-| 只设了 `max_prefill_...`/`max_decode_...` 上限，或者在 SM100 系 GPU（数据中心 Blackwell）上 | prefill 网格，上限默认 8192 且不超过 `max_num_batched_tokens`（`:2632-2639`） | decode 网格，上限默认 `max_num_seqs`（`:2651-2656`） |
-| 都没设（非 SM100 的默认） | 直接沿用共享列表 `cudagraph_capture_sizes`（`:2640-2641`） | 由共享列表折算（下面的公式，`:2657-2667`） |
+| 这一侧没给列表，但设了本侧的上限，或者在 SM100 系 GPU（数据中心 Blackwell）上 | prefill 侧：设了 `max_prefill_...` 或在 SM100 → prefill 网格，上限 = 该值（缺省 8192），且不超过 `max_num_batched_tokens`（`:2632-2639`） | decode 侧：设了 `max_decode_...` 或在 SM100 → decode 网格，上限 = $\min$(该值, `max_num_seqs`)（缺省 `max_num_seqs`，`:2651-2656`） |
+| 这一侧什么都没设（非 SM100 的默认；两侧各自判断，只设一边时另一边走这一行） | 直接沿用共享列表 `cudagraph_capture_sizes`（`:2640-2641`） | 由共享列表折算（下面的公式，`:2657-2667`） |
 | 只设了旧的 `cudagraph_capture_sizes` / `max_cudagraph_capture_size` | 同上沿用，并打一条 deprecated 警告（`:2583-2591`）；SM100 的宽默认值此时不启用（`:2600-2602`） | 同上 |
 | 旧字段和新字段同时设了 | 报 `ValueError`（`:2713-2726`）；例外是旧字段的值正好等于一次解析后记下的值（同一份配置再解析一遍） | 同左 |
 
