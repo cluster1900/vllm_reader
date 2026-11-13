@@ -563,7 +563,7 @@ flowchart LR
 | Value | `[B,S,H_kv,d_v]` | `[T,H_kv,d_v]` |
 | Output | `[B,S,H_q,d_v]` | `[T,H_q*d_v]` |
 
-（表中 vLLM 一列的 head 数在 Tensor Parallel 下是每张卡上的数量（KV 侧即 $H_{\mathrm{kv,local}}$），不是全模型的 $H_q$、$H_{\mathrm{kv}}$；Llama 里 $d_v=d_h$。）
+（表中 $H_q$、$H_{\mathrm{kv}}$ 是整个模型的 head 数；vLLM 一列是一张卡上的张量，所以 Tensor Parallel 下那里实际的 head 数是每卡数量：Query 侧为 $H_q/\mathrm{TP}$，KV 侧为 $H_{\mathrm{kv,local}}$（$H_{\mathrm{kv}}\ge\mathrm{TP}$ 时等于 $H_{\mathrm{kv}}/\mathrm{TP}$）；$\mathrm{TP}=1$ 时与全模型相同。Llama 里 $d_v=d_h$。）
 
 普通 Multi-Head Attention 中 $H_q=H_{\mathrm{kv}}$。Grouped-Query Attention（GQA）让多组
 query heads 共享较少的 KV heads，即 $H_{\mathrm{kv}}<H_q$。这样可以显著减少 KV Cache，
@@ -775,9 +775,9 @@ $i_{\mathrm{next}}$ 是选中的 token ID，无单位。
 
 **核对：**随书 `sample_logits()` 在 `temperature == 0` 时直接 `max(range(len(logits)), key=logits.__getitem__)`（`examples/ch01_minimal_inference.py:94-95`），
 并列时取下标最小的；`tests/test_ch01_minimal_inference.py::test_temperature_zero_is_greedy` 检查这个分支。
-vLLM 的 `gumbel_noised_argmax` 在 `temp == 0` 时不加噪声，退化为普通 argmax（`vllm/v1/worker/gpu/sample/gumbel.py:172-212`）（GPU Triton 路径；CPU runner 由 `vllm/v1/worker/cpu/gumbel.py` 的 `gumbel_sample`（`:9-40`）调用 `ops.gumbel_sample_cpu`，温度为 0 时同样不加噪声、退化为普通 argmax）；
+vLLM 的 `gumbel_noised_argmax` 在 `temp == 0` 时不加噪声，退化为普通 argmax（`vllm/v1/worker/gpu/sample/gumbel.py:172-212`）（GPU Triton 路径；CPU runner 由 `vllm/v1/worker/cpu/gumbel.py` 的 `gumbel_sample`（`:9-40`）调用 `ops.gumbel_sample_cpu`，温度为 0 时同样不加噪声、退化为普通 argmax（`csrc/cpu/sampling/common.h:239-243` 里 `temp == 0.0f` 走 `greedy_argmax`））；
 `SamplingParams.__post_init__` 在 temperature 小于 `_SAMPLING_EPS`（1e-5）时按 greedy 处理（`vllm/sampling_params.py:619-623`）。
-同一节后面「第七步：`SamplingParams` 在进入 Sampler 前做什么」的流程图读图方法写明：因为 $0<\tau<10^{-2}$ 会先被抬到 $10^{-2}$，实际走到 greedy 分支的只有 temperature 恰好为 0 的请求。
+本章 1.9 节「第七步：`SamplingParams` 在进入 Sampler 前做什么」的读图方法说明了这一点：因为 $0<\tau<10^{-2}$ 会先被抬到 $10^{-2}$，而 greedy 的门槛是 $10^{-5}$，实际走到 greedy 分支的只有 temperature 恰好为 0 的请求。
 
 给定完全相同的 logits 和并列值处理规则，它总会选择同一项；但不同硬件或 batch
 引起的浮点误差仍可能改变非常接近的分数，所以 `temperature=0` 不是跨环境逐字复现
