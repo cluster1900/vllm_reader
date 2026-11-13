@@ -54,7 +54,7 @@ prerequisites:
 > **本节先看：** 这一部分先划定结论成立的源码版本和讨论边界。超出范围的实现不能直接套用本章结论，需要重新核对源码。
 
 - 源码仓库：`vllm-project/vllm`
-- 源码 commit：`05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；正文最初按 v0.33.0 `4ba787ec` 写成，2026-11-10 重新钉扎到此 revision：源码引用与行号已逐条核对，Model Runner V1 删除已重新绑定；其余行为未在 05caae03 上全面重核，清单见 `meta/upgrade-main-05caae03-2026-11-10/`）
+- 源码 commit：`05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；2026-11-10 核对源码引用与行号）
 - 阅读主线：decoder-only 文本生成、vLLM V1 Engine、Llama 类模型。
 - 本章使用单层、单 attention head 的教学模型建立直觉；真实模型通常有多层、
   多个 query heads，并可能使用 GQA、量化、TP 和不同 attention backend。
@@ -710,7 +710,7 @@ $$
    $x'_0=\lVert x\rVert\cos(\varphi+\theta)=x_0\cos\theta-x_1\sin\theta$，$x'_1=\lVert x\rVert\sin(\varphi+\theta)=x_0\sin\theta+x_1\cos\theta$，
    这正是矩阵的两行；长度 $\lVert x\rVert$ 不变。
 2. 频率从快到慢：$j=0$ 时 $\omega=\mathtt{rope\_theta}^{0}=1$，每个位置转 1 弧度；$j$ 越大 $\omega$ 越小，最后一对只有 $\mathtt{rope\_theta}$ 分之一的量级，相隔很远的位置才看得出差别。
-3. 为什么点积里只剩相对位置：记 $R(\theta)$ 为上面的 $2\times2$ 旋转矩阵，转 $\alpha$ 再转回 $-\alpha$ 等于没转，所以 $R(\alpha)^{\top}=R(-\alpha)$，且 $R(\alpha)^{\top}R(\beta)=R(\beta-\alpha)$。
+3. 为什么点积里只剩相对位置：记 $R(\theta)$ 为上面的 $2\times2$ 旋转矩阵，转 $\theta_1$ 再转回 $-\theta_1$ 等于没转，所以 $R(\theta_1)^{\top}=R(-\theta_1)$，且 $R(\theta_1)^{\top}R(\theta_2)=R(\theta_2-\theta_1)$（$\theta_1,\theta_2$ 是任意两个角，本小节局部字母）。
    Query 在位置 $\mathrm{pos}_q$、Key 在位置 $\mathrm{pos}_k$ 时，同一对分量旋转后的点积是
    $(R(\mathrm{pos}_q\,\omega)q)\cdot(R(\mathrm{pos}_k\,\omega)k)=q^{\top}R(\mathrm{pos}_q\,\omega)^{\top}R(\mathrm{pos}_k\,\omega)k=q^{\top}R\bigl((\mathrm{pos}_k-\mathrm{pos}_q)\,\omega\bigr)k$，
    只取决于位置差 $\mathrm{pos}_k-\mathrm{pos}_q$，不取决于它们各自的绝对位置。这里 $q,k$ 是旋转前的这一对分量。
@@ -2054,7 +2054,6 @@ sequence lengths、request ordering，以及用于 KV 寻址的 block tables 和
 - `tests/v1/sample/test_topk_topp_sampler.py`
 - `tests/kernels/core/test_rotary_embedding.py`
 - `examples/basic/offline_inference/basic.py`
-- [本项目章节源码映射](../../meta/chapter-source-map.md)
 - [第 01 章实验记录](../../experiments/ch01-minimal-inference.md)
 
 ## 完成状态

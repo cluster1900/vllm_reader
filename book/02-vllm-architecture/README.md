@@ -40,6 +40,8 @@ prerequisites:
 structured output、speculative decoding 和分离式 prefill/decode 只在它们改变主链边界时
 指出，不展开内部算法。
 
+本章绑定源码 revision `05caae03c20f69436ff7ec23ded339ea104f1a01`（vLLM `main`，提交日期 2026-11-09；2026-11-10 核对源码引用与行号）。
+
 ## 阅读目标
 
 读完本章后，你应该能够：
@@ -1549,7 +1551,7 @@ $$
 
 **白话：**一次生成最多能写出多少个新 token，取决于“请求自己要多少”和“窗口里还剩多少”里更小的那个。窗口已经装不下完整请求上限时，不会在入口按 $\texttt{prompt\_len}+\mathtt{max\_tokens}$ 直接拒绝，而是把输出上限削到剩余窗口。
 
-**其中：**$\mathtt{max\_tokens}$ 是请求（或默认）给出的输出数量上限（个 token）；$\mathtt{max\_model\_len}$ 是模型上下文窗口（个 token）；$\texttt{prompt\_len}$ 是已经占用窗口的 prompt 长度（个 token）。三者都是无单位的非负整数。
+**其中：**$\mathtt{max\_tokens}$ 是请求（或默认）给出的输出数量上限（个 token）；$\mathtt{max\_model\_len}$ 是模型上下文窗口（个 token）；$\texttt{prompt\_len}$ 是已经占用窗口的 prompt 长度（个 token）。三者都是非负整数（个 token）。
 
 **怎么算出来：**执行侧 `check_stop` 分别检查总 token 数是否达到 `max_model_len`、输出 token 数是否达到请求上限，任一成立就结束（`vllm/v1/core/sched/utils.py:114-119`）。因此还能写出的个数不会超过剩余窗口 $\mathtt{max\_model\_len}-\texttt{prompt\_len}$，也不会超过 $\mathtt{max\_tokens}$，教学上取二者最小。
 在线 `get_max_tokens` 在此之外还会与覆盖值 `override_max_tokens`、平台限制 `platform_max_tokens` 一起取最小；若设了 `truncate_prompt_tokens`，参与相减的输入长度还会先被截到该上限（`vllm/entrypoints/serve/utils/api_utils.py:234-270`）。
@@ -1559,7 +1561,7 @@ $$
 **单位检查：**三项都是 token 个数，相减得到剩余个数，再与请求上限取最小，单位一致。
 
 **核对：**入口校验只拒绝“prompt 本身超过窗口”，以及生成路径上 prompt 长度恰好等于 `max_model_len` 的情况（至少还需 1 个输出 token 的位置都没有，`vllm/v1/engine/input_processor.py:563-597`，生成任务在 `:588-597`）。
-`check_stop` 的长度条件是 `request.num_tokens >= max_model_len or request.num_output_tokens >= request.max_tokens`（`:114-119`）。
+`check_stop` 的长度条件是 `request.num_tokens >= max_model_len or request.num_output_tokens >= request.max_tokens`（`vllm/v1/core/sched/utils.py:114-119`）。
 随书模型保留原请求上限，在 Core 的确定性响应计划中取这两种停止边界的最小值；这是等价的教学简化，
 不模拟生产 tokenization、EOS 或异步停止的全部路径。Core 也保留教学用终态记录，不模拟完整后台资源回收。
 
