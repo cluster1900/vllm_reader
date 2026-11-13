@@ -1907,9 +1907,7 @@ run-2026-09-07T120000/
 | 结果里新增服务端 `server_queue_times`、`server_ttfts`（#55809） | 与客户端 TTFT 对账 | 10.11.5 |
 | cuBLAS handle 先于显存快照创建（#61044） | 可用 KV 显存、启动日志里的 profile 数 | 10.9.1 |
 
-v0.32.0→v0.33.0 的破坏性变更与弃用清单（每一项附 PR 与提交）见：
-[meta/upgrade-v0.33.0-2026-11-10/breaking-changes.md](../../meta/upgrade-v0.33.0-2026-11-10/breaking-changes.md)。
-清单里与本章实验直接相关的是“暂停期间新请求返回 HTTP 503”：压测脚本若在 `pause_generation` 窗口内（`abort`、`wait` 模式）发请求，
+v0.32.0→v0.33.0 与本章实验直接相关的破坏性变更是：暂停期间新请求返回 HTTP 503（[#51488](https://github.com/vllm-project/vllm/pull/51488)）。压测脚本若在 `pause_generation` 窗口内（`abort`、`wait` 模式）发请求，
 会得到 503 而不是排队等待，需要在报告里把这类失败与容量拒绝分开统计。
 
 ---
@@ -2085,9 +2083,9 @@ throughput、goodput、p99 TTFT/TPOT、client queue、server queue。
     `benchmarks/attention_benchmarks/`：组件与 kernel 层实例。
 16. `tests/benchmarks/`：CLI、dataset adapter、sweep 和参数稳定性测试。
 
-本章源码基线为 vLLM main commit `05caae03c20f69436ff7ec23ded339ea104f1a01`（2026-11-10 重新钉扎；前一基线 v0.33.0 为
-`4ba787ec9959e566d3b587a796dff07673324da5`），指标教学代码的 CPU 测试通过。这次重新钉扎核对了源码引用与行号，并重新绑定了
-Model Runner V1 删除带来的变化；其余行为没有在 `05caae03` 上逐一重新核实（清单见 `meta/upgrade-main-05caae03-2026-11-10/`）。当前机器没有可用的 NVIDIA GPU vLLM
+本章源码基线为 vLLM main commit `05caae03c20f69436ff7ec23ded339ea104f1a01`（前一发布基线 v0.33.0 为
+`4ba787ec9959e566d3b587a796dff07673324da5`），指标教学代码的 CPU 测试通过。正文已按该基线核对源码引用与行号，并反映 Model Runner V1 删除；
+除此之外，未在该基线上将其余运行时行为逐一重新核实。当前机器没有可用的 NVIDIA GPU vLLM
 运行环境，因此 profiler、NCCL 与真实服务性能数据仍标记为 `runtime_verified: false`。
 本章给出的数值曲线均为教学示意，不能冒充实测结果。
 
