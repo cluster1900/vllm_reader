@@ -1440,7 +1440,7 @@ $\mathcal H(x)$ 无量纲，单位与 $\log$ 的底一致（实现用自然对�
   取前 3 个得 $p\approx(0.644,\ 0.237,\ 0.087)$，$\mathcal H\approx0.644\times0.440+0.237\times1.440+0.087\times2.440\approx0.837$；
   完整的 4 项熵是 0.948，差的 0.110 就是没有计入的第 4 项。
 
-**核对：** 与 `fly.py:12-38` 逐行一致；三个数字可把 $p_i$ 与 $\mathrm{LSE}$ 代入式子复算（例 3：$\mathrm{LSE}=\ln(e^3+e^2+e^1+e^0)\approx3.440$）。
+**核对：** 与 `fly.py:12-38` 逐行一致；三个数字可把 $p_i$ 与 $\operatorname{LSE}$ 代入式子复算（例 3：$\operatorname{LSE}=\ln(e^3+e^2+e^1+e^0)\approx3.440$）。
 
 若当前步按 native 规则本该拒绝，且 $\mathcal H$ 不低于 `fly_entropy_threshold`（默认 0.3），并且后面还留得下一个完整窗口，内核就记下 `pending_rejection`、**推迟**这次截断（`_rejection_kernel` 中 `FLY_WINDOW_SIZE>0` 分支，约 `:726-744`）。推迟还要求 `can_defer` 成立：draft 必须是有效 token（`is_valid_draft`，token id $\ge 0$，不是 $-1$ 占位），且相关 logit / logprob 有限（greedy 路径要求 target logit 不是 $-\infty$，`rejection_sampler_utils.py:636-644`；非 greedy 路径要求 target 与 draft 的 logprob 都不是 $-\infty$，`:717-723`）。窗口内后续每一步都必须被 native 接受；走到 `i - pending_rejection == FLY_WINDOW_SIZE` 时，把这一段（含当初被推迟的那一步）算成接受。中途有一步不被 native 接受，验证就此停下，推迟作废。官方文档写明：这是**有意有损**的策略，**不保持** target 分布，可能改变输出。换来的是在 draft 大体正确、只在 top-$k$ 内几个候选都占了可观概率因而差点被掐断的位置，少做一次昂贵的重启。
 

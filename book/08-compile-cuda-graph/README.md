@@ -394,7 +394,7 @@ $$
 CPU 总能在 GPU 跑完之前准备好，GPU 一直满载，每多一步多 5 ms；最后一步 GPU 完整跑 5 ms。所以 $2+3\times5+5=22\ \mathrm{ms}$。
 GPU 更慢时可化简成 $\Delta t_{\mathrm{prepare}}+n_{\mathrm{step}}\Delta t_{\mathrm{forward}}=2+4\times5=22\ \mathrm{ms}$（S0 的 2 ms 加上 S0–S3 四段 GPU 执行，对应时序图里 GPU 从 2 ms 一直跑到 22 ms）。
 反过来，若 CPU 更慢（例如 prepare 5 ms、execute 2 ms），瓶颈换成 CPU，结果是 $n_{\mathrm{step}}\Delta t_{\mathrm{prepare}}+\Delta t_{\mathrm{forward}}=4\times5+2=22\ \mathrm{ms}$，数字相同但原因不同。
-对比同步的 28 ms，这个例子省下 6 ms，也就是 $3\times\Delta t_{\mathrm{prepare}}$：前 3 步之后的准备都被盖住了。
+对比同步的 28 ms，这个例子省下 6 ms，也就是 $3\times\Delta t_{\mathrm{prepare}}$：S1、S2、S3 三次准备都被 GPU 执行盖住了（只有 S0 的准备躲不掉）。
 单位检查：各项都是 ms，乘整数、取 $\max$ 都不改单位，结果仍是 ms。
 
 **核对：** 把 $n_{\mathrm{step}}=4$、$\Delta t_{\mathrm{prepare}}=2$、$\Delta t_{\mathrm{forward}}=5$ 代入通式得 $2+3\times5+5=22$，与同步式 $4\times(2+5)=28$ 对照。把 $n_{\mathrm{step}}=1$ 代入通式得 $\Delta t_{\mathrm{prepare}}+\Delta t_{\mathrm{forward}}$，与同步式一致：单步没有流水收益。
@@ -1239,7 +1239,7 @@ piecewise 路径通常依赖 vLLM compile，当前还有 breakable CUDA Graph �
 
 表里的 `num_reqs = min(num_tokens, max_num_reqs)` 可以这样读：捕获一个有 `num_tokens` 个 token 的 FULL graph 时，要先定下它“按多少个请求”来捕获。
 每个请求至少占 1 个 token，所以请求数不会超过 token 数；同时不能超过 runner 的上限 `max_num_reqs`（来自 `scheduler_config.max_num_seqs`，`cudagraph_utils.py:180`），取两者较小值
-（`:372`；`:315` 的注释写的就是“最坏情况每请求 1 个 token，或 `max_num_reqs`”）。例如 `max_num_reqs=256`：捕获 8 个 token 的 graph 得 `num_reqs=8`，捕获 512 个 token 的得 256。
+（`:372`；`:315` 对 varlen decode graph 的注释给的是同一个上界：最坏情况每请求 1 个 token，或 `max_num_reqs`）。例如 `max_num_reqs=256`：捕获 8 个 token 的 graph 得 `num_reqs=8`，捕获 512 个 token 的得 256。
 PIECEWISE 回放时请求数没有限制，不需要 request padding，所以 `num_reqs=None`（`:370`）。更完整的 descriptor 构造见 8.14。
 
 [源码] `vllm/v1/worker/gpu/cudagraph_utils.py` - `CudaGraphManager._init_candidates`、`CudaGraphManager.dispatch`
