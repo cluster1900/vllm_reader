@@ -2083,9 +2083,9 @@ throughput、goodput、p99 TTFT/TPOT、client queue、server queue。
     `benchmarks/attention_benchmarks/`：组件与 kernel 层实例。
 16. `tests/benchmarks/`：CLI、dataset adapter、sweep 和参数稳定性测试。
 
-本章源码基线为 vLLM main commit `05caae03c20f69436ff7ec23ded339ea104f1a01`（前一发布基线 v0.33.0 为
-`4ba787ec9959e566d3b587a796dff07673324da5`），指标教学代码的 CPU 测试通过。正文已按该基线核对源码引用与行号，并反映 Model Runner V1 删除；
-除此之外，未在该基线上将其余运行时行为逐一重新核实。当前机器没有可用的 NVIDIA GPU vLLM
+本章源码基线为 vLLM main commit `05caae03c20f69436ff7ec23ded339ea104f1a01`（2026-11-10 重新钉扎；前一基线 v0.33.0 为
+`4ba787ec9959e566d3b587a796dff07673324da5`），指标教学代码的 CPU 测试通过。这次重新钉扎核对了源码引用与行号，并重新绑定了
+Model Runner V1 删除带来的变化；其余行为没有在 `05caae03` 上逐一重新核实。当前机器没有可用的 NVIDIA GPU vLLM
 运行环境，因此 profiler、NCCL 与真实服务性能数据仍标记为 `runtime_verified: false`。
 本章给出的数值曲线均为教学示意，不能冒充实测结果。
 
