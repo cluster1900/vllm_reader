@@ -755,7 +755,7 @@ available_kv_cache_memory_bytes
  - cudagraph_memory_estimate
 ```
 
-用 notation 里的记号，第二个式子是：
+用本章的记号，第二个式子是：
 
 $$
 M_{\mathrm{KV}}=M_{\mathrm{req}}-M_{\mathrm{nonKV}}-M_{\mathrm{graph}}
@@ -810,7 +810,7 @@ torch 看不到，也就不会在 cuBLAS 申请失败时清理自己的空闲缓
 如果配置了 `kv_cache_memory_bytes`，GPU/XPU Worker 仍执行 `profile_run()` 以完成最大 batch token
 相关编译，但以手工指定的 KV 字节数为基准，再经过 `reserve_mm_ipc_gpu_memory()` 的多模态 IPC
 预留处理；它不由 `gpu_memory_utilization` 推导。它适合明确控制容量，不适合把旧机器上的数值无条件复制到显存
-环境不同的进程。CPU worker 也认同一字段（以及把它写入该字段的 `VLLM_CPU_KVCACHE_SPACE`），见 §5.6.1。
+环境不同的进程。CPU worker 也使用同一字段（以及把它写入该字段的 `VLLM_CPU_KVCACHE_SPACE`），见 §5.6.1。
 
 ### 5.6.3 从字节数到 block 数
 
@@ -2024,7 +2024,7 @@ max_admission_blocks_per_request = ceil(num_tokens / B_blk) + 1
 
 Manager 释放窗口外的页以后，这些页可能很快被别的请求复用；但 attention kernel 加载 KV tile
 时，tile 可能跨过窗口起点，把窗口左侧已被复用的页也读进来，被 mask 掉的位置如果恰好是
-NaN，仍会污染输出。#60767 起，GPU 与 CPU runner 都在 `gather_block_tables` 里补了一道保险：
+NaN，仍会污染输出。#60767 在 GPU runner 的 `BlockTables.gather_block_tables` 里补了一道保险，CPU runner 的 `CPUBlockTables.gather_block_tables`（#61995 起）也有同一道保险：
 给每个 Sliding Window group，把“本步第一个被调度位置”窗口左侧的整块 entry 换成 null block：
 
 $$
@@ -2056,8 +2056,7 @@ block size 是 64，见 §5.2.1。启动时平台、backend 和混合模型对�
 
 单位检查：$\mathrm{pos}$、$N_{\mathrm{ret}}$ 都是 token；$B_{\mathrm{blk}}$ 是 token/block，所以 $n_{\mathrm{null}}=\lfloor\max(\mathrm{pos}-N_{\mathrm{ret}},0)/B_{\mathrm{blk}}\rfloor$ 的单位是 block（entry 个数）。
 
-注意它和上面 Manager 的释放用的是同一个式子，只是输入不同：Manager 用已确认的 `processed_computed_tokens`（算例里 280，释放 9 块），Worker 用本步第一个被调度位置 $\mathrm{pos}$（算例里 300，改写 10 个 entry）；Worker 多改写的那一块只是不再被读到，并没有被 Manager 释放。Context parallel（`cp_size>1`）时 block table 的列
-不再对应连续的 token 区间，这道保险被关闭。
+注意它和上面 Manager 的释放用的是同一个式子，只是输入不同：Manager 用已确认的 `processed_computed_tokens`（算例里 280，释放 9 块），Worker 用本步第一个被调度位置 $\mathrm{pos}$（算例里 300，改写 10 个 entry）；Worker 多改写的那一块只是不再被读到，并没有被 Manager 释放。GPU runner 在 context parallel（`cp_size>1`）时，block table 的列不再对应连续的 token 区间，这道保险被关闭；CPU runner 没有 `cp_size` 参数，不涉及。
 
 **核对：** `vllm/v1/worker/gpu/block_table.py:316-320`（`reach`、`first_pos`、整除 `block_size`）、`:55-63`（`cp_size>1` 时 reach 置 0）与 `vllm/v1/worker/gpu/model_runner.py:689-693`（把 `num_retained_tokens` 传入）@ `05caae03`。CPU runner 走同一规则：`vllm/v1/worker/cpu/block_table.py` 的 `CPUBlockTables.gather_block_tables`（`sliding_window_reach` 由 `standalone_model_runner.py:380-417` 传入）用 `floor(max(first_pos - reach, 0) / block_size)` 把行首整块置 null（`:133-141`）；`cp_size>1` 时关闭保险是 GPU `BlockTables.__init__` 的行为（`gpu/block_table.py:59-60`）。
 
@@ -2080,6 +2079,11 @@ flowchart LR
 
 [测试] `tests/v1/worker/test_gpu_block_table.py` -
 `test_gather_block_tables_nulls_blocks_below_sliding_window`（需要 CUDA 设备，本机未运行）
+
+[源码] `vllm/v1/worker/cpu/block_table.py` - `CPUBlockTables.gather_block_tables`
+
+[测试] `tests/v1/worker/cpu/test_cpu_block_table.py` -
+`test_gather_nulls_blocks_below_sliding_window`
 
 ## 5.17 外部 KV、P/D 与延迟缓存
 
