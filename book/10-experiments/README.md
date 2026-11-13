@@ -188,7 +188,7 @@ chat 适配器的对应语句在 `:450`、`:487`、`:491`、`:514`，形状相�
 （$=\mathrm{E2EL}+\Delta t_{\mathrm{client\ queue}}$，仅在设置了 max concurrency 且 request rate 有限时），本例是 $0.5+0.2=0.7$ 秒。
 
 **核对：**随书 `examples/ch10_benchmark_reasoning.py` 的 `RequestTrace(arrival_time=0.0, send_time=0.2, token_times=(0.50, 0.53, 0.60, 0.65, 0.70), prompt_tokens=1)`
-给出的 `client_queue_time`、`ttft`、`itls`、`e2el` 与上面一致（浮点误差在 $10^{-12}$ 秒以内）；它的 `ttft`、`itls`、`e2el` 属性与上面三条定义逐行同义。
+给出的 `client_queue_time`、`ttft`、`itls`、`e2el` 与上面一致（浮点误差在 $10^{-12}$ 秒以内）；`ttft`、`itls` 与上面的定义同义，`e2el` 只在 `last_response_time` 未设置时与定义同义（设置后，$t_{\mathrm{last}}$ 改取适配器给出的末计时点 `last_response_time`，而不是最后一个事件的时刻）。
 
 若输出 token 数 $N_{\mathrm{out}}>1$：
 
@@ -213,6 +213,7 @@ $N_{\mathrm{out}}=1$ 时首 token 之后没有 token，分母为 0，所以要�
 **核对：**`vllm/benchmarks/serve.py:655-658`：`if output_len > 1:` 才计算 `tpot = (latency - ttft) / (output_len - 1)`，与上式一致。
 但源码里的 `output_len` 优先取 usage 的 `completion_tokens`，缺失时才用 tokenizer 重数（`:636-651`），所以分母是 token 数，不是事件数：
 一个事件带多个 token 时，TPOT 仍按 token 数平摊，而 ITL 样本数是事件数减 1，“TPOT 等于 ITL 平均”只在上面“一事件一 token”的教学模型里成立。
+另外，usage 里没有 token 数且没有 tokenizer 时（`tokenizer is None`），`output_len` 被记为 1（`:638-640`），不满足 `output_len > 1`，这个请求不产生 TPOT 样本（goodput 判定里按 0 处理）。
 
 ### 生活化直觉：聊天体验与测量指标怎样对应
 
@@ -390,6 +391,7 @@ $n_{\mathrm{SLO}}$ 是达标的成功请求数（request）；$\Delta t_{\mathrm
 不达标的请求数是 $12+8-5=15$（两组相加会把“两项都超标”的 5 个数两次，要减掉一次），所以 $n_{\mathrm{SLO}}=100-15=85$，
 $G=85\div20=4.25\ \mathrm{request/s}$。同一次运行的请求吞吐是 $100\div20=5\ \mathrm{request/s}$，所以 $G$ 是它的 $85\%$；
 因为 $n_{\mathrm{SLO}}\le n_{\mathrm{req}}$，$G$ 永远不会高于请求吞吐。只输出 1 个 token 的请求没有 TPOT 样本，判定时按 TPOT 为 0 处理（见 10.2.2）。
+单位检查：$n_{\mathrm{SLO}}$ 是请求个数，除以秒得 request/s，与 $\mathrm{thr}_{\mathrm{req}}$ 同单位，所以 $G$ 可以直接和它比较（$4.25$ 对 $5$）；三个阈值与各自的指标同单位，才能比较大小。
 
 **核对：**`vllm/benchmarks/serve.py:669-692`：每个已配置的阈值把对应的样本列表（`ttfts`、`all_tpots`、`e2els`）和阈值放进 `valid_metrics`、`slo_values`，
 毫秒阈值除以 `MILLISECONDS_TO_SECONDS_CONVERSION`（`:65`，值为 1000）；`is_good_req = all([s >= r for s, r in zip(slo_values, req_metric)])`
@@ -617,7 +619,7 @@ $\text{shape}$、$\text{scale}$ 是 Gamma 分布的形状参数与尺度参数�
 | 1 | $\frac{1}{10\times1}=0.1$ | $1\times0.1=0.1$ | $1\times0.1=0.1$ | $1$ |
 | 4 | $\frac{1}{10\times4}=0.025$ | $4\times0.025=0.1$ | $2\times0.025=0.05$ | $0.5$ |
 
-三行的均值相同（0.1 秒），只有波动不同；这也是 10.24 的实验 D“保持平均 RPS 不变，只改 burstiness”的依据。
+三行的均值相同（0.1 秒），只有波动不同。单位检查：$\lambda$ 是 request/s、$b$ 无单位，所以 $\text{scale}=\frac{1}{\lambda b}$ 的单位是 $\frac{1}{\mathrm{request/s}}=\mathrm{s/request}$，也就是每个间隔的秒数，与 $\Delta t$ 同单位；表中的 0.2、0.1、0.025、均值和标准差都是秒，最后一列是两个秒相除，无单位。这也是 10.24 的实验 D“保持平均 RPS 不变，只改 burstiness”的依据。
 
 固定 request rate 时，代码还会把累计 delay 缩放到 `total_requests / request_rate`（待发请求数除以速率），减少总负载漂移：
 `total_requests` 个请求有同样多个间隔（第一个请求之前也要先等一个间隔），累计相加后最后一个请求的发送时刻是这些间隔之和，平均应是 `total_requests` $\times\frac{1}{\lambda}$，所以目标总时长取 `total_requests` $\div\lambda$。
@@ -786,7 +788,11 @@ size 已经就绪。第 8 章说明 compile range 与 CUDA Graph descriptor 都�
 - container image 或依赖 lock；
 - power/clock policy 与同机干扰任务。
 
-> **main 上的变化（已包含在本书基线中，正文尚未展开，后续批次补写）**：以下提交已逐条用 `git merge-base --is-ancestor <提交> 05caae03` 核对，都是本书基线 `05caae03` 的祖先（且都不在 v0.33.0 `4ba787ec` 中）；本章正文仍是 v0.33.0 时代的写法（Model Runner V1 删除除外），条目里 `@` 后的短 SHA 是各提交当时的版本，行号不是 `05caae03` 上的行号。[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）：记录环境时须写明 `ParallelConfig.numa_bind`（`parallel.py` L329–L344 @ `0106c8abc`）。默认 `None` 为 best-effort 自动绑定（多 NUMA、`numactl`、spawn、mp/uni 等条件满足时软 memory preference）；显式 `True` 严格绑定（失败即启动错误），`False` 关闭。仅写“NUMA 拓扑”而不写该开关的取值，无法复现 Worker 子进程是否被绑核。详见 meta/main-tracking-2026-10-28.md。
+记录环境时还要写明 `ParallelConfig.numa_bind` 的取值（`vllm/config/parallel.py:350`，字段说明紧随其后；该开关由
+[4d95f222e6](https://github.com/vllm-project/vllm/commit/4d95f222e68bd43acbdfdffad6d46eea70146dcc)（[#61258](https://github.com/vllm-project/vllm/pull/61258)）引入）。
+默认 `None` 是 best-effort 自动绑定：只有环境支持时才绑定（多个 NUMA 节点、安装了 `numactl`、CPU 亲和性不受限、默认 NUMA 内存策略、`spawn` 启动方式配合 mp/uni executor 与 mp DP），
+并且只是“优先用 GPU 本地内存、允许跨节点分配”的软偏好；显式 `True` 是严格绑定，缺少 `numactl` 或探测不到 GPU 到 NUMA 的拓扑时直接启动失败；`False` 关闭绑定。
+只写“NUMA 拓扑”而不写该开关的取值，就无法复现 Worker 子进程是否被绑核。
 
 ### 10.10.2 固定 workload
 
@@ -904,6 +910,8 @@ $t_{\mathrm{token},\mathrm{first}}=10.30$，$t_{\mathrm{token},\mathrm{last}}=11
 若这个请求共输出 $N_{\mathrm{out}}=17$ 个 token，源码的 `mean_time_per_output_token` 是 $\Delta t_{\mathrm{decode}}\div(N_{\mathrm{out}}-1)=0.80\div16=0.05$ 秒/token
 （`stats.py:616-619`，同样不计 prefill 产出的首 token），与客户端 TPOT 的分母同形，只是分子换成服务端的 $\Delta t_{\mathrm{decode}}$。
 
+单位检查：四个量都是同一个单调时钟上两个读数之差，读数以秒计，所以都是秒；$0.18+0.80=0.98$ 单位一致；再除以 token 数才变成秒/token。
+
 **核对：**`stats.py:577-582`：QUEUED 事件写 `queued_ts`，SCHEDULED 事件只在 `scheduled_ts == 0.0` 时写入（“ignore preemptions”，所以是第一次）；
 `stats.py:557` 在 prefill 阶段把 `first_token_ts` 设为该次输出的 EngineCore 时间戳，`:562` 每次输出更新 `last_token_ts`。
 普通请求只在 `Scheduler.add_request` 记一次 QUEUED（`vllm/v1/core/sched/scheduler.py:3020`），被抢占时只记 PREEMPTED（`:1815`）不再记 QUEUED，所以 $t_{\mathrm{queued},\mathrm{first}}$ 就是这唯一一次；
@@ -1008,7 +1016,7 @@ sequenceDiagram
 
 **怎么算出来：**客户端 TTFT 覆盖整条路径，而 $\Delta t_{\mathrm{prefill}}$ 只是其中一段，所以 $\mathrm{TTFT}-\Delta t_{\mathrm{prefill}}$ 里仍包含 $\Delta t_{\mathrm{queue}}$。
 取教学数字：客户端 $\mathrm{TTFT}=0.50$ 秒，服务端 `queue_time_ms`=120、`time_to_first_token_ms`=180，即 $\Delta t_{\mathrm{queue}}=120\div1000=0.12$ 秒、$\Delta t_{\mathrm{prefill}}=180\div1000=0.18$ 秒。
-相减得 $0.50-0.18=0.32$ 秒；其中 $0.12$ 秒是服务端排队，剩下 $0.32-0.12=0.20$ 秒才是渲染、传输和客户端处理的合计，所以不能把 $0.32$ 秒当作网络延迟。
+相减得 $0.50-0.18=0.32$ 秒；其中 $0.12$ 秒是服务端排队，剩下 $0.32-0.12=0.20$ 秒才是渲染、传输和客户端处理的合计，所以不能把 $0.32$ 秒当作网络延迟。单位检查：字段是毫秒，先除以 1000 换成秒（$120\div1000=0.12$），再与以秒计的 $\mathrm{TTFT}$ 相减；毫秒和秒不能直接相减。
 
 **核对：**`build_per_request_timing_metrics` 里 `time_to_first_token_ms = (first_token_ts - scheduled_ts) * 1000`（`serving.py:67`）、`queue_time_ms = (scheduled_ts - queued_ts) * 1000`（`:73`）；
 客户端适配器 `_update_server_metrics` 取这两个字段并除以 1000（`vllm/benchmarks/lib/endpoint_request_func.py:124-125`）。
@@ -1108,18 +1116,19 @@ $$
 n_{\mathrm{sys}}=\lambda\,\overline{\Delta t}_{\mathrm{sys}}
 $$
 
-其中 $n_{\mathrm{sys}}$ 是系统中平均请求数，$\lambda$ 是有效到达率（request/s），
-$\overline{\Delta t}_{\mathrm{sys}}$ 是请求在系统中的平均停留时间（秒，包含等待与服务）。若只讨论排队部分，
-应使用对应的
+若只讨论排队部分，应使用对应的
 
 $$
 n_{\mathrm{queue}}=\lambda\,\overline{\Delta t}_{\mathrm{wait}}
 $$
 
-其中 $n_{\mathrm{queue}}$ 是队列中的平均请求数，$\overline{\Delta t}_{\mathrm{wait}}$ 是请求在队列里的平均等待时间（秒）；不能把系统在途数与纯排队等待时间混用。
-横线表示“平均”，与 10.11.1 单个请求的 $\Delta t_{\mathrm{queue}}$ 是两个量。
+不能把系统在途数与纯排队等待时间混用。
 
 **白话：**平均排着多少个请求，等于每秒来多少个请求，乘以每个请求平均待多久；就像浴缸里的水量等于进水速度乘以每滴水停留的时间。
+
+**其中：**$n_{\mathrm{sys}}$ 是系统中平均请求数，$\lambda$ 是有效到达率（request/s），$\overline{\Delta t}_{\mathrm{sys}}$ 是请求在系统中的平均停留时间（秒，包含等待与服务）；
+$n_{\mathrm{queue}}$ 是队列中的平均请求数，$\overline{\Delta t}_{\mathrm{wait}}$ 是请求在队列里的平均等待时间（秒）。
+横线表示“平均”，与 10.11.1 单个请求的 $\Delta t_{\mathrm{queue}}$ 是两个量。
 
 **怎么算出来：**取一段足够长的观察时间。这段时间里到达了“到达率 $\times$ 观察时长”个请求，每个请求在系统里待了各自的停留时间；把所有请求的停留时间加起来，
 得到“请求 $\cdot$ 秒”的总量，等于请求数乘以平均停留时间，即 $\lambda\times$ 观察时长 $\times\overline{\Delta t}_{\mathrm{sys}}$。
@@ -1148,6 +1157,7 @@ $$
 4. 由 Little 法则，$\overline{\Delta t}_{\mathrm{sys}}=\frac{n_{\mathrm{sys}}}{\lambda}=\frac{\rho}{\lambda(1-\rho)}=\frac{1}{\mu}\cdot\frac{1}{1-\rho}$（用了 $\rho/\lambda=1/\mu$）。
 
 代入数字：$\frac{1}{1-\rho}$ 在 $\rho=0.5$ 时是 2，$\rho=0.9$ 时是 10，$\rho=0.99$ 时是 100：只有在这个模型里，利用率从 90% 升到 99%，平均停留时间才放大 10 倍。
+单位检查：$\rho=\lambda\div\mu$ 是 request/s 除以 request/s，无单位；$\frac{1}{\mu}$ 是秒/request，即一个请求的纯服务时间，乘上无单位的 $\frac{1}{1-\rho}$ 仍是秒；$n_{\mathrm{sys}}=\frac{\rho}{1-\rho}$ 是请求个数，除以 $\lambda$ 得到秒。
 
 **核对：**这是教学模型，不对应 vLLM 源码；也没有说明 vLLM 在某个利用率下实际会慢几倍，需要按 10.13.2 的做法在真实 workload 上测曲线。
 
@@ -1819,8 +1829,24 @@ GPU 数可由显式字段或 $n_{\mathrm{GPU}}=\mathrm{TP}\times\mathrm{PP}\time
 ### 10.21.4 自动回归阈值要考虑噪声
 
 固定 `throughput >= baseline * 0.99` 在噪声 3% 的机器上会频繁误报。
-这条阈值只容许比 baseline 低 1%；若把“噪声 3%”理解为单次测量相对均值的标准差（教学假设），1% 只有 $1\div3\approx0.33$ 个标准差，
-在正态近似下，一次什么都没改的测量落到阈值以下的概率约为 37%，所以会频繁误报。更稳妥的方法是建立
+
+**白话：**这条阈值只允许新结果比 baseline 低 1%；如果机器自己的波动就有 3%，那么什么都没改，一次测量也常常低于阈值，被判成“回归”。
+
+**其中：**“噪声 3%”指单次测量相对均值的标准差 $\sigma=3\%$，容差是 $1\%$；$\Phi(z)$ 是标准正态分布的累积概率（本节局部符号），$\Phi(z)$ 表示正态随机量不超过 $z$ 个标准差的概率。
+下面的数字建立在两条教学假设上：测量误差服从均值为 0 的正态分布，各次测量相互独立；真实噪声未必如此。
+
+**怎么算出来：**“误报”指什么都没改、测量值却落到阈值以下。分两种情形：
+
+1. **baseline 近似等于真值**（例如取自很长的历史均值，自身误差可以忽略）：新测量相对 baseline 的偏差服从标准差 $\sigma=3\%$ 的正态分布，阈值在 $-1\%$，
+   误报概率是 $\Phi\!\left(\frac{-1\%}{3\%}\right)=\Phi(-0.333)\approx0.369$，约 37%；
+2. **baseline 本身也只是一次带噪声的测量**：baseline 和新测量各带标准差 $3\%$ 的独立误差，两者之差的标准差是 $3\%\times\sqrt2\approx4.24\%$，
+   误报概率是 $\Phi\!\left(\frac{-1\%}{4.24\%}\right)=\Phi(-0.236)\approx0.407$，约 41%。
+
+两种情形下，每 10 次什么都没改的比较里都约有 4 次误报。单位检查：容差与 $\sigma$ 都是相对均值的百分数，相除得到无单位的 $z$ 值。
+
+**核对：**不对应 vLLM 源码，可以在 Python 里手算复核：`statistics.NormalDist().cdf(-1/3)` 为 $0.3694$，`statistics.NormalDist().cdf(-1/(3*2**0.5))` 为 $0.4068$。
+
+更稳妥的方法是建立
 历史分布、控制运行环境、使用重复样本并为不同 benchmark 设置不同容差。阈值也不能掩盖
 严重错误率或正确性失败。
 
