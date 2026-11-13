@@ -9,7 +9,7 @@
 - 读正文时遇到不确定的字母，先查第 1 节的全局符号表；表里没有的，是该小节自己定义的局部字母（第 3 节）。
 - 写或改公式时，按第 2、5 节的规则选符号，按第 6 节的模板写讲解，按第 7 节决定要不要配图。
 - 第 4 节是改名对照表：各章正文已经按它改成新写法；表里的旧写法只用来识别旧资料和遗留写法。
-  表里的行号对应改写之前的正文，不再是现在各章的行号，查找请用符号。
+  表里按符号查旧写法，不按行号。
 
 源码里的名字（如 `num_computed_tokens`）不受本约定约束，始终写成代码样式；公式里用的是它们的数学记号，
 两者的对应关系在表里列出。
@@ -46,7 +46,7 @@
 | $s_j$、$a_j$ | 第 $j$ 个 key 的打分 $q\cdot k_j/\sqrt{d_h}$；softmax 之后的 attention 权重 $a_j$ | 无单位 | 旧 ch06 的 $p_j$；向量形式 $a$ 见 ch01 |
 | $z_i$、$p_i$ | 候选 token $i$ 的 logit 与概率（softmax 之后，总和为 1） | 无单位 | $p_i$ 只表示概率 |
 | $\tau$ | softmax 温度，$\tau>0$ | 无单位 | 旧 $T$（ch01、ch07） |
-| $\mathrm{top\_k}_i$、$\mathrm{top\_p}_i$ | 第 $i$ 行请求的 top-k、top-p 参数；不分行时写 $\mathrm{top\_k}$、$\mathrm{top\_p}$ | 个 / 概率 | 旧 $k_i$、$p_i$（ch01 L579 起） |
+| $\mathrm{top\_k}_i$、$\mathrm{top\_p}_i$ | 第 $i$ 行请求的 top-k、top-p 参数；不分行时写 $\mathrm{top\_k}$、$\mathrm{top\_p}$ | 个 / 概率 | 旧 $k_i$、$p_i$（ch01） |
 | $\operatorname{LSE}$、$\operatorname{LSE}_i$ | Log-Sum-Exp：一个 query 对一组 key 的 $\log\sum_j\exp(s_j)$；$\operatorname{LSE}_i$ 是 KV 分片 $i$ 上的值（求和只覆盖该分片的 key，$i$ 是分片序号，不是 query 行号） | 无单位 | 旧 ch09 的 $L$、$L_i$；ch06、ch09 都按这个含义使用 |
 | $\mathcal H(x)$ | top-$k$ 熵（ch07 §7.22.1 的 FLy 判定） | 无单位 | 旧 $H(x)$ |
 | $\theta$ | RoPE 的旋转角 | 弧度 | ch01 的 RoPE 公式；全书只有这一个 $\theta$，因此不再列入第 3 节的局部字母 |
@@ -65,7 +65,7 @@ $n_{\mathrm{users}}$、$n_{\mathrm{GPU}}$，不写 $N_{\dots}$。
 | $N_{\mathrm{target}}$、$N_{\mathrm{tokens}}$ | 请求这一步要算到的目标 token 数；请求当前已知的 token 总数（`num_tokens`） | ch04 |
 | $N_{\mathrm{computed}}$、$N_{\mathrm{new}}$ | 已计算的 token 数（`num_computed_tokens`）；本步新调度的 token 数，$N_{\mathrm{new}}=N_{\mathrm{target}}-N_{\mathrm{computed}}$ | ch04、ch08 |
 | $N_{\mathrm{placeholders}}$、$N_{\mathrm{in\ flight}}$、$N_{\mathrm{confirmed}}$、$N_{\mathrm{cacheable}}$ | async 调度里的占位 token、在途 token、已确认 token、可写入 prefix cache 的 token | ch04、ch08 |
-| $N_{\mathrm{sampled}}$ | 一步里正常采样得到的 token 数（`num_sampled_tokens_per_step`） | ch08 §8.3.2 |
+| $N_{\mathrm{sampled}}$ | 一步里正常采样得到的 token 数（生成式模型为 1，pooling 与 diffusion 为 0；`num_sampled_tokens_per_step`，`vllm/v1/core/sched/scheduler.py:152`） | ch08 §8.3.2 |
 | $N_{\mathrm{scheduled}}$、$N_{\mathrm{remaining}}$、$N_{\mathrm{chunk}}$ | 本步调度给请求的 token 数；还剩多少 token 没算；chunked prefill 本次切下的 token 数 | ch04 |
 | $N_{\mathrm{budget}}$、$N_{\mathrm{budget,in}}$、$N_{\mathrm{max}}$ | 本步剩余的 token 预算；输入侧预算；`max_tokens` | ch04 |
 | $N_{\mathrm{hit,local}}$、$N_{\mathrm{hit,ext}}$ | 本地、外部前缀命中的 token 数 | ch04 |
@@ -168,7 +168,7 @@ $n_{\mathrm{users}}$、$n_{\mathrm{GPU}}$，不写 $N_{\dots}$。
 | ch05 | $E_i$、$i$、$j$ | 覆盖 block 与 lookahead 范围的 `extra_keys`；block 序号 |
 | ch06 | $i$、$b$、$o$、$m$、$Z$、$m'$、$Z'$、$m_{\mathrm{tile}}$、$\mathrm{pos}_0$、$E_{\mathrm{max}}$、$B_{\mathrm{mgr}}$、$B_{\mathrm{ker}}$、$\kappa$、$i_{\mathrm{mgr}}$ | §6.4 地址公式里的逻辑 block 序号与物理 block ID；$o$ 是 attention 的输出向量；$m,Z$ 是在线 softmax 的当前最大值与分母（旧 $\ell$，让给 ch09 的 local rank），带撇号是合入新片段之后的值，$m_{\mathrm{tile}}$ 是新片段的最大分数；$\mathrm{pos}_0$ 是滑窗里首个 query 的位置；$E_{\mathrm{max}}$ 是一次 staged 写入的最长元素数；manager、kernel 的 block 大小、两者之比 $\kappa=B_{\mathrm{mgr}}/B_{\mathrm{ker}}$ 与 manager block 序号 |
 | ch07 | $k$、$x$ | FLy 判定里熵的 top-$k$ 大小（不是采样的 top-k）；输入 |
-| ch09 | $A,A_i,X_i,Y_i,b_i$、$Y^{\mathrm{part}}_i$、$u_r,f_r,\Sigma_u,\Sigma_f$、$G_2$、$\hat T$、$\mathrm{pad}_{r,t}$、$\alpha,\beta$、$N_{\mathrm{sch},i}$、$N_{\mathrm{drf},i}$、$N_{\mathrm{acc},i}$ | TP 线性层的权重与分片（$A$ 是权重，为避免与 world size $W$ 冲突）、偏置 $b_i$；行并行的 partial output；DP 同步的两个标志和它们的和；all-reduce 分组大小；PCP 填充后每 rank 的 token 数及其掩码；通信的固定延迟（s）与有效带宽（byte/s）（与 ch01 里证明用的角度无关）；「v0.33.0：batch-sharded sampling 可与自适应验证同开」一节里请求 $i$ 调度时预留的 logits 行数、带的 draft token 数、实际接纳的 draft 数（$N_{\mathrm{sch},i}$ 是按调度上限预留的 logits 行数，**不等于**第 1.3 节的 $N_{\mathrm{scheduled}}$，后者是 ch04 里请求本步被调度的 token 数） |
+| ch09 | $A,A_i,X_i,Y_i,b_i$、$Y^{\mathrm{part}}_i$、$u_r,f_r,\Sigma_u,\Sigma_f$、$G_2$、$\hat T$、$\mathrm{pad}_{r,t}$、$\alpha,\beta$、$N_{\mathrm{sch},i}$、$N_{\mathrm{drf},i}$、$N_{\mathrm{acc},i}$ | TP 线性层的权重与分片（$A$ 是权重，为避免与 world size $W$ 冲突）、偏置 $b_i$；行并行的 partial output；DP 同步的两个标志和它们的和；all-reduce 分组大小；PCP 填充后每 rank 的 token 数及其掩码；通信的固定延迟（s）与有效带宽（byte/s）（ch01 的 RoPE 角用 $\theta_1$、$\theta_2$）；「v0.33.0：batch-sharded sampling 可与自适应验证同开」一节里请求 $i$ 调度时预留的 logits 行数、带的 draft token 数、实际接纳的 draft 数（$N_{\mathrm{sch},i}$ 是按调度上限预留的 logits 行数，**不等于**第 1.3 节的 $N_{\mathrm{scheduled}}$，后者是 ch04 里请求本步被调度的 token 数） |
 | ch09 | $\mathrm{score}_i$、$\mathrm{score}^{\mathrm{base}}_i$ | §9.7.3 engine $i$ 的负载分数及其基础分（无单位，分数低的 engine 优先接新请求） |
 | ch09 | $n_{\mathrm{exp}}$、$n_{\mathrm{base}}$、$n_{\mathrm{rem}}$、$n_{\mathrm{exp},r}$、$\mathrm{start}_r$ | §9.8.2 expert 放置：expert 总数、每个 rank 至少拥有的个数、多出来的个数、rank $r_{\mathrm{ep}}$ 实际拥有的个数、`linear` 放置时它的起点 |
 | ch09 | $t$、$k$、$x_t$、$y_t$、$e_{t,k}$、$w_{t,k}$、$E_e$、$N_{\mathrm{tok}}$ | §9.8.3 MoE 一层：token 序号、该 token 的第 $k$ 个选中 expert、输入与输出、选中的 expert 编号与路由权重、第 $e$ 个 expert 的 MLP、这一层要处理的 token 数 |
@@ -183,188 +183,187 @@ $n_{\mathrm{users}}$、$n_{\mathrm{GPU}}$，不写 $N_{\dots}$。
 
 ## 4 改名对照表
 
-按章列出，每行是一类写法：旧写法在哪些行、改成什么、为什么。各章正文已经按此表改写；改完的行不会从表里删除，
-它的用处是认出旧资料和旧版本里的老写法。
+按章列出，每行是一类写法：旧写法、改成什么、为什么。各章正文已经按此表改写；改完的行不会从表里删除，
+它的用处是认出旧资料和旧版本里的老写法，查找请直接用符号。
 
-“位置”列的行号是改写之前的行号，不对应现在各章的行号，查找旧写法请直接用符号。行号规则：显示公式用 `$$` 起始行，行内公式、行内代码和 mermaid 标签用所在行。覆盖范围是 `$…$`、`$$…$$`、行内代码和 mermaid 标签；
-夹在中文句子里、没有写成公式或代码的字母（例如“块大小 B”）不在表内。
+覆盖范围是 `$…$`、`$$…$$`、行内代码和 mermaid 标签；夹在中文句子里、没有写成公式或代码的字母（例如“块大小 B”）不在表内。
 
 ### ch01 Transformer 推理
 
-| 旧写法 | 新写法 | 含义 | 位置（行号） |
-|---|---|---|---|
-| $T$（温度） | $\tau$ | softmax 温度 | L509、L513 |
-| $z_i/T$ | $z_i/\tau$ | softmax 温度 | L1519 |
-| $K^{\mathsf T}$ | $K^{\top}$ | 转置（同章 L333 起另写作 `K^T`） | L324 |
-| `K^T` | $K^{\top}$ | 转置 | L333 |
-| $D_h$ / `D_h` / `Dh` | $d_h$（代码样式 `d_h`） | 单头宽度（Q/K） | L324、L332、L334、L337、L338、L339、L340、L398、L414、L415、L416、L916 |
-| $D_k$、$D_v$ / `Dv` | $d_k$、$d_v$ | K / V 的单头宽度（仅在两者可能不同的通式里出现） | L332、L334、L416、L417、L906、L911、L912 |
-| `Hq`、`Hkv` | $H_q$、$H_{\mathrm{kv}}$（形状里 `H_q`、`H_kv`） | Q / KV head 数 | L414、L415、L416、L417 |
-| `Nq`、`Nk` | $N_q$、$N_k$ | 单头例子里 query / key 行数 | L331、L332、L333、L334 |
-| $M$（因果 mask） | $\mathrm{Mask}$ | 因果 mask（把 $M$ 留给显存/字节数） | L324、L334 |
-| 形状里的 `V`（词表） | `vocab_size` | 形状里的词表维（L136 `[T, V]`、L206 `[V]`、L1478 `[B,S,V]`） | L136、L206、L1478 |
-| $V$（词表） | $\lvert\mathcal V\rvert$ | 词表大小（同章 L312 起 $V$ 是 Value 矩阵） | L206、L572、L579、L587、L589、L593、L615 |
-| $k_i$、$k$（每行 top-k） | $\mathrm{top\_k}_i$、$\mathrm{top\_k}$ | 第 $i$ 行的 top-k（避免与 key $k$ 混淆） | L579、L587、L593、L594、L615 |
-| $p_i$、$p$（每行 top-p） | $\mathrm{top\_p}_i$、$\mathrm{top\_p}$ | 第 $i$ 行的 top-p（$p_i$ 只留给概率；同章 L202 的 $p_i$ 是概率） | L579、L588、L590、L593、L594、L615 |
-| `I`（MLP 中间宽度） | $D_{\mathrm{ff}}$ | MLP 中间宽度 | L263 |
-| $B_{\mathrm{token}}$ | $M_{\mathrm{tok}}$ | 每 token 的 KV 字节数 | L903、L906、L916、L938、L948、L959 |
-| $B_{\mathrm{dtype}}$ | $b_{\mathrm{elem}}$ | 每个元素的字节数 | L903、L906、L916、L927 |
-| $B_{2048}$、$B_{\mathrm{total}}$ | $M_{2048}$、$M_{\mathrm{total}}$ | 2048 token / 全部请求的 KV 总字节数 | L938、L948、L956、L959 |
-| `T`（温度）、`T>0` 等 | $\tau$（`τ>0` 等） | softmax 温度（同章 `[T,D]` 里的 `T` 是 token 数） | L513、L514、L516、L517、L522、L541、L553 |
-| `k`、`p`（top-k、top-p 参数） | $\mathrm{top\_k}$、$\mathrm{top\_p}$ | top-k / top-p 参数 | L538、L539 |
-| `P=128`、`G=32` | $N_{\mathrm{prompt}}=128$、$N_{\mathrm{out}}=32$ | 最小实验的 prompt / 输出 token 数（`G` 留给 ch10 的 goodput） | L891 |
-| 上标 `T`（转置） | 上标 $\top$ | 转置（`T` 留给 token 数） | L332 |
+| 旧写法 | 新写法 | 含义 |
+|---|---|---|
+| $T$（温度） | $\tau$ | softmax 温度 |
+| $z_i/T$ | $z_i/\tau$ | softmax 温度 |
+| $K^{\mathsf T}$ | $K^{\top}$ | 转置（同章后面另写作 `K^T`） |
+| `K^T` | $K^{\top}$ | 转置 |
+| $D_h$ / `D_h` / `Dh` | $d_h$（代码样式 `d_h`） | 单头宽度（Q/K） |
+| $D_k$、$D_v$ / `Dv` | $d_k$、$d_v$ | K / V 的单头宽度（仅在两者可能不同的通式里出现） |
+| `Hq`、`Hkv` | $H_q$、$H_{\mathrm{kv}}$（形状里 `H_q`、`H_kv`） | Q / KV head 数 |
+| `Nq`、`Nk` | $N_q$、$N_k$ | 单头例子里 query / key 行数 |
+| $M$（因果 mask） | $\mathrm{Mask}$ | 因果 mask（把 $M$ 留给显存/字节数） |
+| 形状里的 `V`（词表） | `vocab_size` | 形状里的词表维（如 `[T, V]`、`[V]`、`[B,S,V]`） |
+| $V$（词表） | $\lvert\mathcal V\rvert$ | 词表大小（同章后面 $V$ 是 Value 矩阵） |
+| $k_i$、$k$（每行 top-k） | $\mathrm{top\_k}_i$、$\mathrm{top\_k}$ | 第 $i$ 行的 top-k（避免与 key $k$ 混淆） |
+| $p_i$、$p$（每行 top-p） | $\mathrm{top\_p}_i$、$\mathrm{top\_p}$ | 第 $i$ 行的 top-p（$p_i$ 只留给概率；同章另一处的 $p_i$ 是概率） |
+| `I`（MLP 中间宽度） | $D_{\mathrm{ff}}$ | MLP 中间宽度 |
+| $B_{\mathrm{token}}$ | $M_{\mathrm{tok}}$ | 每 token 的 KV 字节数 |
+| $B_{\mathrm{dtype}}$ | $b_{\mathrm{elem}}$ | 每个元素的字节数 |
+| $B_{2048}$、$B_{\mathrm{total}}$ | $M_{2048}$、$M_{\mathrm{total}}$ | 2048 token / 全部请求的 KV 总字节数 |
+| `T`（温度）、`T>0` 等 | $\tau$（`τ>0` 等） | softmax 温度（同章 `[T,D]` 里的 `T` 是 token 数） |
+| `k`、`p`（top-k、top-p 参数） | $\mathrm{top\_k}$、$\mathrm{top\_p}$ | top-k / top-p 参数 |
+| `P=128`、`G=32` | $N_{\mathrm{prompt}}=128$、$N_{\mathrm{out}}=32$ | 最小实验的 prompt / 输出 token 数（`G` 留给 ch10 的 goodput） |
+| 上标 `T`（转置） | 上标 $\top$ | 转置（`T` 留给 token 数） |
 
 ### ch03 EngineCore
 
-| 旧写法 | 新写法 | 含义 | 位置（行号） |
-|---|---|---|---|
-| `P`（PP stage 数） | $\mathrm{PP}$ | pipeline stage 数 | L624、L625 |
+| 旧写法 | 新写法 | 含义 |
+|---|---|---|
+| `P`（PP stage 数） | $\mathrm{PP}$ | pipeline stage 数 |
 
 ### ch04 Scheduler
 
-| 旧写法 | 新写法 | 含义 | 位置（行号） |
-|---|---|---|---|
-| $B_{\mathrm{token}}$ | $N_{\mathrm{budget}}$ | 剩余 token 预算（原文自注「不是字节数」） | L675、L679 |
-| $B_{\mathrm{input}}$ | $N_{\mathrm{budget,in}}$ | 输入侧 token 预算 | L676、L679 |
-| $H_{\mathrm{local}}$、$H_{\mathrm{external}}$（及代码样式 `H_local`、`H_external`） | $N_{\mathrm{hit,local}}$、$N_{\mathrm{hit,ext}}$ | 本地 / 外部前缀命中 token 数 | L977 |
-| $s$ | $\mathrm{pos}_{\mathrm{mm}}$ | 多模态 item 起点位置（`start_pos`） | L1072、L1077、L1081、L1082、L1085、L1086、L1088、L1090、L1096 |
-| $L$ | $N_{\mathrm{mm}}$ | item 占的 encoder token 数（避免与层数 $L$ 冲突） | L1072、L1077、L1081、L1083、L1085 |
-| $c$ | $N_{\mathrm{computed}}$ | 已计算 token 数（同章 L316 起已是 $N_{\mathrm{computed}}$） | L1073、L1077、L1081、L1083、L1085、L1086、L1087、L1088、L1090、L1096、L1201、L1209、L1219、L1220 |
-| $n$、$n'$ | $N_{\mathrm{new}}$、$N_{\mathrm{new}}'$ | 本轮新调度 token 数 | L1074、L1077、L1081、L1083、L1086、L1090、L1096 |
-| $n$ | $N_{\mathrm{new}}$ | 本轮调度 token 数 | L1201、L1209、L1219、L1220 |
-| $T$ | $N_{\mathrm{tokens}}$ | 请求当前已知 token 总数（`num_tokens`；L983 已是 $N_{\mathrm{tokens}}$） | L1201、L1210、L1219 |
-| $O$ | $N_{\mathrm{out}}$ | 已确认输出 token 数 | L1201、L1210、L1219 |
-| $a$ | $a_{\mathrm{async}}$ | async 在途采样步标志（0/1） | L1201、L1210、L1220 |
-| $M$ | $N_{\mathrm{max}}$ | `max_tokens` | L1201、L1211、L1219、L1221 |
-| $c$、$c'$ | $N_{\mathrm{computed}}$、$N_{\mathrm{computed}}'$ | 已计算 token 数 | L1364、L1368、L1372 |
-| $P$、$P'$ | $N_{\mathrm{placeholders}}$、$N_{\mathrm{placeholders}}'$ | `num_output_placeholders`（L322 已是 $N_{\mathrm{placeholders}}$） | L1364、L1368、L1369、L1372 |
-| $I$ | $I_{\mathrm{pf}}$ | `prefill_schedule_interval` | L1497、L1498、L1500、L1508、L1509、L1513、L1518、L1522、L1524、L1525 |
-| $N$ | $n_{\mathrm{step}}$ | 步计数（无单位整数） | L1513、L1518、L1522、L1524、L1525 |
-| $B$ | $\mathrm{cap\_bound}$ | `prefill_capacity_bound` 布尔量（$B$ 只留给批大小） | L1513、L1519、L1523、L1524、L1528、L1543 |
-| `H_local`、`H_external` | $N_{\mathrm{hit,local}}$、$N_{\mathrm{hit,ext}}$ | 前缀命中 token 数 | L974、L975 |
-| `% I` | `% I_pf` | `prefill_schedule_interval` | L1508、L1509 |
-| 图中 `c`、`n`、`s`、`T`、`O`、`a` | `N_computed`、`N_new`、`pos_mm`、`N_tokens`、`N_out`、`a_async` | 判定节点里的符号（纯文本） | L1102、L1103、L1228、L1230 |
-| 图中 `N`、`I` | `n_step`、`I_pf` | prefill 节拍图里的符号（纯文本） | L1532 |
+| 旧写法 | 新写法 | 含义 |
+|---|---|---|
+| $B_{\mathrm{token}}$ | $N_{\mathrm{budget}}$ | 剩余 token 预算（原文自注「不是字节数」） |
+| $B_{\mathrm{input}}$ | $N_{\mathrm{budget,in}}$ | 输入侧 token 预算 |
+| $H_{\mathrm{local}}$、$H_{\mathrm{external}}$（及代码样式 `H_local`、`H_external`） | $N_{\mathrm{hit,local}}$、$N_{\mathrm{hit,ext}}$ | 本地 / 外部前缀命中 token 数 |
+| $s$ | $\mathrm{pos}_{\mathrm{mm}}$ | 多模态 item 起点位置（`start_pos`） |
+| $L$ | $N_{\mathrm{mm}}$ | item 占的 encoder token 数（避免与层数 $L$ 冲突） |
+| $c$ | $N_{\mathrm{computed}}$ | 已计算 token 数（同章后面已是 $N_{\mathrm{computed}}$） |
+| $n$、$n'$ | $N_{\mathrm{new}}$、$N_{\mathrm{new}}'$ | 本轮新调度 token 数 |
+| $n$ | $N_{\mathrm{new}}$ | 本轮调度 token 数 |
+| $T$ | $N_{\mathrm{tokens}}$ | 请求当前已知 token 总数（`num_tokens`；同章后面已是 $N_{\mathrm{tokens}}$） |
+| $O$ | $N_{\mathrm{out}}$ | 已确认输出 token 数 |
+| $a$ | $a_{\mathrm{async}}$ | async 在途采样步标志（0/1） |
+| $M$ | $N_{\mathrm{max}}$ | `max_tokens` |
+| $c$、$c'$ | $N_{\mathrm{computed}}$、$N_{\mathrm{computed}}'$ | 已计算 token 数 |
+| $P$、$P'$ | $N_{\mathrm{placeholders}}$、$N_{\mathrm{placeholders}}'$ | `num_output_placeholders`（同章后面已是 $N_{\mathrm{placeholders}}$） |
+| $I$ | $I_{\mathrm{pf}}$ | `prefill_schedule_interval` |
+| $N$ | $n_{\mathrm{step}}$ | 步计数（无单位整数） |
+| $B$ | $\mathrm{cap\_bound}$ | `prefill_capacity_bound` 布尔量（$B$ 只留给批大小） |
+| `H_local`、`H_external` | $N_{\mathrm{hit,local}}$、$N_{\mathrm{hit,ext}}$ | 前缀命中 token 数 |
+| `% I` | `% I_pf` | `prefill_schedule_interval` |
+| 图中 `c`、`n`、`s`、`T`、`O`、`a` | `N_computed`、`N_new`、`pos_mm`、`N_tokens`、`N_out`、`a_async` | 判定节点里的符号（纯文本） |
+| 图中 `N`、`I` | `n_step`、`I_pf` | prefill 节拍图里的符号（纯文本） |
 
 ### ch05 KV Cache
 
-| 旧写法 | 新写法 | 含义 | 位置（行号） |
-|---|---|---|---|
-| $B_{\mathrm{token}}$ | $M_{\mathrm{tok}}$ | 每 token 的 KV 字节数 | L168、L182、L186、L232 |
-| $B_{\mathrm{sequence}}$ | $M_{\mathrm{seq}}$ | 每序列的 KV 字节数 | L182、L247 |
-| $B_{\mathrm{block}}$ | $M_{\mathrm{blk}}$ | 每 block 的 KV 字节数 | L186、L241 |
-| $B_{\mathrm{dtype}}$ | $b_{\mathrm{elem}}$ | 每个元素的字节数 | L168、L178 |
-| $D_{\mathrm{head}}$ | $d_h$ | 单头宽度 | L168、L177 |
-| `T`（block 大小） | $B_{\mathrm{blk}}$ | block 大小（token 数） | L180、L186 |
-| $T$、$W_{\mathrm{tail}}$ | $B_{\mathrm{blk}}$、$N_{\mathrm{tail}}$ | block 大小；最后一个 block 的尾部空位 token 数 | L365 |
-| $T$ | $B_{\mathrm{blk}}$ | block 大小 | L1644、L1653 |
-| $R$ | $N_{\mathrm{ret}}$ | 滑窗保留 token 数（`num_retained_tokens`） | L1644、L1652 |
-| $p$ | $\mathrm{pos}$ | token 位置 | L1644、L1651 |
-| $H_i$ | $\eta_i$ | 第 $i$ 个 block 的链式 hash（图里写作 `hash_i`） | L1102、L1224、L1230 |
-| $\mathrm{tokens}_i^{+L}$、`L` | $\mathrm{tokens}_i^{+N_{\mathrm{look}}}$ | lookahead token 数（避免与层数 $L$ 冲突） | L1224、L1232、L1234、L1235、L1239、L1240 |
-| 图中 `tokens 0 到 B-1` 等 | `tokens 0 到 B_blk-1` 等 | mermaid 标签用纯文本 | L1110、L1112、L1114 |
-| `L`（lookahead） | $N_{\mathrm{look}}$ | lookahead token 数 | L1241、L1242、L1264、L1536 |
-| `R`、`T`、`p` | $N_{\mathrm{ret}}$、$B_{\mathrm{blk}}$、$\mathrm{pos}$ | 滑窗 null block 的算例（`n_null` 本身不改名） | L1651、L1652、L1653、L1657、L1659 |
-| 图中 `L = 0`、`L = num_prefill_lookahead_tokens` | `N_look = 0`、`N_look = num_prefill_lookahead_tokens` | lookahead（纯文本） | L1248、L1254 |
-| 图中 `p = …`、`R = …` | `pos = …`、`N_ret = …` | 滑窗算例图（纯文本） | L1668、L1669 |
+| 旧写法 | 新写法 | 含义 |
+|---|---|---|
+| $B_{\mathrm{token}}$ | $M_{\mathrm{tok}}$ | 每 token 的 KV 字节数 |
+| $B_{\mathrm{sequence}}$ | $M_{\mathrm{seq}}$ | 每序列的 KV 字节数 |
+| $B_{\mathrm{block}}$ | $M_{\mathrm{blk}}$ | 每 block 的 KV 字节数 |
+| $B_{\mathrm{dtype}}$ | $b_{\mathrm{elem}}$ | 每个元素的字节数 |
+| $D_{\mathrm{head}}$ | $d_h$ | 单头宽度 |
+| `T`（block 大小） | $B_{\mathrm{blk}}$ | block 大小（token 数） |
+| $T$、$W_{\mathrm{tail}}$ | $B_{\mathrm{blk}}$、$N_{\mathrm{tail}}$ | block 大小；最后一个 block 的尾部空位 token 数 |
+| $T$ | $B_{\mathrm{blk}}$ | block 大小 |
+| $R$ | $N_{\mathrm{ret}}$ | 滑窗保留 token 数（`num_retained_tokens`） |
+| $p$ | $\mathrm{pos}$ | token 位置 |
+| $H_i$ | $\eta_i$ | 第 $i$ 个 block 的链式 hash（图里写作 `hash_i`） |
+| $\mathrm{tokens}_i^{+L}$、`L` | $\mathrm{tokens}_i^{+N_{\mathrm{look}}}$ | lookahead token 数（避免与层数 $L$ 冲突） |
+| 图中 `tokens 0 到 B-1` 等 | `tokens 0 到 B_blk-1` 等 | mermaid 标签用纯文本 |
+| `L`（lookahead） | $N_{\mathrm{look}}$ | lookahead token 数 |
+| `R`、`T`、`p` | $N_{\mathrm{ret}}$、$B_{\mathrm{blk}}$、$\mathrm{pos}$ | 滑窗 null block 的算例（`n_null` 本身不改名） |
+| 图中 `L = 0`、`L = num_prefill_lookahead_tokens` | `N_look = 0`、`N_look = num_prefill_lookahead_tokens` | lookahead（纯文本） |
+| 图中 `p = …`、`R = …` | `pos = …`、`N_ret = …` | 滑窗算例图（纯文本） |
 
 ### ch06 PagedAttention
 
-| 旧写法 | 新写法 | 含义 | 位置（行号） |
-|---|---|---|---|
-| $B$ | $B_{\mathrm{blk}}$ | block 大小 | L233、L236、L240、L248、L499、L512、L515、L1445 |
-| $p$ | $\mathrm{pos}$ | token 位置 | L232、L236、L240、L277 |
-| $o$（block 内偏移） | $\mathrm{off}$ | block 内偏移（$o$ 留给 attention 输出向量） | L240、L248、L255、L277 |
-| $p_0$ | $\mathrm{pos}_0$ | 窗口里首个 query 的位置 | L499、L503、L508、L515 |
-| $R$ | $N_{\mathrm{ret}}$ | 滑窗保留 token 数 | L499、L503、L509、L515 |
-| $L_{\max}$ | $E_{\mathrm{max}}$ | 一次 staged 写入的最长元素数（避免与层数 $L$ 冲突） | L552、L560、L565 |
-| $q_r$ | $\mathrm{qsl}_r$ | `query_start_loc[r]`（$q$ 留给 query 向量） | L706、L712 |
-| $L^Q_r$ | $N_{q,r}$ | 请求 $r$ 本步的 query token 数 | L712、L730 |
-| $L^{\mathrm{seq}}_r$、$L^{\mathrm{context}}_r$ | $S_r$、$N_{\mathrm{ctx},r}$ | 请求 $r$ 的可见序列长度；已有上下文 token 数 | L730 |
-| $\sqrt d$ | $\sqrt{d_h}$ | 单头宽度 | L1431 |
-| $p_j$（attention 权重） | $a_j$ | attention 权重（$p_i$ 只留给概率） | L1435、L1439 |
-| `B=4` | $B_{\mathrm{blk}}=4$ | block 大小 | L275 |
-| $\ell$、$\ell'$ | $Z$、$Z'$ | 在线 softmax 的归一化分母（$\ell$ 留给 ch09 的本机 rank） | L1527、L1534、L1538、L1541 |
-| `A`、`K`、`r=A/K`、`m` | $B_{\mathrm{mgr}}$、$B_{\mathrm{ker}}$、$\kappa=B_{\mathrm{mgr}}/B_{\mathrm{ker}}$、$i_{\mathrm{mgr}}$ | manager / kernel block 大小与换算（`A/K/r/m` 与矩阵 $A,K$、请求下标 $r$、在线 softmax 的 $m$ 冲突） | L316、L317、L318、L348、L365 |
-| 图中 `b times B` | `b times B_blk` | 地址公式图（纯文本） | L264、L265 |
-| 图中 `n_null = floor(max(p0-R, 0) / B)` | `n_null = floor(max(pos_0-N_ret, 0) / B_blk)` | null block 图（纯文本） | L522 |
+| 旧写法 | 新写法 | 含义 |
+|---|---|---|
+| $B$ | $B_{\mathrm{blk}}$ | block 大小 |
+| $p$ | $\mathrm{pos}$ | token 位置 |
+| $o$（block 内偏移） | $\mathrm{off}$ | block 内偏移（$o$ 留给 attention 输出向量） |
+| $p_0$ | $\mathrm{pos}_0$ | 窗口里首个 query 的位置 |
+| $R$ | $N_{\mathrm{ret}}$ | 滑窗保留 token 数 |
+| $L_{\max}$ | $E_{\mathrm{max}}$ | 一次 staged 写入的最长元素数（避免与层数 $L$ 冲突） |
+| $q_r$ | $\mathrm{qsl}_r$ | `query_start_loc[r]`（$q$ 留给 query 向量） |
+| $L^Q_r$ | $N_{q,r}$ | 请求 $r$ 本步的 query token 数 |
+| $L^{\mathrm{seq}}_r$、$L^{\mathrm{context}}_r$ | $S_r$、$N_{\mathrm{ctx},r}$ | 请求 $r$ 的可见序列长度；已有上下文 token 数 |
+| $\sqrt d$ | $\sqrt{d_h}$ | 单头宽度 |
+| $p_j$（attention 权重） | $a_j$ | attention 权重（$p_i$ 只留给概率） |
+| `B=4` | $B_{\mathrm{blk}}=4$ | block 大小 |
+| $\ell$、$\ell'$ | $Z$、$Z'$ | 在线 softmax 的归一化分母（$\ell$ 留给 ch09 的本机 rank） |
+| `A`、`K`、`r=A/K`、`m` | $B_{\mathrm{mgr}}$、$B_{\mathrm{ker}}$、$\kappa=B_{\mathrm{mgr}}/B_{\mathrm{ker}}$、$i_{\mathrm{mgr}}$ | manager / kernel block 大小与换算（`A/K/r/m` 与矩阵 $A,K$、请求下标 $r$、在线 softmax 的 $m$ 冲突） |
+| 图中 `b times B` | `b times B_blk` | 地址公式图（纯文本） |
+| 图中 `n_null = floor(max(p0-R, 0) / B)` | `n_null = floor(max(pos_0-N_ret, 0) / B_blk)` | null block 图（纯文本） |
 
 ### ch07 模型执行
 
-| 旧写法 | 新写法 | 含义 | 位置（行号） |
-|---|---|---|---|
-| $M_{\mathrm{requested}}$ | $M_{\mathrm{req}}$ | `requested_memory` | L611 |
-| $M_{\mathrm{graph},\mathrm{applied}}$ | $M_{\mathrm{graph}}$ | `cudagraph_memory_estimate`（“applied”只是旧写法里的描述性下标） | L611、L621 |
-| $T$（温度） | $\tau$ | softmax 温度 | L1100 |
-| $H(x)$、$H$ | $\mathcal H(x)$、$\mathcal H$ | top-k 熵（$H$ 留给 head 数） | L1353、L1357、L1359、L1361 |
-| `T>0`、`T=0`、`T=1` | `τ>0`、`τ=0`、`τ=1` | softmax 温度 | L1104、L1105 |
+| 旧写法 | 新写法 | 含义 |
+|---|---|---|
+| $M_{\mathrm{requested}}$ | $M_{\mathrm{req}}$ | `requested_memory` |
+| $M_{\mathrm{graph},\mathrm{applied}}$ | $M_{\mathrm{graph}}$ | `cudagraph_memory_estimate`（“applied”只是旧写法里的描述性下标） |
+| $T$（温度） | $\tau$ | softmax 温度 |
+| $H(x)$、$H$ | $\mathcal H(x)$、$\mathcal H$ | top-k 熵（$H$ 留给 head 数） |
+| `T>0`、`T=0`、`T=1` | `τ>0`、`τ=0`、`τ=1` | softmax 温度 |
 
 ### ch08 compile / CUDA Graph
 
-| 旧写法 | 新写法 | 含义 | 位置（行号） |
-|---|---|---|---|
-| $T_{\mathrm{step}}$、$T_{\mathrm{sched}}$ 等 | $\Delta t_{\mathrm{step}}$、$\Delta t_{\mathrm{sched}}$ 等 | 耗时 | L128、L131 |
-| $M_{\mathrm{available\ KV}}$、$M_{\mathrm{graph\ reserve}}$ | $M_{\mathrm{KV}}$、$M_{\mathrm{graph}}$ | 可给 KV 的显存、graph 预留 | L1682 |
-| $M_{\mathrm{requested}}$ | $M_{\mathrm{req}}$ | `requested_memory` | L1682 |
-| `P`（PP stage 数） | $\mathrm{PP}$ | pipeline stage 数 | L287 |
+| 旧写法 | 新写法 | 含义 |
+|---|---|---|
+| $T_{\mathrm{step}}$、$T_{\mathrm{sched}}$ 等 | $\Delta t_{\mathrm{step}}$、$\Delta t_{\mathrm{sched}}$ 等 | 耗时 |
+| $M_{\mathrm{available\ KV}}$、$M_{\mathrm{graph\ reserve}}$ | $M_{\mathrm{KV}}$、$M_{\mathrm{graph}}$ | 可给 KV 的显存、graph 预留 |
+| $M_{\mathrm{requested}}$ | $M_{\mathrm{req}}$ | `requested_memory` |
+| `P`（PP stage 数） | $\mathrm{PP}$ | pipeline stage 数 |
 
 ### ch09 分布式
 
-| 旧写法 | 新写法 | 含义 | 位置（行号） |
-|---|---|---|---|
-| $d$（DP 序号） | $i_{\mathrm{dp}}$ | DP engine 序号 | L171、L178、L180 |
-| $A_{p-1}$、$X_{p-1}$、`p` | $A_{\mathrm{TP}-1}$、$X_{\mathrm{TP}-1}$ | TP 路数（$p$ 只留给概率/位置的旧用法） | L432、L443、L447、L469 |
-| $P_i$、`P_i` | $Y^{\mathrm{part}}_i$ | 行并行下第 $i$ 个分片的 partial output | L478、L484、L488 |
-| $T_{\mathrm{layer}}(p)$ 等 | $\Delta t_{\mathrm{layer}}(\mathrm{TP})$ 等 | TP 路数与耗时 | L553、L557 |
-| $n_i$ | $N_{\mathrm{row},i}$ | logits 行数 | L693、L700、L701、L702 |
-| $s_i$ | $N_{\mathrm{sch},i}$ | 本步调度的 token 数 | L693、L699、L701 |
-| $d_i$ | $N_{\mathrm{drf},i}$ | draft token 数（避免与 $d$ 冲突） | L693、L699、L700、L701 |
-| $a_i$ | $N_{\mathrm{acc},i}$ | 被接受的 draft token 数 | L693、L700、L701 |
-| $W_i$（waiting） | $n_{\mathrm{wait},i}$ | engine $i$ 的 waiting 请求数（$W$ 只指 world size） | L820、L826 |
-| $R_i$ | $n_{\mathrm{run},i}$ | engine $i$ 的 running 请求数 | L820 |
-| $U_i$ | $\rho_{\mathrm{kv},i}$ | KV 使用率（0–1） | L826 |
-| $C$ | $n_{\mathrm{cli}}$ | client 数 | L820、L830 |
-| $I_i$ | $n_{\mathrm{fly},i}$ | client 观察到的 engine $i$ in-flight 数 | L820、L830 |
-| $N$（DP group 大小） | $\mathrm{DP}$ | DP group 大小（`dp_group.size()`） | L923、L927、L932、L934、L942、L949、L957、L972 |
-| $S_0$ | $\Sigma_u$ | `has_unfinished` 之和 | L923、L927、L935、L954 |
-| $S_1$ | $\Sigma_f$ | 暂停标志之和 | L923、L927、L932、L935 |
-| $p_r$ | $f_r$ | rank $r$ 是否有待处理的暂停请求（0/1） | L923、L935 |
-| $B$（块大小） | $G_2$ | all-reduce 的 2 的幂分组大小 | L942、L945、L946、L949、L953、L957 |
-| $M=N/B$ | $n_{\mathrm{grp}}=\mathrm{DP}/G_2$ | 分组数 | L942、L949、L957 |
-| $P$ | $\mathrm{PCP}$ | PCP 大小 | L1261、L1268、L1275、L1277 |
-| $m_{r,t}$ | $\mathrm{pad}_{r,t}$ | padding 掩码（$m$ 留给在线 softmax 的最大值） | L1268、L1276 |
-| $n_r$ | $N_r$ | rank $r$ 的真实 token 数 | L1268、L1275、L1277 |
-| $I$ | $I_{\mathrm{il}}$ | `cp_kv_cache_interleave_size` | L1308、L1312 |
-| $p$ | $\mathrm{pos}$ | token 位置 | L1308、L1312 |
-| $L$、$L_i$、`L_i` | $\mathrm{LSE}$、$\mathrm{LSE}_i$ | Log-Sum-Exp（$L$ 只指层数） | L1334、L1336、L1342 |
-| $n_i$ | $N_{\mathrm{rt},i}$ | 路由到 expert rank $i$ 的 token 数 | L1058、L1060 |
-| $T_{\mathrm{EP}}$、$T_{\mathrm{dispatch}}$ 等 | $\Delta t_{\mathrm{EP}}$、$\Delta t_{\mathrm{dispatch}}$ 等 | 耗时 | L1060 |
-| $T_{\mathrm{comm}}$ | $\Delta t_{\mathrm{comm}}$ | 耗时 | L1728 |
-| $B_{\mathrm{payload}}$ | $M_{\mathrm{payload}}$ | 通信负载字节数 | L1728、L1733 |
-| `Q_1`、$Q_p$、`Q_p`、$p$（卡数） | $\mathrm{thr}(1)$、$\mathrm{thr}(n_{\mathrm{GPU}})$、$n_{\mathrm{GPU}}$ | $n_{\mathrm{GPU}}$ 卡时的吞吐与卡数（$Q$ 留给 Query 矩阵） | L1739、L1741、L1745 |
-| `Dout/p`、`Din/p` | `D_out/TP`、`D_in/TP` | TP 路数 | L444、L488 |
-| 图中 `u, p`、`B = N`、`M` | `u, f`、`G_2`（`DP` 的最大 2 的幂因子）、`n_grp` | DP all-reduce 图（纯文本） | L961、L965、L966 |
+| 旧写法 | 新写法 | 含义 |
+|---|---|---|
+| $d$（DP 序号） | $i_{\mathrm{dp}}$ | DP engine 序号 |
+| $A_{p-1}$、$X_{p-1}$、`p` | $A_{\mathrm{TP}-1}$、$X_{\mathrm{TP}-1}$ | TP 路数（$p$ 只留给概率/位置的旧用法） |
+| $P_i$、`P_i` | $Y^{\mathrm{part}}_i$ | 行并行下第 $i$ 个分片的 partial output |
+| $T_{\mathrm{layer}}(p)$ 等 | $\Delta t_{\mathrm{layer}}(\mathrm{TP})$ 等 | TP 路数与耗时 |
+| $n_i$ | $N_{\mathrm{row},i}$ | logits 行数 |
+| $s_i$ | $N_{\mathrm{sch},i}$ | 本步调度的 token 数 |
+| $d_i$ | $N_{\mathrm{drf},i}$ | draft token 数（避免与 $d$ 冲突） |
+| $a_i$ | $N_{\mathrm{acc},i}$ | 被接受的 draft token 数 |
+| $W_i$（waiting） | $n_{\mathrm{wait},i}$ | engine $i$ 的 waiting 请求数（$W$ 只指 world size） |
+| $R_i$ | $n_{\mathrm{run},i}$ | engine $i$ 的 running 请求数 |
+| $U_i$ | $\rho_{\mathrm{kv},i}$ | KV 使用率（0–1） |
+| $C$ | $n_{\mathrm{cli}}$ | client 数 |
+| $I_i$ | $n_{\mathrm{fly},i}$ | client 观察到的 engine $i$ in-flight 数 |
+| $N$（DP group 大小） | $\mathrm{DP}$ | DP group 大小（`dp_group.size()`） |
+| $S_0$ | $\Sigma_u$ | `has_unfinished` 之和 |
+| $S_1$ | $\Sigma_f$ | 暂停标志之和 |
+| $p_r$ | $f_r$ | rank $r$ 是否有待处理的暂停请求（0/1） |
+| $B$（块大小） | $G_2$ | all-reduce 的 2 的幂分组大小 |
+| $M=N/B$ | $n_{\mathrm{grp}}=\mathrm{DP}/G_2$ | 分组数 |
+| $P$ | $\mathrm{PCP}$ | PCP 大小 |
+| $m_{r,t}$ | $\mathrm{pad}_{r,t}$ | padding 掩码（$m$ 留给在线 softmax 的最大值） |
+| $n_r$ | $N_r$ | rank $r$ 的真实 token 数 |
+| $I$ | $I_{\mathrm{il}}$ | `cp_kv_cache_interleave_size` |
+| $p$ | $\mathrm{pos}$ | token 位置 |
+| $L$、$L_i$、`L_i` | $\mathrm{LSE}$、$\mathrm{LSE}_i$ | Log-Sum-Exp（$L$ 只指层数） |
+| $n_i$ | $N_{\mathrm{rt},i}$ | 路由到 expert rank $i$ 的 token 数 |
+| $T_{\mathrm{EP}}$、$T_{\mathrm{dispatch}}$ 等 | $\Delta t_{\mathrm{EP}}$、$\Delta t_{\mathrm{dispatch}}$ 等 | 耗时 |
+| $T_{\mathrm{comm}}$ | $\Delta t_{\mathrm{comm}}$ | 耗时 |
+| $B_{\mathrm{payload}}$ | $M_{\mathrm{payload}}$ | 通信负载字节数 |
+| `Q_1`、$Q_p$、`Q_p`、$p$（卡数） | $\mathrm{thr}(1)$、$\mathrm{thr}(n_{\mathrm{GPU}})$、$n_{\mathrm{GPU}}$ | $n_{\mathrm{GPU}}$ 卡时的吞吐与卡数（$Q$ 留给 Query 矩阵） |
+| `Dout/p`、`Din/p` | `D_out/TP`、`D_in/TP` | TP 路数 |
+| 图中 `u, p`、`B = N`、`M` | `u, f`、`G_2`（`DP` 的最大 2 的幂因子）、`n_grp` | DP all-reduce 图（纯文本） |
 
 ### ch10 实验方法
 
-| 旧写法 | 新写法 | 含义 | 位置（行号） |
-|---|---|---|---|
-| `T`、$T$（benchmark 时长） | $\Delta t_{\mathrm{bench}}$ | benchmark 时长 | L283、L286、L290、L294、L307 |
-| `R` | $n_{\mathrm{req}}$ | 成功请求数（请求数是计数，用 $n_{\dots}$） | L283、L286 |
-| `I` | $N_{\mathrm{in}}^{\Sigma}$ | 成功请求的输入 token 总数 | L284、L294 |
-| `O` | $N_{\mathrm{out}}^{\Sigma}$ | 成功请求的输出 token 总数 | L284、L290、L294 |
-| $S_{\mathrm{ttft}}$、$S_{\mathrm{tpot}}$、$S_{\mathrm{e2el}}$ | $\mathrm{SLO}_{\mathrm{ttft}}$、$\mathrm{SLO}_{\mathrm{tpot}}$、$\mathrm{SLO}_{\mathrm{e2el}}$ | SLO 阈值 | L303、L304 |
-| $R_{\mathrm{SLO}}$ | $n_{\mathrm{SLO}}$ | 达标请求数 | L305、L307 |
-| $N$ | $N_{\mathrm{out}}$ | 单个请求的输出 token 数 | L150、L170、L183、L185 |
-| $T_{\mathrm{client\ queue}}$ | $\Delta t_{\mathrm{client\ queue}}$ | 客户端排队耗时 | L152 |
-| $T_{\mathrm{queue}}$、$T_{\mathrm{prefill}}$、$T_{\mathrm{decode}}$、$T_{\mathrm{inference}}$ | $\Delta t_{\mathrm{queue}}$、$\Delta t_{\mathrm{prefill}}$、$\Delta t_{\mathrm{decode}}$、$\Delta t_{\mathrm{inference}}$ | 单个请求的四段耗时（$\Delta t_{\mathrm{queue}}$ 只指单个请求的排队等待） | L729、L733、L737、L741 |
-| $L$、$L_q$ | $n_{\mathrm{sys}}$、$n_{\mathrm{queue}}$ | 系统内 / 队列内平均请求数（$L$ 只指层数） | L909、L911 |
-| $W$、$W_q$ | $\overline{\Delta t}_{\mathrm{sys}}$、$\overline{\Delta t}_{\mathrm{wait}}$ | 系统内 / 队列内的**平均**停留时间（$W$ 只指 world size；带横线，与 L729 单个请求的 $\Delta t_{\mathrm{queue}}$ 区分） | L909、L910、L911 |
-| $S_{\mathrm{total}}$ | $\mathrm{speedup}_{\mathrm{total}}$ | 端到端加速比（与 ch09 L1741 的 $\mathrm{speedup}$ 同族） | L1255 |
-| `N>1` | $N_{\mathrm{out}}>1$ | 输出 token 数 | L168、L183、L185 |
-| $Q_{\mathrm{out}}$、$Q_{\mathrm{user}}$、$Q_{\mathrm{GPU}}$ | $\mathrm{thr}_{\mathrm{out}}$、$\mathrm{thr}_{\mathrm{user}}$、$\mathrm{thr}_{\mathrm{GPU}}$ | 吞吐（$Q$ 留给 Query 矩阵） | L1472、L1475、L1479、L1483 |
-| $N_{\mathrm{users}}$、$N_{\mathrm{GPU}}$ | $n_{\mathrm{users}}$、$n_{\mathrm{GPU}}$ | 用户数、GPU 数（计数，用 $n_{\dots}$；$N_{\dots}$ 的单位是 token） | L1472、L1473、L1475、L1479 |
+| 旧写法 | 新写法 | 含义 |
+|---|---|---|
+| `T`、$T$（benchmark 时长） | $\Delta t_{\mathrm{bench}}$ | benchmark 时长 |
+| `R` | $n_{\mathrm{req}}$ | 成功请求数（请求数是计数，用 $n_{\dots}$） |
+| `I` | $N_{\mathrm{in}}^{\Sigma}$ | 成功请求的输入 token 总数 |
+| `O` | $N_{\mathrm{out}}^{\Sigma}$ | 成功请求的输出 token 总数 |
+| $S_{\mathrm{ttft}}$、$S_{\mathrm{tpot}}$、$S_{\mathrm{e2el}}$ | $\mathrm{SLO}_{\mathrm{ttft}}$、$\mathrm{SLO}_{\mathrm{tpot}}$、$\mathrm{SLO}_{\mathrm{e2el}}$ | SLO 阈值 |
+| $R_{\mathrm{SLO}}$ | $n_{\mathrm{SLO}}$ | 达标请求数 |
+| $N$ | $N_{\mathrm{out}}$ | 单个请求的输出 token 数 |
+| $T_{\mathrm{client\ queue}}$ | $\Delta t_{\mathrm{client\ queue}}$ | 客户端排队耗时 |
+| $T_{\mathrm{queue}}$、$T_{\mathrm{prefill}}$、$T_{\mathrm{decode}}$、$T_{\mathrm{inference}}$ | $\Delta t_{\mathrm{queue}}$、$\Delta t_{\mathrm{prefill}}$、$\Delta t_{\mathrm{decode}}$、$\Delta t_{\mathrm{inference}}$ | 单个请求的四段耗时（$\Delta t_{\mathrm{queue}}$ 只指单个请求的排队等待） |
+| $L$、$L_q$ | $n_{\mathrm{sys}}$、$n_{\mathrm{queue}}$ | 系统内 / 队列内平均请求数（$L$ 只指层数） |
+| $W$、$W_q$ | $\overline{\Delta t}_{\mathrm{sys}}$、$\overline{\Delta t}_{\mathrm{wait}}$ | 系统内 / 队列内的**平均**停留时间（$W$ 只指 world size；带横线，与单个请求的 $\Delta t_{\mathrm{queue}}$ 区分） |
+| $S_{\mathrm{total}}$ | $\mathrm{speedup}_{\mathrm{total}}$ | 端到端加速比（与 ch09 的 $\mathrm{speedup}$ 同族） |
+| `N>1` | $N_{\mathrm{out}}>1$ | 输出 token 数 |
+| $Q_{\mathrm{out}}$、$Q_{\mathrm{user}}$、$Q_{\mathrm{GPU}}$ | $\mathrm{thr}_{\mathrm{out}}$、$\mathrm{thr}_{\mathrm{user}}$、$\mathrm{thr}_{\mathrm{GPU}}$ | 吞吐（$Q$ 留给 Query 矩阵） |
+| $N_{\mathrm{users}}$、$N_{\mathrm{GPU}}$ | $n_{\mathrm{users}}$、$n_{\mathrm{GPU}}$ | 用户数、GPU 数（计数，用 $n_{\dots}$；$N_{\dots}$ 的单位是 token） |
 
 ## 5 写法规则
 
@@ -375,7 +374,7 @@ $n_{\mathrm{users}}$、$n_{\mathrm{GPU}}$，不写 $N_{\dots}$。
 5. mermaid 的标签不能用 LaTeX 或 HTML（`epub/mermaid-config.json` 里 `htmlLabels` 为 `false`），符号写成纯文本：
    `d_h`、`B_blk`、`M_tok`、`hash_i`、`tau`。
 6. 公式前后的文字：首次出现时必须说明每个符号、shape、单位和这个公式回答的问题（`AGENTS.md` §8）；用第 6 节的模板写。
-7. 新增一个全局符号要改本文件的第 1 节；只在某一节里用的字母写进第 3 节，并在正文里用“其中”定义。
+7. 第 1 节登记带固定含义的命名符号（可以只在一章里出现）；第 3 节登记只在一节里用的裸字母，并在正文里用“其中”定义。新增前者改第 1 节，新增后者改第 3 节。
 
 ## 6 公式讲解模板
 
@@ -441,7 +440,7 @@ $$
 
 ## 8 共享文件与维护约定
 
-- 本文件（`glossary/notation.md`）是全书符号的唯一登记处：新增全局符号改第 1 节，只在一节里用的字母写进第 3 节；
-  改名后在第 4 节追加一行。第 1 节与第 3 节的符号互不相交、每个全局符号只登记一次，由 `tests/test_notation.py` 检查。
+- 本文件（`glossary/notation.md`）是全书符号的唯一登记处：第 1 节是带固定含义的命名符号（可以只在一章里出现），
+  第 3 节是只在一节里用的裸字母；改名后在第 4 节追加一行。第 1 节与第 3 节的符号互不相交、第 1 节的符号只登记一次，由 `tests/test_notation.py` 检查。
 - `glossary/terms.md`、`book/README.md`、`book/reading-guide.md`：术语表、总览和阅读指南，改符号约定时同步检查。
 - 章节保持 `draft`、`runtime_verified: false`；源码引用保持 pin `05caae03c20f69436ff7ec23ded339ea104f1a01`。

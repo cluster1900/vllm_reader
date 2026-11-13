@@ -7,6 +7,19 @@ from scripts.math_support import ROOT, check_math
 from scripts.notation_census import WRAPPER, census, code_symbols, flatten_scripts, formula_symbols, render
 
 
+PROCESS_TALK = [
+    r"meta/",
+    r"\bmeta[-\s]+(?:file|note|doc|review|tracking)",
+    r"\b[Rr]eview(?:er)?s?\b",              # does not match pedagogy_reviewed_at
+    r"\bB9\b", r"B1[-–]B8", r"\bB\d+\s*批次", r"批次\s*(?:B\d|PR|开工|补写|改写)",
+    r"(?:后续|各|每个?|本|上一个?|下一个?|该|新|F/D\s*)批次",
+    r"bot-hub", r"\btracker\b", r"本\s*PR\b", r"独立审阅",
+    r"上一轮(?:审阅|评审|review|复核|改写|修订|批次|PR)", r"5893426b",
+    r"applied_cudagraph_memory_estimate",
+]
+PROCESS_PATTERN = re.compile("|".join(f"(?:{item})" for item in PROCESS_TALK))
+
+
 def _section(text: str, start: str, end: str) -> str:
     return text.split(start, 1)[1].split(end, 1)[0]
 
@@ -148,7 +161,7 @@ class NotationGuideTest(unittest.TestCase):
             _section(self.text, "## 3 局部字母表", "## 4 改名对照表"))
         unregistered = {}
         for row in _table_rows(_section(self.text, "## 4 改名对照表", "## 5 写法规则")):
-            if len(row) < 4 or row[0] == "旧写法":
+            if len(row) < 3 or row[0] == "旧写法":
                 continue
             for key in keys(row[1]) - registered:
                 unregistered[key] = row[1]
@@ -172,16 +185,29 @@ class NotationGuideTest(unittest.TestCase):
         self.assertIn("**其他位置**只在**确实复杂**时才配图", rule)
 
     def test_reader_text_has_no_process_talk(self):
-        """The notation guide and the chapters are reader text: no batches, review history or meta pointers."""
-        texts = {"glossary/notation.md": self.text}
-        for path in sorted((ROOT / "book").glob("*/README.md")) + [ROOT / "book/README.md", ROOT / "book/reading-guide.md"]:
-            texts[str(path.relative_to(ROOT))] = path.read_text(encoding="utf-8")
+        """The notation guide and the chapters are reader text: no batches, review history or meta pointers.
+
+        Technical uses stay legal: 固定批次、局部批次、微批次、多批次 (a batch of requests), 上一轮 (the previous
+        scheduling round), vLLM PR citations such as #63098, and the front-matter key pedagogy_reviewed_at.
+        """
+        pattern = PROCESS_PATTERN
+        paths = sorted((ROOT / "book").glob("*/README.md")) + [
+            ROOT / "book/README.md", ROOT / "book/reading-guide.md", ROOT / "glossary/notation.md"]
         found = {}
-        for name, text in texts.items():
-            for needle in ("meta/", "后续批次", "批次 PR", "B1–B8", "5893426b", "review 提出", "applied_cudagraph_memory_estimate"):
-                if needle in text:
-                    found.setdefault(name, []).append(needle)
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            hits = sorted({m.group(0) for m in pattern.finditer(text)})
+            if hits:
+                found[str(path.relative_to(ROOT))] = hits
         self.assertEqual(found, {})
+
+    def test_process_pattern_separates_process_from_technical_uses(self):
+        for text in ("后续批次补写", "B9 收尾", "见 meta/notes.md", "bot-hub#128", "本 PR 只改符号", "由独立审阅者复核",
+                     "上一轮审阅提出", "the review comments", "每个批次负责一章"):
+            self.assertTrue(PROCESS_PATTERN.search(text), text)
+        for text in ("固定批次完成时间", "局部批次携带全局信息", "双批次重叠微批次", "多批次在途", "上一轮 GPU 重叠",
+                     "pedagogy_reviewed_at: 2026-10-08", "见 vLLM #63098", "本轮批次行"):
+            self.assertIsNone(PROCESS_PATTERN.search(text), text)
 
     def test_descriptive_subscript_families_used_in_chapters_are_registered(self):
         """N_{..}, n_{..}, t_{..} and \\Delta t_{..} symbols that chapters use must be in section 1 or 3."""
